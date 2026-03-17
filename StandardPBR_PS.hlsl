@@ -32,6 +32,7 @@ float4 main(VSOutput input) : SV_TARGET
 {
     // 1. Sample textures（質感はピクセル単位でマップから自動判別）
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
+    clip(albedo.a - 0.5f);
     // sRGB → リニア（アルベドのみ。法線/メタル/ラフはデータなので変換しない）
     albedo.rgb = pow(albedo.rgb, 2.2);
     float4 nSample = _NormalMap.Sample(smp, input.uv);

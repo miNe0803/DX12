@@ -1,4 +1,4 @@
-﻿#include "Scene.h"
+#include "Scene.h"
 #include "Engine.h"
 #include "App.h"
 #include <d3dx12.h>
@@ -268,6 +268,9 @@ bool Scene::Init()
 	{
 		s_postProcessSettings.exposure = 1.0f;
 		s_postProcessSettings.gamma = 2.2f;
+		s_postProcessSettings.bloomIntensity = 0.6f;
+		s_postProcessSettings.threshold = 0.8f;
+		s_postProcessSettings.blurSize = 2.0f;
 		ID3D12Resource* hdrRes = g_Engine->GetHdrColorResource();
 		if (hdrRes)
 		{
@@ -279,7 +282,9 @@ bool Scene::Init()
 			s_hdrSrvHandle = descriptorHeap->RegisterResource(hdrRes, srvDesc);
 		}
 		s_postProcess = new PostProcessSystem();
-		if (s_postProcess && !s_postProcess->Init(g_Engine->Device()))
+		UINT w = g_Engine->GetFrameBufferWidth();
+		UINT h = g_Engine->GetFrameBufferHeight();
+		if (s_postProcess && !s_postProcess->Init(g_Engine->Device(), descriptorHeap, w, h))
 		{
 			delete s_postProcess;
 			s_postProcess = nullptr;
@@ -385,6 +390,6 @@ void Scene::Draw()
 		commandList->ResourceBarrier(barrierCount, barriers);
 
 		commandList->SetDescriptorHeaps(1, &materialHeap);
-		s_postProcess->Execute(commandList, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings);
+		s_postProcess->Execute(commandList, materialHeap, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings);
 	}
 }

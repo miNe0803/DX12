@@ -225,6 +225,12 @@
     <FxCompile Include="Shaders\PostProcess\ToneMap_PS.hlsl">
       <Filter>PostProcess</Filter>
     </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\bloom_extract_ps.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\bloom_blur_ps.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
     <FxCompile Include="StandardPBR_PS.hlsl">
       <Filter>リソース ファイル</Filter>
     </FxCompile>
