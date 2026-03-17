@@ -71,13 +71,23 @@ bool Texture2D::Load(std::wstring& path)
 		return false;
 	}
 
+	// D3D12 は Width/Height/DepthOrArraySize が 0 のリソースを許可しない
+	if (meta.width == 0 || meta.height == 0)
+		return false;
+
+	const UINT16 arraySize = (meta.arraySize > 0) ? static_cast<UINT16>(meta.arraySize) : 1;
+	const UINT16 mipLevels = (meta.mipLevels > 0) ? static_cast<UINT16>(meta.mipLevels) : 1;
+
 	auto img = scratch.GetImage(0, 0, 0);
+	if (img == nullptr)
+		return false;
+
 	auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_L0);
 	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(meta.format,
 		meta.width,
 		meta.height,
-		static_cast<UINT16>(meta.arraySize),
-		static_cast<UINT16>(meta.mipLevels));
+		arraySize,
+		mipLevels);
 
 	// リソースを生成
 	hr = g_Engine->Device()->CreateCommittedResource(

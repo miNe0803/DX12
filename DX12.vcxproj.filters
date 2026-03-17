@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="ソース ファイル">
@@ -12,6 +12,28 @@
     <Filter Include="リソース ファイル">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source">
+      <UniqueIdentifier>{B0862B6E-7B27-4B1A-9A2D-7B4C5D6E7F8A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Graphics">
+      <UniqueIdentifier>{C1973B7F-8E38-4C2B-0B3E-8C5D6E7F9A1B}</UniqueIdentifier>
+      <Filter>Source</Filter>
+    </Filter>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{D2A84C80-9F49-4D3C-1C4F-9D6E7F0A2B3C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="IBL">
+      <UniqueIdentifier>{E3B95D91-A05A-4E4D-2D50-AE7F8F1B3C4D}</UniqueIdentifier>
+      <Filter>Shaders</Filter>
+    </Filter>
+    <Filter Include="Skybox">
+      <UniqueIdentifier>{F4CA6EA2-B16B-4F5E-3E61-BF8A9F2C4D5E}</UniqueIdentifier>
+      <Filter>Shaders</Filter>
+    </Filter>
+    <Filter Include="PostProcess">
+      <UniqueIdentifier>{A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D}</UniqueIdentifier>
+      <Filter>Shaders</Filter>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -72,6 +94,27 @@
     <ClInclude Include="PipelineState.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Graphics\EXRLoader.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\IBLGenerator.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\SkyboxRenderer.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\PostProcessSettings.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\PostProcessSystem.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Camera.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="Components.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DX12.cpp">
@@ -90,6 +133,9 @@
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="Engine.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="EngineBarrier.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="IndexBuffer.cpp">
@@ -116,6 +162,21 @@
     <ClCompile Include="PipelineState.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Graphics\EXRLoader.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\IBLGenerator.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\SkyboxRenderer.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\PostProcessSystem.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Camera.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DX12.rc">
@@ -131,7 +192,38 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="SimplePS.hlsl" />
-    <FxCompile Include="SimpleVS.hlsl" />
+    <FxCompile Include="SimplePS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="SimpleVS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\IBL\Equirect2Cube_CS.hlsl">
+      <Filter>IBL</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\Skybox\Skybox_PS.hlsl">
+      <Filter>Skybox</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\Skybox\Skybox_VS.hlsl">
+      <Filter>Skybox</Filter>
+    </FxCompile>
+    <FxCompile Include="BRDF_Lut_CS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Irradiance_CS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Prefilter_CS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\ToneMap_VS.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\ToneMap_PS.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
+    <FxCompile Include="StandardPBR_PS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

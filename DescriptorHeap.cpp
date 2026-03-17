@@ -67,3 +67,43 @@ DescriptorHandle* DescriptorHeap::Register(Texture2D* texture)
 	m_pHandles.push_back(pHandle);
 	return pHandle;
 }
+
+DescriptorHandle* DescriptorHeap::RegisterResource(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc)
+{
+	if (resource == nullptr) return nullptr;
+	auto count = m_pHandles.size();
+	if (HANDLE_MAX <= count) return nullptr;
+
+	DescriptorHandle* pHandle = new DescriptorHandle();
+	D3D12_CPU_DESCRIPTOR_HANDLE handleCPU = m_pHeap->GetCPUDescriptorHandleForHeapStart();
+	handleCPU.ptr += m_IncrementSize * count;
+	D3D12_GPU_DESCRIPTOR_HANDLE handleGPU = m_pHeap->GetGPUDescriptorHandleForHeapStart();
+	handleGPU.ptr += m_IncrementSize * count;
+
+	pHandle->HandleCPU = handleCPU;
+	pHandle->HandleGPU = handleGPU;
+
+	g_Engine->Device()->CreateShaderResourceView(resource, &srvDesc, pHandle->HandleCPU);
+	m_pHandles.push_back(pHandle);
+	return pHandle;
+}
+
+DescriptorHandle* DescriptorHeap::CreateUAV(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& uavDesc)
+{
+	if (resource == nullptr) return nullptr;
+	auto count = m_pHandles.size();
+	if (HANDLE_MAX <= count) return nullptr;
+
+	DescriptorHandle* pHandle = new DescriptorHandle();
+	D3D12_CPU_DESCRIPTOR_HANDLE handleCPU = m_pHeap->GetCPUDescriptorHandleForHeapStart();
+	handleCPU.ptr += m_IncrementSize * count;
+	D3D12_GPU_DESCRIPTOR_HANDLE handleGPU = m_pHeap->GetGPUDescriptorHandleForHeapStart();
+	handleGPU.ptr += m_IncrementSize * count;
+
+	pHandle->HandleCPU = handleCPU;
+	pHandle->HandleGPU = handleGPU;
+
+	g_Engine->Device()->CreateUnorderedAccessView(resource, nullptr, &uavDesc, pHandle->HandleCPU);
+	m_pHandles.push_back(pHandle);
+	return pHandle;
+}

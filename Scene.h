@@ -4,10 +4,9 @@
 class Scene
 {
 public:
-	bool Init(); // ‰Šú‰»
-
-	void Update(); // XVˆ—
-	void Draw(); // •`‰æˆ—
+	bool Init();
+	void Update();
+	void Draw();
 };
 
 extern Scene* g_Scene;

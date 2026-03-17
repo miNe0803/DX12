@@ -16,13 +16,16 @@ public:
 class DescriptorHeap
 {
 public:
-	DescriptorHeap(); // ƒRƒ“ƒXƒgƒ‰ƒNƒ^‚Å¶¬‚·‚é
-	ID3D12DescriptorHeap* GetHeap(); // ƒfƒBƒXƒNƒŠƒvƒ^ƒq[ƒv‚ğ•Ô‚·
-	DescriptorHandle* Register(Texture2D* texture); // ƒeƒNƒXƒ`ƒƒ[‚ğƒfƒBƒXƒNƒŠƒvƒ^ƒq[ƒv‚É“o˜^‚µAƒnƒ“ƒhƒ‹‚ğ•Ô‚·
+	DescriptorHeap(); // ï¿½Rï¿½ï¿½ï¿½Xï¿½gï¿½ï¿½ï¿½Nï¿½^ï¿½Åï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+	ID3D12DescriptorHeap* GetHeap(); // ï¿½fï¿½Bï¿½Xï¿½Nï¿½ï¿½ï¿½vï¿½^ï¿½qï¿½[ï¿½vï¿½ï¿½Ô‚ï¿½
+	DescriptorHandle* Register(Texture2D* texture); // ï¿½eï¿½Nï¿½Xï¿½`ï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½fï¿½Bï¿½Xï¿½Nï¿½ï¿½ï¿½vï¿½^ï¿½qï¿½[ï¿½vï¿½É“oï¿½^ï¿½ï¿½ï¿½Aï¿½nï¿½ï¿½ï¿½hï¿½ï¿½ï¿½ï¿½Ô‚ï¿½
+	// ECS/Skybox: ï¿½Cï¿½Óƒï¿½ï¿½\ï¿½[ï¿½Xï¿½ï¿½SRVï¿½Ü‚ï¿½ï¿½ï¿½UAVï¿½Å“oï¿½^ï¿½iï¿½Lï¿½ï¿½ï¿½[ï¿½uï¿½}ï¿½bï¿½vï¿½ï¿½ï¿½j
+	DescriptorHandle* RegisterResource(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc);
+	DescriptorHandle* CreateUAV(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& uavDesc);
 
 private:
-	bool m_IsValid = false; // ¶¬‚É¬Œ÷‚µ‚½‚©‚Ç‚¤‚©
+	bool m_IsValid = false; // ï¿½ï¿½ï¿½ï¿½ï¿½Éï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç‚ï¿½ï¿½ï¿½
 	UINT m_IncrementSize = 0;
-	ComPtr<ID3D12DescriptorHeap> m_pHeap = nullptr; // ƒfƒBƒXƒNƒŠƒvƒ^ƒq[ƒv–{‘Ì
-	std::vector<DescriptorHandle*> m_pHandles; // “o˜^‚³‚ê‚Ä‚¢‚éƒnƒ“ƒhƒ‹
+	ComPtr<ID3D12DescriptorHeap> m_pHeap = nullptr; // ï¿½fï¿½Bï¿½Xï¿½Nï¿½ï¿½ï¿½vï¿½^ï¿½qï¿½[ï¿½vï¿½{ï¿½ï¿½
+	std::vector<DescriptorHandle*> m_pHandles; // ï¿½oï¿½^ï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½nï¿½ï¿½ï¿½hï¿½ï¿½
 };
