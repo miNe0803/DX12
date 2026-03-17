@@ -37,6 +37,25 @@ public:
 		ID3D12Resource** outIrradianceCubemap
 	);
 
+	// 既存の環境キューブから Prefiltered Environment Map（Specular IBL用・Mip付き）を生成する。
+	// 成功時は *outPrefilterCubemap に Mip 付きキューブマップを返す。呼び出し側で SRV 登録・解放を管理すること。
+	bool GeneratePrefilteredEnvMap(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		ID3D12Resource* envCubemap,
+		std::function<void()> executeAndWait,
+		ID3D12Resource** outPrefilterCubemap
+	);
+
+	// BRDF LUT（Split Sum用）を生成。環境マップに依存しないため起動時1回でよい。
+	// 成功時は *outBrdfLutTexture に R16G16_FLOAT の 512x512 Texture2D を返す。呼び出し側で SRV 登録・解放を管理すること。
+	bool GenerateBrdfLut(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		std::function<void()> executeAndWait,
+		ID3D12Resource** outBrdfLutTexture
+	);
+
 	// EXR がない場合のフォールバック。単色のキューブマップを生成する（空が確実に表示されるようにする）
 	// outUploadBufferToKeep: 省略可。指定時は Execute 完了まで保持すること（コマンドリストが参照するため）
 	static bool CreateDefaultCubemap(
@@ -75,7 +94,35 @@ private:
 		UINT size
 	);
 
+	bool CreatePrefilterCubemapResource(ID3D12Device* device, UINT size, UINT mipLevels, ID3D12Resource** outResource);
+	bool CreatePrefilterPipeline(ID3D12Device* device);
+	void RunPrefilterEnv(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		ID3D12Resource* envCubemap,
+		ID3D12Resource* prefilterCubemap,
+		UINT size,
+		UINT mipLevels
+	);
+
+	bool CreateBrdfLutResource(ID3D12Device* device, UINT width, UINT height, ID3D12Resource** outResource);
+	bool CreateBrdfLutPipeline(ID3D12Device* device);
+	void RunBrdfLut(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		ID3D12Resource* brdfLutResource,
+		UINT width,
+		UINT height
+	);
+
 	ComPtr<ID3D12RootSignature> m_pComputeRootSignature;
+	ComPtr<ID3D12RootSignature> m_pBrdfLutRootSignature;
+	ComPtr<ID3D12PipelineState> m_pBrdfLutPSO;
+	ComPtr<ID3D12DescriptorHeap> m_pBrdfLutDescriptorHeap;
+	ComPtr<ID3D12Resource> m_pBrdfLutParamsBuffer;
+	ComPtr<ID3D12PipelineState> m_pPrefilterPSO;
+	ComPtr<ID3D12DescriptorHeap> m_pPrefilterDescriptorHeap;
+	ComPtr<ID3D12Resource> m_pPrefilterParamsBuffer;
 	ComPtr<ID3D12PipelineState> m_pComputePSO;
 	ComPtr<ID3D12PipelineState> m_pIrradiancePSO;
 	ComPtr<ID3D12DescriptorHeap> m_pIrradianceDescriptorHeap;

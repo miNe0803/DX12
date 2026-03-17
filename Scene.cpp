@@ -60,15 +60,17 @@ namespace {
 	SkyboxRenderer* s_skyboxRenderer = nullptr;
 	ComPtr<ID3D12Resource> skyboxCubemap;       // スカイボックス用 + PBR環境光（IBL）用
 	ComPtr<ID3D12Resource> skyboxEquirect;     // スカイボックスは Equirect 2D を直接サンプル
-	ComPtr<ID3D12Resource> s_irradianceCubemap; // PBR拡散IBL用（t5）。GPUメモリはここで保持
+	ComPtr<ID3D12Resource> s_irradianceCubemap; // PBR拡散IBL用（t5）
+	ComPtr<ID3D12Resource> s_prefilterCubemap; // Specular IBL用 Prefiltered Env（t4）
+	ComPtr<ID3D12Resource> s_brdfLut;          // BRDF LUT Split Sum用（t6）
 	PostProcessSystem* s_postProcess = nullptr;
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
-	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用 t4+t5 の先頭（t4=Env, t5=Irradiance）
+	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用 t4+t5+t6 の先頭
 	PostProcessSettings s_postProcessSettings;
 }
 
-//const wchar_t* modelFile = L"assets\\sakura1\\sakura1.fbx";
-const wchar_t* modelFile = L"assets\\hibana\\hibana.pmx";
+const wchar_t* modelFile = L"assets\\sakura1\\sakura1.fbx";
+//const wchar_t* modelFile = L"assets\\hibana\\hibana.pmx";
 float rotateY = 0.0f;
 const float modelScale = 1.0f;
 
@@ -181,30 +183,61 @@ bool Scene::Init()
 			}
 		}
 
-		// PBR用: 環境キューブ(t4) + Irradianceキューブ(t5) を連続でSRV登録。先頭を s_envCubemapHandle に保持
+		// PBR用: Prefilter(t4) + Irradiance(t5) + BRDF LUT(t6) を連続でSRV登録
 		if (skyboxCubemap.Get())
 		{
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-			srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-			srvDesc.TextureCube.MipLevels = 1;
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDescCube = {};
+			srvDescCube.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			srvDescCube.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDescCube.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+			srvDescCube.TextureCube.MipLevels = 1;
 
-			s_envCubemapHandle = descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDesc);
+			auto doExecuteAndWait = []() { g_Engine->ExecuteAndWait(); };
 
 			g_Engine->Allocator(0)->Reset();
 			g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
 			ID3D12Resource* irradianceRaw = nullptr;
-			auto doExecuteAndWait = []() { g_Engine->ExecuteAndWait(); };
 			if (ibl.GenerateIrradianceMap(g_Engine->Device(), g_Engine->CommandList(), skyboxCubemap.Get(), doExecuteAndWait, &irradianceRaw))
-			{
 				s_irradianceCubemap = irradianceRaw;
-				descriptorHeap->RegisterResource(s_irradianceCubemap.Get(), srvDesc);
-			}
+
+			g_Engine->Allocator(0)->Reset();
+			g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+			ID3D12Resource* prefilterRaw = nullptr;
+			if (ibl.GeneratePrefilteredEnvMap(g_Engine->Device(), g_Engine->CommandList(), skyboxCubemap.Get(), doExecuteAndWait, &prefilterRaw))
+				s_prefilterCubemap = prefilterRaw;
+
+			g_Engine->Allocator(0)->Reset();
+			g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+			ID3D12Resource* brdfLutRaw = nullptr;
+			if (ibl.GenerateBrdfLut(g_Engine->Device(), g_Engine->CommandList(), doExecuteAndWait, &brdfLutRaw))
+				s_brdfLut = brdfLutRaw;
+
+			// t4=Prefilter, t5=Irradiance, t6=BRDF LUT の順で登録（先頭を s_envCubemapHandle に保持）
+			srvDescCube.TextureCube.MipLevels = 5;
+			if (s_prefilterCubemap.Get())
+				s_envCubemapHandle = descriptorHeap->RegisterResource(s_prefilterCubemap.Get(), srvDescCube);
+			else
+				s_envCubemapHandle = descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDescCube);
+			srvDescCube.TextureCube.MipLevels = 1;
+			if (s_irradianceCubemap.Get())
+				descriptorHeap->RegisterResource(s_irradianceCubemap.Get(), srvDescCube);
+			else
+				descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDescCube);
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc2D = {};
+			srvDesc2D.Format = DXGI_FORMAT_R16G16_FLOAT;
+			srvDesc2D.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc2D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc2D.Texture2D.MipLevels = 1;
+			if (s_brdfLut.Get())
+				descriptorHeap->RegisterResource(s_brdfLut.Get(), srvDesc2D);
 			else
 			{
-				// Irradiance 生成失敗時は t5 用に Env を重複登録（フォールバック）
-				descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDesc);
+				Texture2D* fallback = Texture2D::GetWhite();
+				if (fallback)
+				{
+					srvDesc2D.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+					descriptorHeap->RegisterResource(fallback->Resource(), srvDesc2D);
+				}
 			}
 		}
 

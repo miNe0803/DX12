@@ -14,14 +14,14 @@ RootSignature::RootSignature()
 	// 0: TransformComponent用 (b0)
 	// 1: PBRPropertyComponent用 (b1)
 	// 2: MaterialComponentのテクスチャ群 (t0-t3)
-	// 3: IBL用キューブマップ (t4=Env, t5=Irradiance) の2つ連続
+	// 3: IBL用 (t4=PrefilteredEnv, t5=Irradiance, t6=BRDF LUT) の3つ連続
 	CD3DX12_ROOT_PARAMETER rootParam[4] = {};
 	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
 	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
 	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);   // t0~t3: アルベド、法線、金属度、粗さ
-	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 4);   // t4: Env, t5: Irradiance
+	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);   // t4: Prefilter, t5: Irradiance, t6: BRDF LUT
 	rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 

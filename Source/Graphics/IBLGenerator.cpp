@@ -290,6 +290,349 @@ void IBLGenerator::RunIrradianceMap(
 	commandList->ResourceBarrier(1, &toSrv);
 }
 
+bool IBLGenerator::GeneratePrefilteredEnvMap(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	ID3D12Resource* envCubemap,
+	std::function<void()> executeAndWait,
+	ID3D12Resource** outPrefilterCubemap)
+{
+	if (device == nullptr || commandList == nullptr || envCubemap == nullptr || outPrefilterCubemap == nullptr || !executeAndWait)
+	{
+		DebugLog("[IBL] GeneratePrefilteredEnvMap: invalid args -> false\n");
+		return false;
+	}
+	*outPrefilterCubemap = nullptr;
+
+	const UINT prefilterSize = 128u;
+	const UINT mipLevels = 5u;
+	ComPtr<ID3D12Resource> prefilterCubemap;
+	if (!CreatePrefilterCubemapResource(device, prefilterSize, mipLevels, prefilterCubemap.GetAddressOf()))
+	{
+		DebugLog("[IBL] GeneratePrefilteredEnvMap: CreatePrefilterCubemapResource failed\n");
+		return false;
+	}
+	DebugLog("[IBL] CreatePrefilterCubemapResource OK (%u, mips=%u)\n", prefilterSize, mipLevels);
+
+	if (!CreatePrefilterPipeline(device))
+	{
+		DebugLog("[IBL] GeneratePrefilteredEnvMap: CreatePrefilterPipeline failed (Prefilter_CS.cso?)\n");
+		return false;
+	}
+	DebugLog("[IBL] RunPrefilterEnv...\n");
+	RunPrefilterEnv(device, commandList, envCubemap, prefilterCubemap.Get(), prefilterSize, mipLevels);
+	DebugLog("[IBL] RunPrefilterEnv done\n");
+
+	executeAndWait();
+
+	*outPrefilterCubemap = prefilterCubemap.Detach();
+	DebugLog("[IBL] GeneratePrefilteredEnvMap OK -> prefilter cubemap ready\n");
+	return true;
+}
+
+bool IBLGenerator::CreatePrefilterCubemapResource(ID3D12Device* device, UINT size, UINT mipLevels, ID3D12Resource** outResource)
+{
+	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+		DXGI_FORMAT_R32G32B32A32_FLOAT,
+		size, size,
+		6, mipLevels, 1, 0,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	HRESULT hr = device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&desc,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+		nullptr,
+		IID_PPV_ARGS(outResource));
+	return SUCCEEDED(hr);
+}
+
+bool IBLGenerator::CreatePrefilterPipeline(ID3D12Device* device)
+{
+	if (m_pPrefilterPSO.Get() != nullptr)
+		return true;
+	if (m_pComputeRootSignature.Get() == nullptr)
+	{
+		CD3DX12_DESCRIPTOR_RANGE srvRange;
+		srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+		CD3DX12_DESCRIPTOR_RANGE uavRange;
+		uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+		CD3DX12_ROOT_PARAMETER rootParams[3] = {};
+		rootParams[0].InitAsConstantBufferView(0);
+		rootParams[1].InitAsDescriptorTable(1, &srvRange);
+		rootParams[2].InitAsDescriptorTable(1, &uavRange);
+		D3D12_STATIC_SAMPLER_DESC sampler = {};
+		sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		sampler.ShaderRegister = 0;
+		sampler.RegisterSpace = 0;
+		sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+		D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+		rsDesc.NumParameters = 3;
+		rsDesc.pParameters = rootParams;
+		rsDesc.NumStaticSamplers = 1;
+		rsDesc.pStaticSamplers = &sampler;
+		rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+		ComPtr<ID3DBlob> rsBlob, rsError;
+		HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, rsBlob.GetAddressOf(), rsError.GetAddressOf());
+		if (FAILED(hr)) return false;
+		hr = device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(m_pComputeRootSignature.ReleaseAndGetAddressOf()));
+		if (FAILED(hr)) return false;
+	}
+	ComPtr<ID3DBlob> csBlob;
+	HRESULT hr = D3DReadFileToBlob(L"Prefilter_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr))
+		hr = D3DReadFileToBlob(L"Shaders\\IBL\\Prefilter_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr)) return false;
+	D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_pComputeRootSignature.Get();
+	psoDesc.CS = CD3DX12_SHADER_BYTECODE(csBlob.Get());
+	hr = device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(m_pPrefilterPSO.ReleaseAndGetAddressOf()));
+	return SUCCEEDED(hr);
+}
+
+void IBLGenerator::RunPrefilterEnv(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	ID3D12Resource* envCubemap,
+	ID3D12Resource* prefilterCubemap,
+	UINT size,
+	UINT mipLevels)
+{
+	const UINT numUavs = 6 * mipLevels;
+	const UINT numDescriptors = 1 + numUavs;
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.NumDescriptors = numDescriptors;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+	m_pPrefilterDescriptorHeap.Reset();
+	HRESULT hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_pPrefilterDescriptorHeap));
+	if (FAILED(hr)) return;
+
+	ID3D12DescriptorHeap* heap = m_pPrefilterDescriptorHeap.Get();
+	UINT increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	D3D12_CPU_DESCRIPTOR_HANDLE cpuBase = heap->GetCPUDescriptorHandleForHeapStart();
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+	srvDesc.TextureCube.MipLevels = 1;
+	device->CreateShaderResourceView(envCubemap, &srvDesc, cpuBase);
+
+	for (UINT mip = 0; mip < mipLevels; mip++)
+		for (UINT face = 0; face < 6; face++)
+		{
+			D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = cpuBase;
+			uavHandle.ptr += increment * (1u + face * mipLevels + mip);
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+			uavDesc.Texture2DArray.ArraySize = 1;
+			uavDesc.Texture2DArray.FirstArraySlice = face;
+			uavDesc.Texture2DArray.MipSlice = mip;
+			device->CreateUnorderedAccessView(prefilterCubemap, nullptr, &uavDesc, uavHandle);
+		}
+
+	m_pPrefilterParamsBuffer.Reset();
+	{
+		auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(256);
+		hr = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_pPrefilterParamsBuffer));
+		if (FAILED(hr)) return;
+	}
+	struct PrefilterParams { UINT faceIndex; UINT width; UINT mipLevel; float roughness; };
+	ID3D12Resource* paramsBuffer = m_pPrefilterParamsBuffer.Get();
+
+	commandList->SetComputeRootSignature(m_pComputeRootSignature.Get());
+	commandList->SetPipelineState(m_pPrefilterPSO.Get());
+	commandList->SetDescriptorHeaps(1, &heap);
+
+	D3D12_GPU_DESCRIPTOR_HANDLE gpuBase = heap->GetGPUDescriptorHandleForHeapStart();
+
+	for (UINT mip = 0; mip < mipLevels; mip++)
+	{
+		UINT mipWidth = (UINT)(size >> mip);
+		if (mipWidth < 1) mipWidth = 1;
+		float roughness = (float)mip / (float)(mipLevels - 1);
+		for (UINT face = 0; face < 6; face++)
+		{
+			PrefilterParams params = {};
+			params.faceIndex = face;
+			params.width = mipWidth;
+			params.mipLevel = mip;
+			params.roughness = roughness;
+			void* mapped = nullptr;
+			paramsBuffer->Map(0, nullptr, &mapped);
+			memcpy(mapped, &params, sizeof(params));
+			paramsBuffer->Unmap(0, nullptr);
+
+			commandList->SetComputeRootConstantBufferView(0, paramsBuffer->GetGPUVirtualAddress());
+			commandList->SetComputeRootDescriptorTable(1, gpuBase);
+			D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = gpuBase;
+			uavHandle.ptr += increment * (1u + face * mipLevels + mip);
+			commandList->SetComputeRootDescriptorTable(2, uavHandle);
+
+			UINT groupsX = (mipWidth + 7) / 8;
+			UINT groupsY = (mipWidth + 7) / 8;
+			commandList->Dispatch(groupsX, groupsY, 1);
+		}
+	}
+
+	D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(prefilterCubemap);
+	commandList->ResourceBarrier(1, &uavBarrier);
+	D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(prefilterCubemap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	commandList->ResourceBarrier(1, &toSrv);
+}
+
+bool IBLGenerator::GenerateBrdfLut(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	std::function<void()> executeAndWait,
+	ID3D12Resource** outBrdfLutTexture)
+{
+	if (device == nullptr || commandList == nullptr || outBrdfLutTexture == nullptr || !executeAndWait)
+	{
+		DebugLog("[IBL] GenerateBrdfLut: invalid args -> false\n");
+		return false;
+	}
+	*outBrdfLutTexture = nullptr;
+
+	const UINT lutSize = 512u;
+	ComPtr<ID3D12Resource> brdfLutResource;
+	if (!CreateBrdfLutResource(device, lutSize, lutSize, brdfLutResource.GetAddressOf()))
+	{
+		DebugLog("[IBL] GenerateBrdfLut: CreateBrdfLutResource failed\n");
+		return false;
+	}
+	DebugLog("[IBL] CreateBrdfLutResource OK (%ux%u)\n", lutSize, lutSize);
+
+	if (!CreateBrdfLutPipeline(device))
+	{
+		DebugLog("[IBL] GenerateBrdfLut: CreateBrdfLutPipeline failed (BRDF_Lut_CS.cso?)\n");
+		return false;
+	}
+	DebugLog("[IBL] RunBrdfLut...\n");
+	RunBrdfLut(device, commandList, brdfLutResource.Get(), lutSize, lutSize);
+	DebugLog("[IBL] RunBrdfLut done\n");
+
+	executeAndWait();
+
+	*outBrdfLutTexture = brdfLutResource.Detach();
+	DebugLog("[IBL] GenerateBrdfLut OK -> BRDF LUT ready\n");
+	return true;
+}
+
+bool IBLGenerator::CreateBrdfLutResource(ID3D12Device* device, UINT width, UINT height, ID3D12Resource** outResource)
+{
+	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+		DXGI_FORMAT_R16G16_FLOAT,
+		width, height,
+		1, 1, 1, 0,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	HRESULT hr = device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&desc,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+		nullptr,
+		IID_PPV_ARGS(outResource));
+	return SUCCEEDED(hr);
+}
+
+bool IBLGenerator::CreateBrdfLutPipeline(ID3D12Device* device)
+{
+	if (m_pBrdfLutPSO.Get() != nullptr)
+		return true;
+
+	CD3DX12_DESCRIPTOR_RANGE uavRange;
+	uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+	CD3DX12_ROOT_PARAMETER rootParams[2] = {};
+	rootParams[0].InitAsConstantBufferView(0);
+	rootParams[1].InitAsDescriptorTable(1, &uavRange);
+
+	D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+	rsDesc.NumParameters = 2;
+	rsDesc.pParameters = rootParams;
+	rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+	ComPtr<ID3DBlob> rsBlob, rsError;
+	HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, rsBlob.GetAddressOf(), rsError.GetAddressOf());
+	if (FAILED(hr)) return false;
+	hr = device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(m_pBrdfLutRootSignature.ReleaseAndGetAddressOf()));
+	if (FAILED(hr)) return false;
+
+	ComPtr<ID3DBlob> csBlob;
+	hr = D3DReadFileToBlob(L"BRDF_Lut_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr))
+		hr = D3DReadFileToBlob(L"Shaders\\IBL\\BRDF_Lut_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr)) return false;
+
+	D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_pBrdfLutRootSignature.Get();
+	psoDesc.CS = CD3DX12_SHADER_BYTECODE(csBlob.Get());
+	hr = device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(m_pBrdfLutPSO.ReleaseAndGetAddressOf()));
+	return SUCCEEDED(hr);
+}
+
+void IBLGenerator::RunBrdfLut(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	ID3D12Resource* brdfLutResource,
+	UINT width,
+	UINT height)
+{
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.NumDescriptors = 1;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+	m_pBrdfLutDescriptorHeap.Reset();
+	HRESULT hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_pBrdfLutDescriptorHeap));
+	if (FAILED(hr)) return;
+
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+	uavDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	uavDesc.Texture2D.MipSlice = 0;
+	device->CreateUnorderedAccessView(brdfLutResource, nullptr, &uavDesc, m_pBrdfLutDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+	m_pBrdfLutParamsBuffer.Reset();
+	{
+		auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(256);
+		hr = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_pBrdfLutParamsBuffer));
+		if (FAILED(hr)) return;
+	}
+	struct BrdfLutParams { UINT width; UINT height; UINT padding0; UINT padding1; };
+	BrdfLutParams params = {};
+	params.width = width;
+	params.height = height;
+	void* mapped = nullptr;
+	m_pBrdfLutParamsBuffer->Map(0, nullptr, &mapped);
+	memcpy(mapped, &params, sizeof(params));
+	m_pBrdfLutParamsBuffer->Unmap(0, nullptr);
+
+	ID3D12DescriptorHeap* heap = m_pBrdfLutDescriptorHeap.Get();
+	commandList->SetComputeRootSignature(m_pBrdfLutRootSignature.Get());
+	commandList->SetPipelineState(m_pBrdfLutPSO.Get());
+	commandList->SetDescriptorHeaps(1, &heap);
+	commandList->SetComputeRootConstantBufferView(0, m_pBrdfLutParamsBuffer->GetGPUVirtualAddress());
+	commandList->SetComputeRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
+
+	UINT groupsX = (width + 7) / 8;
+	UINT groupsY = (height + 7) / 8;
+	commandList->Dispatch(groupsX, groupsY, 1);
+
+	D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(brdfLutResource);
+	commandList->ResourceBarrier(1, &uavBarrier);
+	D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(brdfLutResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	commandList->ResourceBarrier(1, &toSrv);
+}
+
 // EXR 読み込み（EXRLoader = OpenEXR を別 TU で使用）。false の場合、Generate() は失敗し Scene 側でフォールバックになる。
 bool IBLGenerator::LoadEXRToScratch(const wchar_t* exrPath, int* outW, int* outH, float** outRgba)
 {

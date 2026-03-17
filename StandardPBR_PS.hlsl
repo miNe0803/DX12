@@ -15,8 +15,9 @@ Texture2D _AlbedoMap : register(t0);
 Texture2D _NormalMap : register(t1);
 Texture2D _MetallicMap : register(t2);
 Texture2D _RoughnessMap : register(t3);
-TextureCube _EnvMap        : register(t4); // くっきり環境（鏡面・Specular用）
-TextureCube _IrradianceMap : register(t5); // ぼかし環境（拡散・Diffuse IBL用）
+TextureCube _PrefilterEnv  : register(t4); // Specular IBL用（Mip付き・粗さ別ぼかし）
+TextureCube _IrradianceMap : register(t5); // 拡散IBL用
+Texture2D _BrdfLut         : register(t6); // Split Sum用 (NdotV, roughness) -> (A, B)
 
 // --- [Material params (b1)] ---
 // RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
@@ -74,10 +75,13 @@ float4 main(VSOutput input) : SV_TARGET
     kD *= (1.0 - metallic);
     float3 ambientLight = irradiance * albedo.rgb * kD;
 
-    // 6. Reflection (Specular IBL) — Env を反射方向でサンプル
+    // 6. Reflection (Specular IBL) — Split Sum: PrefilterEnv * (F0*A + B)
     float3 R = reflect(-V, worldNormal);
-    float3 envReflection = _EnvMap.Sample(smp, R).rgb;
-    float3 specularPart = envReflection * F * (1.0 - roughness);
+    const float PREFILTER_MIP_COUNT = 5.0;
+    float mip = roughness * (PREFILTER_MIP_COUNT - 1.0);
+    float3 prefiltered = _PrefilterEnv.SampleLevel(smp, R, mip).rgb;
+    float2 brdf = _BrdfLut.Sample(smp, float2(NdotV, roughness)).rg;
+    float3 specularPart = prefiltered * (F0 * brdf.x + brdf.y);
 
     // 7. Composite
     float3 finalColor = directLight + ambientLight + specularPart;
