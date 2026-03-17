@@ -22,6 +22,10 @@
 #include "Graphics/PostProcessSettings.h"
 #include "EngineBarrier.h"
 #include "DebugLog.h"
+#include "Engine/ECS/Components.h"
+#include "Engine/ECS/Systems/TransformSystem.h"
+#include "Engine/ECS/Systems/LODSystem.h"
+#include "Engine/ECS/Systems/RenderSystem.h"
 
 #include <filesystem>
 #include <vector>
@@ -142,6 +146,30 @@ bool Scene::Init()
 			roughnessTex = Texture2D::Get(ReplaceExtension(meshes[i].RoughnessMap, "tga"));
 		if (!roughnessTex) roughnessTex = Texture2D::GetDefaultRoughness();
 		descriptorHeap->Register(roughnessTex);
+	}
+
+	// ECS: メッシュごとにエンティティを作成しコンポーネントを割り当て
+	for (size_t i = 0; i < meshes.size(); i++)
+	{
+		if (meshes[i].Vertices.empty() || meshes[i].Indices.empty()) continue;
+
+		auto entity = m_registry.create();
+		TransformComponent tc = {};
+		tc.BaseMatrix = g_ModelBaseTransform;
+		tc.UniformScale = modelScale;
+		tc.RotationY = rotateY;
+		tc.WorldMatrix = XMMatrixIdentity();
+		m_registry.emplace<TransformComponent>(entity, tc);
+
+		MeshRendererComponent mrc = {};
+		mrc.pVB = vertexBuffers[i];
+		mrc.pIB = indexBuffers[i];
+		mrc.IndexCount = static_cast<UINT>(meshes[i].Indices.size());
+		mrc.MaterialHandle = materialHandles[i];
+		mrc.CastShadow = true;
+		m_registry.emplace<MeshRendererComponent>(entity, mrc);
+
+		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 	}
 
 	rootSignature = new RootSignature();
@@ -304,13 +332,7 @@ void Scene::Update()
 	if (!currentTransform) return;
 
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
-
-	XMMATRIX baseTransform = XMLoadFloat4x4(&g_ModelBaseTransform);
-	currentTransform->World = XMMatrixTranspose(
-		XMMatrixScaling(modelScale, modelScale, modelScale) *
-		baseTransform * XMMatrixRotationY(rotateY)
-	);
-
+	// View/Proj はフレーム共通（World は RenderSystem がエンティティごとに CB に書き込む）
 	currentTransform->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
 	currentTransform->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
 
@@ -320,6 +342,13 @@ void Scene::Update()
 		XMVECTOR camPos = g_Camera->GetPosition();
 		XMStoreFloat4(&pbrConst->CameraPos, camPos);
 	}
+
+	XMFLOAT3 cameraPos;
+	XMStoreFloat3(&cameraPos, g_Camera->GetPosition());
+	// グローバル回転（キーボード等で更新される rotateY）を全エンティティに反映
+	m_registry.view<TransformComponent>().each([&](TransformComponent& tc) { tc.RotationY = rotateY; });
+	LODSystem::Update(m_registry, cameraPos);
+	TransformSystem::Update(m_registry);
 }
 
 void Scene::Draw()
@@ -352,24 +381,10 @@ void Scene::Draw()
 	commandList->SetGraphicsRootSignature(rootSignature->Get());
 	commandList->SetPipelineState(pipelineState->Get());
 
-	for (size_t i = 0; i < meshes.size(); i++)
-	{
-		auto vbView = vertexBuffers[i]->View();
-		auto ibView = indexBuffers[i]->View();
-
-		commandList->SetGraphicsRootConstantBufferView(0, constantBuffer[currentIndex]->GetAddress());
-		commandList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer[currentIndex]->GetAddress());
-		commandList->SetGraphicsRootDescriptorTable(2, materialHandles[i]->HandleGPU);
-		// 環境マップ（空の光）は全メッシュ共通で root param 3
-		if (s_envCubemapHandle)
-			commandList->SetGraphicsRootDescriptorTable(3, s_envCubemapHandle->HandleGPU);
-
-		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		commandList->IASetVertexBuffers(0, 1, &vbView);
-		commandList->IASetIndexBuffer(&ibView);
-
-		commandList->DrawIndexedInstanced(static_cast<UINT>(meshes[i].Indices.size()), 1, 0, 0, 0);
-	}
+	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+	RenderSystem::DrawMain(m_registry, commandList,
+		constantBuffer[currentIndex], pbrPropertyBuffer[currentIndex],
+		rootSignature, pipelineState, descriptorHeap, envHandle);
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
 	{

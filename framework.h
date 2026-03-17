@@ -1,4 +1,4 @@
-﻿// header.h : 標準のシステム インクルード ファイルのインクルード ファイル、
+// header.h : 標準のシステム インクルード ファイルのインクルード ファイル、
 // またはプロジェクト専用のインクルード ファイル
 //
 
@@ -6,6 +6,7 @@
 
 #include "targetver.h"
 #define WIN32_LEAN_AND_MEAN             // Windows ヘッダーからほとんど使用されていない部分を除外する
+#define NOMINMAX                        // min/max マクロを無効化（EnTT 等の C++ コードと衝突防止）
 #define WINDOW_WIDTH 2560
 #define WINDOW_HEIGHT 1600
 // Windows ヘッダー ファイル

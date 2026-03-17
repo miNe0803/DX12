@@ -103,11 +103,11 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_WINDOWS;_SILENCE_CXX23_DENORM_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;_SILENCE_CXX23_DENORM_DEPRECATION_WARNING;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -131,7 +131,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -169,6 +169,10 @@
     <ClInclude Include="Source\Graphics\SkyboxRenderer.h" />
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
+    <ClInclude Include="Engine\ECS\Components.h" />
+    <ClInclude Include="Engine\ECS\Systems\TransformSystem.h" />
+    <ClInclude Include="Engine\ECS\Systems\LODSystem.h" />
+    <ClInclude Include="Engine\ECS\Systems\RenderSystem.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="Texture2D.h" />
     <ClInclude Include="VertexBuffer.h" />
@@ -194,6 +198,9 @@
     <ClCompile Include="SharedStruct.cpp" />
     <ClCompile Include="Source\Graphics\SkyboxRenderer.cpp" />
     <ClCompile Include="Source\Graphics\PostProcessSystem.cpp" />
+    <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp" />
+    <ClCompile Include="Engine\ECS\Systems\LODSystem.cpp" />
+    <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp" />
     <ClCompile Include="Texture2D.cpp" />
     <ClCompile Include="VertexBuffer.cpp" />
   </ItemGroup>
