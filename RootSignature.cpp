@@ -10,21 +10,20 @@ RootSignature::RootSignature()
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS; // ジオメトリシェーダーのルートシグネチャへんアクセスを拒否する
 
 
-	// ECSのコンポーネント構造に合わせた3つのルートパラメータ
+	// ECSのコンポーネント構造に合わせた4つのルートパラメータ
 	// 0: TransformComponent用 (b0)
 	// 1: PBRPropertyComponent用 (b1)
 	// 2: MaterialComponentのテクスチャ群 (t0-t3)
-	CD3DX12_ROOT_PARAMETER rootParam[3] = {}; // 定数バッファとテクスチャの2
+	// 3: 環境マップ（IBL用キューブマップ）(t4)
+	CD3DX12_ROOT_PARAMETER rootParam[4] = {};
 	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
-
-	// [Param 1] PBRプロパティ用: ピクセルシェーダーのみ参照 (b1)
-	// ここに以前こだわった RimParams.y (NormalScale) が入る
 	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
-	// PBRに必要な枚数を確報(アルベド、法線、金属度、粗さ)
-	CD3DX12_DESCRIPTOR_RANGE tableRange[1] = {}; // ディスクリプタテーブル
-	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0); // t0~t3にSRVを4枚分確保
-	rootParam[2].InitAsDescriptorTable(std::size(tableRange), tableRange, D3D12_SHADER_VISIBILITY_PIXEL);
+	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
+	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);   // t0~t3: アルベド、法線、金属度、粗さ
+	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);   // t4: 環境キューブマップ（空の光）
+	rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
+	rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 
 	// スタティックサンプラー (s0)
 	auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);

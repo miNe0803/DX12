@@ -58,10 +58,11 @@ std::vector<IndexBuffer*> indexBuffers;
 
 namespace {
 	SkyboxRenderer* s_skyboxRenderer = nullptr;
-	ComPtr<ID3D12Resource> skyboxCubemap;       // IBL用（将来）
+	ComPtr<ID3D12Resource> skyboxCubemap;       // スカイボックス用 + PBR環境光（IBL）用
 	ComPtr<ID3D12Resource> skyboxEquirect;     // スカイボックスは Equirect 2D を直接サンプル
 	PostProcessSystem* s_postProcess = nullptr;
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
+	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用環境キューブマップSRV
 	PostProcessSettings s_postProcessSettings;
 }
 
@@ -177,6 +178,17 @@ bool Scene::Init()
 			}
 		}
 
+		// PBR用: 環境光（IBL）に使うキューブマップをSRV登録（空の光をオブジェクトに反映）
+		if (skyboxCubemap.Get())
+		{
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+			srvDesc.TextureCube.MipLevels = 1;
+			s_envCubemapHandle = descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDesc);
+		}
+
 		// スカイボックスは Equirect 2D を直接サンプル（面のつなぎ目がなくなる）
 		if (skyboxEquirect.Get())
 		{
@@ -284,6 +296,9 @@ void Scene::Draw()
 		commandList->SetGraphicsRootConstantBufferView(0, constantBuffer[currentIndex]->GetAddress());
 		commandList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer[currentIndex]->GetAddress());
 		commandList->SetGraphicsRootDescriptorTable(2, materialHandles[i]->HandleGPU);
+		// 環境マップ（空の光）は全メッシュ共通で root param 3
+		if (s_envCubemapHandle)
+			commandList->SetGraphicsRootDescriptorTable(3, s_envCubemapHandle->HandleGPU);
 
 		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		commandList->IASetVertexBuffers(0, 1, &vbView);
