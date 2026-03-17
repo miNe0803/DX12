@@ -43,6 +43,12 @@ struct alignas(256) Transform {
     DirectX::XMMATRIX Proj;
 };
 
+// PBR用: RimParams (NormalScale等) + カメラ位置（反射ベクトル計算用）
+struct PBRConstants {
+    DirectX::XMFLOAT4 RimParams;
+    DirectX::XMFLOAT4 CameraPos;
+};
+
 struct Mesh {
     std::string Name; 
     std::vector<Vertex> Vertices;

@@ -201,6 +201,9 @@
     <FxCompile Include="Shaders\IBL\Equirect2Cube_CS.hlsl">
       <Filter>IBL</Filter>
     </FxCompile>
+    <FxCompile Include="Shaders\IBL\IrradianceMap_CS.hlsl">
+      <Filter>IBL</Filter>
+    </FxCompile>
     <FxCompile Include="Shaders\Skybox\Skybox_PS.hlsl">
       <Filter>Skybox</Filter>
     </FxCompile>

@@ -26,6 +26,7 @@ struct VSOutput
     float2 uv : TEXCOORD;
     float3 normal : NORMAL;
     float3 tangent : TANGENT;
+    float3 worldPos : TEXCOORD1;
 };
 
 VSOutput vert(VSInput input)
@@ -46,6 +47,7 @@ VSOutput vert(VSInput input)
 
     output.normal = normalize(mul(n, (float3x3) World));
     output.tangent = normalize(mul(t, (float3x3) World));
+    output.worldPos = worldPos.xyz;
 
     return output;
 }

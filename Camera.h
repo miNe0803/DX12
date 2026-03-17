@@ -9,6 +9,7 @@ public:
     // 行列取得
     DirectX::XMMATRIX GetViewMatrix() const;
     DirectX::XMMATRIX GetProjectionMatrix(float aspect) const;
+    DirectX::XMVECTOR GetPosition() const { return m_position; }
 
     // 将来の追跡モード用の口
     void SetTarget(const DirectX::XMVECTOR& targetPos) { m_targetPos = targetPos; }

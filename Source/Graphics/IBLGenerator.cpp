@@ -102,6 +102,194 @@ bool IBLGenerator::Generate(
 	return true;
 }
 
+bool IBLGenerator::GenerateIrradianceMap(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	ID3D12Resource* envCubemap,
+	std::function<void()> executeAndWait,
+	ID3D12Resource** outIrradianceCubemap)
+{
+	if (device == nullptr || commandList == nullptr || envCubemap == nullptr || outIrradianceCubemap == nullptr || !executeAndWait)
+	{
+		DebugLog("[IBL] GenerateIrradianceMap: invalid args -> false\n");
+		return false;
+	}
+	*outIrradianceCubemap = nullptr;
+
+	const UINT irradianceSize = 32u;
+	ComPtr<ID3D12Resource> irradianceCubemap;
+	if (!CreateIrradianceCubemapResource(device, irradianceSize, irradianceCubemap.GetAddressOf()))
+	{
+		DebugLog("[IBL] GenerateIrradianceMap: CreateIrradianceCubemapResource failed\n");
+		return false;
+	}
+	DebugLog("[IBL] CreateIrradianceCubemapResource OK (%u)\n", irradianceSize);
+
+	if (!CreateIrradiancePipeline(device))
+	{
+		DebugLog("[IBL] GenerateIrradianceMap: CreateIrradiancePipeline failed (IrradianceMap_CS.cso?)\n");
+		return false;
+	}
+	DebugLog("[IBL] RunIrradianceMap(%u)...\n", irradianceSize);
+	RunIrradianceMap(device, commandList, envCubemap, irradianceCubemap.Get(), irradianceSize);
+	DebugLog("[IBL] RunIrradianceMap done\n");
+
+	DebugLog("[IBL] ExecuteAndWait (irradiance)...\n");
+	executeAndWait();
+	DebugLog("[IBL] ExecuteAndWait done\n");
+
+	*outIrradianceCubemap = irradianceCubemap.Detach();
+	DebugLog("[IBL] GenerateIrradianceMap OK -> irradiance cubemap ready\n");
+	return true;
+}
+
+bool IBLGenerator::CreateIrradianceCubemapResource(ID3D12Device* device, UINT size, ID3D12Resource** outResource)
+{
+	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+		DXGI_FORMAT_R32G32B32A32_FLOAT,
+		size, size,
+		6, 1, 1, 0,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	HRESULT hr = device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&desc,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+		nullptr,
+		IID_PPV_ARGS(outResource));
+	return SUCCEEDED(hr);
+}
+
+bool IBLGenerator::CreateIrradiancePipeline(ID3D12Device* device)
+{
+	if (m_pIrradiancePSO.Get() != nullptr)
+		return true;
+	// フォールバック時は Equirect2Cube を呼ばないためルートシグネチャが未作成。その場合はここで作成する（レイアウトは Equirect と同じ b0, t0, u0）
+	if (m_pComputeRootSignature.Get() == nullptr)
+	{
+		CD3DX12_DESCRIPTOR_RANGE srvRange;
+		srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+		CD3DX12_DESCRIPTOR_RANGE uavRange;
+		uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+		CD3DX12_ROOT_PARAMETER rootParams[3] = {};
+		rootParams[0].InitAsConstantBufferView(0);
+		rootParams[1].InitAsDescriptorTable(1, &srvRange);
+		rootParams[2].InitAsDescriptorTable(1, &uavRange);
+		D3D12_STATIC_SAMPLER_DESC sampler = {};
+		sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		sampler.ShaderRegister = 0;
+		sampler.RegisterSpace = 0;
+		sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+		D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+		rsDesc.NumParameters = 3;
+		rsDesc.pParameters = rootParams;
+		rsDesc.NumStaticSamplers = 1;
+		rsDesc.pStaticSamplers = &sampler;
+		rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+		ComPtr<ID3DBlob> rsBlob, rsError;
+		HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, rsBlob.GetAddressOf(), rsError.GetAddressOf());
+		if (FAILED(hr)) return false;
+		hr = device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(m_pComputeRootSignature.ReleaseAndGetAddressOf()));
+		if (FAILED(hr)) return false;
+	}
+	ComPtr<ID3DBlob> csBlob;
+	HRESULT hr = D3DReadFileToBlob(L"Shaders\\IBL\\IrradianceMap_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr))
+		hr = D3DReadFileToBlob(L"IrradianceMap_CS.cso", csBlob.GetAddressOf());
+	if (FAILED(hr)) return false;
+	D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_pComputeRootSignature.Get();
+	psoDesc.CS = CD3DX12_SHADER_BYTECODE(csBlob.Get());
+	hr = device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(m_pIrradiancePSO.ReleaseAndGetAddressOf()));
+	return SUCCEEDED(hr);
+}
+
+void IBLGenerator::RunIrradianceMap(
+	ID3D12Device* device,
+	ID3D12GraphicsCommandList* commandList,
+	ID3D12Resource* envCubemap,
+	ID3D12Resource* irradianceCubemap,
+	UINT size)
+{
+	const UINT numDescriptors = 7;
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.NumDescriptors = numDescriptors;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+	m_pIrradianceDescriptorHeap.Reset();
+	HRESULT hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_pIrradianceDescriptorHeap));
+	if (FAILED(hr)) return;
+
+	ID3D12DescriptorHeap* heap = m_pIrradianceDescriptorHeap.Get();
+	UINT increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	D3D12_CPU_DESCRIPTOR_HANDLE cpuBase = heap->GetCPUDescriptorHandleForHeapStart();
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+	srvDesc.TextureCube.MipLevels = 1;
+	device->CreateShaderResourceView(envCubemap, &srvDesc, cpuBase);
+
+	for (UINT face = 0; face < 6; face++)
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = cpuBase;
+		uavHandle.ptr += increment * (1u + face);
+		D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+		uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+		uavDesc.Texture2DArray.ArraySize = 1;
+		uavDesc.Texture2DArray.FirstArraySlice = face;
+		uavDesc.Texture2DArray.MipSlice = 0;
+		device->CreateUnorderedAccessView(irradianceCubemap, nullptr, &uavDesc, uavHandle);
+	}
+
+	m_pIrradianceParamsBuffer.Reset();
+	{
+		auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(256);
+		hr = device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_pIrradianceParamsBuffer));
+		if (FAILED(hr)) return;
+	}
+	ID3D12Resource* paramsBuffer = m_pIrradianceParamsBuffer.Get();
+
+	commandList->SetComputeRootSignature(m_pComputeRootSignature.Get());
+	commandList->SetPipelineState(m_pIrradiancePSO.Get());
+	commandList->SetDescriptorHeaps(1, &heap);
+
+	D3D12_GPU_DESCRIPTOR_HANDLE gpuBase = heap->GetGPUDescriptorHandleForHeapStart();
+
+	struct IrradianceParams { UINT faceIndex; UINT width; UINT padding0; UINT padding1; };
+	for (UINT face = 0; face < 6; face++)
+	{
+		IrradianceParams params = {};
+		params.faceIndex = face;
+		params.width = size;
+		void* mapped = nullptr;
+		paramsBuffer->Map(0, nullptr, &mapped);
+		memcpy(mapped, &params, sizeof(params));
+		paramsBuffer->Unmap(0, nullptr);
+
+		commandList->SetComputeRootConstantBufferView(0, paramsBuffer->GetGPUVirtualAddress());
+		commandList->SetComputeRootDescriptorTable(1, gpuBase);
+		D3D12_GPU_DESCRIPTOR_HANDLE uavHandle = gpuBase;
+		uavHandle.ptr += increment * (1u + face);
+		commandList->SetComputeRootDescriptorTable(2, uavHandle);
+
+		UINT groupsX = (size + 7) / 8;
+		UINT groupsY = (size + 7) / 8;
+		commandList->Dispatch(groupsX, groupsY, 1);
+	}
+
+	D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(irradianceCubemap);
+	commandList->ResourceBarrier(1, &uavBarrier);
+	D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(irradianceCubemap, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	commandList->ResourceBarrier(1, &toSrv);
+}
+
 // EXR 読み込み（EXRLoader = OpenEXR を別 TU で使用）。false の場合、Generate() は失敗し Scene 側でフォールバックになる。
 bool IBLGenerator::LoadEXRToScratch(const wchar_t* exrPath, int* outW, int* outH, float** outRgba)
 {

@@ -1,4 +1,4 @@
-#include "Scene.h"
+﻿#include "Scene.h"
 #include "Engine.h"
 #include "App.h"
 #include <d3dx12.h>
@@ -60,13 +60,15 @@ namespace {
 	SkyboxRenderer* s_skyboxRenderer = nullptr;
 	ComPtr<ID3D12Resource> skyboxCubemap;       // スカイボックス用 + PBR環境光（IBL）用
 	ComPtr<ID3D12Resource> skyboxEquirect;     // スカイボックスは Equirect 2D を直接サンプル
+	ComPtr<ID3D12Resource> s_irradianceCubemap; // PBR拡散IBL用（t5）。GPUメモリはここで保持
 	PostProcessSystem* s_postProcess = nullptr;
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
-	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用環境キューブマップSRV
+	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用 t4+t5 の先頭（t4=Env, t5=Irradiance）
 	PostProcessSettings s_postProcessSettings;
 }
 
-const wchar_t* modelFile = L"assets\\sakura1\\sakura1.fbx";
+//const wchar_t* modelFile = L"assets\\sakura1\\sakura1.fbx";
+const wchar_t* modelFile = L"assets\\hibana\\hibana.pmx";
 float rotateY = 0.0f;
 const float modelScale = 1.0f;
 
@@ -104,10 +106,11 @@ bool Scene::Init()
 		constantBuffer[i] = new ConstantBuffer(sizeof(Transform));
 		if (!constantBuffer[i]->IsValid()) return false;
 
-		pbrPropertyBuffer[i] = new ConstantBuffer(sizeof(XMFLOAT4));
+		pbrPropertyBuffer[i] = new ConstantBuffer(sizeof(PBRConstants));
 		if (!pbrPropertyBuffer[i]->IsValid()) return false;
-		auto pbr = pbrPropertyBuffer[i]->GetPtr<XMFLOAT4>();
-		*pbr = XMFLOAT4(1.0f, 1.5f, 0.0f, 0.0f);
+		auto pbr = pbrPropertyBuffer[i]->GetPtr<PBRConstants>();
+		pbr->RimParams = XMFLOAT4(1.0f, 1.5f, 0.0f, 0.0f);
+		pbr->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
 
 	materialHandles.clear();
@@ -129,13 +132,13 @@ bool Scene::Init()
 		Texture2D* metallicTex = Texture2D::Get(meshes[i].MetallicMap);
 		if (!metallicTex && !meshes[i].MetallicMap.empty())
 			metallicTex = Texture2D::Get(ReplaceExtension(meshes[i].MetallicMap, "tga"));
-		if (!metallicTex) metallicTex = Texture2D::GetWhite();
+		if (!metallicTex) metallicTex = Texture2D::GetDefaultMetallic();
 		descriptorHeap->Register(metallicTex);
 
 		Texture2D* roughnessTex = Texture2D::Get(meshes[i].RoughnessMap);
 		if (!roughnessTex && !meshes[i].RoughnessMap.empty())
 			roughnessTex = Texture2D::Get(ReplaceExtension(meshes[i].RoughnessMap, "tga"));
-		if (!roughnessTex) roughnessTex = Texture2D::GetWhite();
+		if (!roughnessTex) roughnessTex = Texture2D::GetDefaultRoughness();
 		descriptorHeap->Register(roughnessTex);
 	}
 
@@ -178,7 +181,7 @@ bool Scene::Init()
 			}
 		}
 
-		// PBR用: 環境光（IBL）に使うキューブマップをSRV登録（空の光をオブジェクトに反映）
+		// PBR用: 環境キューブ(t4) + Irradianceキューブ(t5) を連続でSRV登録。先頭を s_envCubemapHandle に保持
 		if (skyboxCubemap.Get())
 		{
 			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -186,7 +189,23 @@ bool Scene::Init()
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
 			srvDesc.TextureCube.MipLevels = 1;
+
 			s_envCubemapHandle = descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDesc);
+
+			g_Engine->Allocator(0)->Reset();
+			g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+			ID3D12Resource* irradianceRaw = nullptr;
+			auto doExecuteAndWait = []() { g_Engine->ExecuteAndWait(); };
+			if (ibl.GenerateIrradianceMap(g_Engine->Device(), g_Engine->CommandList(), skyboxCubemap.Get(), doExecuteAndWait, &irradianceRaw))
+			{
+				s_irradianceCubemap = irradianceRaw;
+				descriptorHeap->RegisterResource(s_irradianceCubemap.Get(), srvDesc);
+			}
+			else
+			{
+				// Irradiance 生成失敗時は t5 用に Env を重複登録（フォールバック）
+				descriptorHeap->RegisterResource(skyboxCubemap.Get(), srvDesc);
+			}
 		}
 
 		// スカイボックスは Equirect 2D を直接サンプル（面のつなぎ目がなくなる）
@@ -256,6 +275,13 @@ void Scene::Update()
 
 	currentTransform->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
 	currentTransform->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
+
+	auto pbrConst = pbrPropertyBuffer[currentIndex]->GetPtr<PBRConstants>();
+	if (pbrConst)
+	{
+		XMVECTOR camPos = g_Camera->GetPosition();
+		XMStoreFloat4(&pbrConst->CameraPos, camPos);
+	}
 }
 
 void Scene::Draw()

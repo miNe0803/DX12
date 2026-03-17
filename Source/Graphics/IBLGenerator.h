@@ -26,6 +26,17 @@ public:
 		ID3D12Resource** outEquirectTexture = nullptr
 	);
 
+	// 既存の環境キューブマップから Irradiance Map（拡散用ぼかしキューブ）を生成する。
+	// envCubemap: 生成済みの Env キューブマップ（SRV 状態であること）。executeAndWait でコマンド実行まで行う。
+	// 成功時は *outIrradianceCubemap に Irradiance 用キューブマップを返す。呼び出し側で SRV 登録・解放を管理すること。
+	bool GenerateIrradianceMap(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		ID3D12Resource* envCubemap,
+		std::function<void()> executeAndWait,
+		ID3D12Resource** outIrradianceCubemap
+	);
+
 	// EXR がない場合のフォールバック。単色のキューブマップを生成する（空が確実に表示されるようにする）
 	// outUploadBufferToKeep: 省略可。指定時は Execute 完了まで保持すること（コマンドリストが参照するため）
 	static bool CreateDefaultCubemap(
@@ -54,8 +65,21 @@ private:
 		UINT size
 	);
 
+	bool CreateIrradianceCubemapResource(ID3D12Device* device, UINT size, ID3D12Resource** outResource);
+	bool CreateIrradiancePipeline(ID3D12Device* device);
+	void RunIrradianceMap(
+		ID3D12Device* device,
+		ID3D12GraphicsCommandList* commandList,
+		ID3D12Resource* envCubemap,
+		ID3D12Resource* irradianceCubemap,
+		UINT size
+	);
+
 	ComPtr<ID3D12RootSignature> m_pComputeRootSignature;
 	ComPtr<ID3D12PipelineState> m_pComputePSO;
+	ComPtr<ID3D12PipelineState> m_pIrradiancePSO;
+	ComPtr<ID3D12DescriptorHeap> m_pIrradianceDescriptorHeap;
+	ComPtr<ID3D12Resource> m_pIrradianceParamsBuffer;
 	ComPtr<ID3D12Resource> m_pEquirectUploadBuffer;    // Execute 完了まで保持
 	ComPtr<ID3D12Resource> m_pEquirectTexture;       // コマンドリストが参照するため Execute 完了まで保持
 	ComPtr<ID3D12DescriptorHeap> m_pComputeDescriptorHeap; // RunEquirect2Cube で使用、Execute 完了まで保持

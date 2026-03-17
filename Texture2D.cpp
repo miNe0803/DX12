@@ -6,7 +6,7 @@
 
 using namespace DirectX;
 
-// std::string(マルチバイト文字列)からstd::wstring(ワイド文字列)を得る。AssimpLoaderと同じものだけど、共用にするのがめんどくさかったので許してください
+// std::string(マルチバイト)からstd::wstring(ワイド)へ。AssimpLoaderと同様の用途用
 std::wstring GetWideString(const std::string& str)
 {
 	auto num1 = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED | MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0);
@@ -51,7 +51,7 @@ bool Texture2D::Load(std::string& path)
 
 bool Texture2D::Load(std::wstring& path)
 {
-	//WICテクスチャのロード
+	// WICでテクスチャロード
 	TexMetadata meta = {};
 	ScratchImage scratch = {};
 	auto ext = FileExtension(path);
@@ -71,7 +71,7 @@ bool Texture2D::Load(std::wstring& path)
 		return false;
 	}
 
-	// D3D12 は Width/Height/DepthOrArraySize が 0 のリソースを許可しない
+	// D3D12は幅・高さが0のリソースを許可しない
 	if (meta.width == 0 || meta.height == 0)
 		return false;
 
@@ -89,7 +89,7 @@ bool Texture2D::Load(std::wstring& path)
 		arraySize,
 		mipLevels);
 
-	// リソースを生成
+	// リソース生成
 	hr = g_Engine->Device()->CreateCommittedResource(
 		&prop,
 		D3D12_HEAP_FLAG_NONE,
@@ -105,10 +105,10 @@ bool Texture2D::Load(std::wstring& path)
 	}
 
 	hr = m_pResource->WriteToSubresource(0,
-		nullptr, //全領域へコピー
-		img->pixels, //元データアドレス
-		static_cast<UINT>(img->rowPitch), //1ラインサイズ
-		static_cast<UINT>(img->slicePitch) //全サイズ
+		nullptr,   // 全領域へコピー
+		img->pixels,
+		static_cast<UINT>(img->rowPitch),
+		static_cast<UINT>(img->slicePitch)
 	);
 	if (FAILED(hr))
 	{
@@ -129,7 +129,7 @@ Texture2D* Texture2D::Get(std::wstring path)
 	auto tex = new Texture2D(path);
 	if (!tex->IsValid())
 	{
-		return GetWhite(); // 読み込みに失敗した時は白単色テクスチャを返す
+		return GetWhite(); // 読み込み失敗時は白テクスチャを返す
 	}
 	return tex;
 }
@@ -147,7 +147,46 @@ Texture2D* Texture2D::GetWhite()
 		return nullptr;
 	}
 
-	return new Texture2D(buff);;
+	return new Texture2D(buff);
+}
+
+Texture2D* Texture2D::GetDefaultMetallic()
+{
+	ID3D12Resource* buff = GetDefaultResource(4, 4);
+
+	std::vector<unsigned char> data(4 * 4 * 4);
+	std::fill(data.begin(), data.end(), 0x00);
+
+	auto hr = buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size());
+	if (FAILED(hr))
+	{
+		return nullptr;
+	}
+
+	return new Texture2D(buff);
+}
+
+Texture2D* Texture2D::GetDefaultRoughness()
+{
+	ID3D12Resource* buff = GetDefaultResource(4, 4);
+
+	const unsigned char byteVal = 235; // 0.92 (木・樹皮向けで濡れ感を抑える)
+	std::vector<unsigned char> data(4 * 4 * 4);
+	for (size_t i = 0; i < data.size(); i += 4)
+	{
+		data[i + 0] = byteVal;
+		data[i + 1] = byteVal;
+		data[i + 2] = byteVal;
+		data[i + 3] = 0xff;
+	}
+
+	auto hr = buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size());
+	if (FAILED(hr))
+	{
+		return nullptr;
+	}
+
+	return new Texture2D(buff);
 }
 
 ID3D12Resource* Texture2D::GetDefaultResource(size_t width, size_t height)
@@ -157,7 +196,7 @@ ID3D12Resource* Texture2D::GetDefaultResource(size_t width, size_t height)
 	ID3D12Resource* buff = nullptr;
 	auto result = g_Engine->Device()->CreateCommittedResource(
 		&texHeapProp,
-		D3D12_HEAP_FLAG_NONE, //特に指定なし
+		D3D12_HEAP_FLAG_NONE,
 		&resDesc,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
 		nullptr,
@@ -186,7 +225,7 @@ D3D12_SHADER_RESOURCE_VIEW_DESC Texture2D::ViewDesc()
 	D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
 	desc.Format = m_pResource->GetDesc().Format;
 	desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; //2Dテクスチャ
-	desc.Texture2D.MipLevels = 1; //ミップマップは使用しないので1
+	desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	desc.Texture2D.MipLevels = 1;
 	return desc;
 }

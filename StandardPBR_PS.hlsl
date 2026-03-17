@@ -1,4 +1,4 @@
-// --- [VS output struct] ---
+﻿// --- [VS output struct] ---
 struct VSOutput
 {
     float4 svpos : SV_POSITION;
@@ -6,6 +6,7 @@ struct VSOutput
     float2 uv : TEXCOORD;
     float3 normal : NORMAL;   // world-space normal
     float3 tangent : TANGENT; // world-space tangent
+    float3 worldPos : TEXCOORD1;
 };
 
 // --- [Textures and sampler] ---
@@ -14,23 +15,34 @@ Texture2D _AlbedoMap : register(t0);
 Texture2D _NormalMap : register(t1);
 Texture2D _MetallicMap : register(t2);
 Texture2D _RoughnessMap : register(t3);
-TextureCube _EnvMap : register(t4);  // 環境マップ（空の光・IBL拡散）
+TextureCube _EnvMap        : register(t4); // くっきり環境（鏡面・Specular用）
+TextureCube _IrradianceMap : register(t5); // ぼかし環境（拡散・Diffuse IBL用）
 
 // --- [Material params (b1)] ---
-// RimParams.y = NormalScale
+// RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
 cbuffer MaterialParams : register(b1)
 {
     float4 RimParams;
+    float4 CameraPos;
 };
 
 // --- [Pixel shader main] ---
 float4 main(VSOutput input) : SV_TARGET
 {
-    // 1. Sample textures
+    // 1. Sample textures（質感はピクセル単位でマップから自動判別）
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
     // sRGB → リニア（アルベドのみ。法線/メタル/ラフはデータなので変換しない）
     albedo.rgb = pow(albedo.rgb, 2.2);
     float4 nSample = _NormalMap.Sample(smp, input.uv);
+    float metallic = _MetallicMap.Sample(smp, input.uv).r;
+    float roughness =_RoughnessMap.Sample(smp, input.uv).r;
+    // マップ未設定時（C++で黒/グレーにしているが、読み込み失敗で白が来た場合のフォールバック）
+    if (metallic >= 0.98 && roughness >= 0.98)
+    {
+        metallic = 0.0;
+        roughness = 0.92;
+    }
+    roughness = max(roughness, 0.04);
 
     // 2. TBN matrix (tangent -> world)
     float3 N = normalize(input.normal);
@@ -50,15 +62,25 @@ float4 main(VSOutput input) : SV_TARGET
     float diffuseFactor = max(dot(worldNormal, L), 0.0);
     float3 directLight = albedo.rgb * diffuseFactor * LightColor;
 
-    // 5. Ambient = 環境マップ（空）から法線方向にサンプル → 空の光で照らす
-    float3 envDiffuse = _EnvMap.Sample(smp, worldNormal).rgb;
-    float3 ambientLight = albedo.rgb * envDiffuse;
-    // フォールバック: 環境が真っ黒な場合用の最小明るさ
-    float3 fallbackAmbient = float3(0.03, 0.03, 0.04);
-    ambientLight = max(ambientLight, albedo.rgb * fallbackAmbient);
+    // 事前準備: 視線・F0・フレネル（5/6番で共有）
+    float3 V = normalize(CameraPos.xyz - input.worldPos);
+    float NdotV = max(dot(worldNormal, V), 0.0001);
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo.rgb, metallic);
+    float3 F = F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
 
-    // 6. Composite（リニアHDRのまま出力。ガンマは ToneMap_PS で一度だけかける）
-    float3 finalColor = directLight + ambientLight;
+    // 5. Ambient (Diffuse IBL) — Irradiance を法線方向でサンプル、エネルギー保存則で kD
+    float3 irradiance = _IrradianceMap.Sample(smp, worldNormal).rgb;
+    float3 kD = 1.0 - F;
+    kD *= (1.0 - metallic);
+    float3 ambientLight = irradiance * albedo.rgb * kD;
+
+    // 6. Reflection (Specular IBL) — Env を反射方向でサンプル
+    float3 R = reflect(-V, worldNormal);
+    float3 envReflection = _EnvMap.Sample(smp, R).rgb;
+    float3 specularPart = envReflection * F * (1.0 - roughness);
+
+    // 7. Composite
+    float3 finalColor = directLight + ambientLight + specularPart;
 
     return float4(finalColor, albedo.a);
 }
