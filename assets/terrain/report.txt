@@ -1,0 +1,44 @@
+
+──────────────────────────────────────────────────────────────────────────────────────────  GAEA BUILD SWARM  2.2.9.0 ──
+
+                                                                          
+          Filename:  │ C:/…/OneDrive/デスクトップ/素材/terrain.terrain    
+    Build Location:  │ C:\Users\siuts\source\repos\DX12\assets\terrain    
+        Build Type:  │ Standard                                           
+  Build Resolution:  │ 512 × 512                                          
+     Build Profile:  │ None / Last Saved Settings                         
+             Nodes:  │ 21 to build                                        
+                     │ 08 to export                                       
+                                                                          
+
+──────────────────────────────────────────────────────────────────────────────────────────  GAEA BUILD SWARM  2.2.9.0 ──
+
+                                                                          
+          Filename:  │ C:/…/OneDrive/デスクトップ/素材/terrain.terrain    
+    Build Location:  │ C:\Users\siuts\source\repos\DX12\assets\terrain    
+        Build Type:  │ Standard                                           
+  Build Resolution:  │ 512 × 512                                          
+     Build Profile:  │ None / Last Saved Settings                         
+             Nodes:  │ 21 to build                                        
+                     │ 08 to export                                       
+                                                                          
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────── Build Report ──
+
+              Build Results                              Statistics               
+                                                                                  
+          Result: │ Success                         Rivers │ 0:00:00.201          
+      Resolution: │ 512                      MountainRange │ 0:00:00.393          
+      Node Count: │ 21                              Trees2 │ 0:00:00.347          
+      Start Time: │ 03/18/2026 06:01:15             Trees2 │ 0:00:00.66           
+        End Time: │ 03/18/2026 06:01:21           Stratify │ 0:00:00.102          
+        Duration: │ 00:00:06.1568125                  Snow │ 0:00:00.111          
+  Non-Build Time: │ 00:00:02.4778125                Trees2 │ 0:00:00.633          
+                                              ColorErosion │ 0:00:00.368          
+                                                Weathering │ 0:00:00.381          
+                                                Weathering │ 0:00:00.228          
+                                                           │                      
+                                                   Fastest │ RGBMerge @ 0:00:00   
+                                                   Slowest │ Trees2 @ 0:00:00.66  
+                                                                                  
+                                           * nodes that took <100ms are excluded. 

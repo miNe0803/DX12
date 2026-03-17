@@ -2,26 +2,30 @@
 #include "Engine.h"
 #include <d3dx12.h>
 
-RootSignature::RootSignature()
+RootSignature::RootSignature(bool forTerrain)
 {
-	auto flag = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT; // アプリケーションの入力アセンブラを使用する
-	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS; // ドメインシェーダーのルートシグネチャへんアクセスを拒否する
-	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS; // ハルシェーダーのルートシグネチャへんアクセスを拒否する
-	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS; // ジオメトリシェーダーのルートシグネチャへんアクセスを拒否する
+	auto flag = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS;
+	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
+	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
-
-	// ECSのコンポーネント構造に合わせた4つのルートパラメータ
-	// 0: TransformComponent用 (b0)
-	// 1: PBRPropertyComponent用 (b1)
-	// 2: MaterialComponentのテクスチャ群 (t0-t3)
-	// 3: IBL用 (t4=PrefilteredEnv, t5=Irradiance, t6=BRDF LUT) の3つ連続
 	CD3DX12_ROOT_PARAMETER rootParam[4] = {};
 	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
 	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
-	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);   // t0~t3: アルベド、法線、金属度、粗さ
-	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);   // t4: Prefilter, t5: Irradiance, t6: BRDF LUT
+	if (forTerrain)
+	{
+		// 地形: t0-t7 マスク8枚, t8-t10 IBL 3枚
+		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
+		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 8);
+	}
+	else
+	{
+		// メッシュ: t0-t3 マテリアル, t4-t6 IBL
+		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
+	}
 	rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 

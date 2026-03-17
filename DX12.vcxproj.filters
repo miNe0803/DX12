@@ -132,6 +132,12 @@
     <ClInclude Include="Engine\ECS\Systems\RenderSystem.h">
       <Filter>Systems</Filter>
     </ClInclude>
+    <ClInclude Include="Engine\ECS\Systems\TerrainSystem.h">
+      <Filter>Systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\TerrainGenerator.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
     <ClInclude Include="Camera.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
@@ -206,6 +212,12 @@
     <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp">
       <Filter>Systems</Filter>
     </ClCompile>
+    <ClCompile Include="Engine\ECS\Systems\TerrainSystem.cpp">
+      <Filter>Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\TerrainGenerator.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
     <ClCompile Include="Camera.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
@@ -264,6 +276,9 @@
       <Filter>PostProcess</Filter>
     </FxCompile>
     <FxCompile Include="StandardPBR_PS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Terrain_PS.hlsl">
       <Filter>リソース ファイル</Filter>
     </FxCompile>
   </ItemGroup>

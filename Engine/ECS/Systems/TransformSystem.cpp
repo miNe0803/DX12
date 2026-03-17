@@ -11,9 +11,12 @@ void TransformSystem::Update(entt::registry& registry)
 	for (auto entity : view)
 	{
 		auto& transform = view.get<TransformComponent>(entity);
+		XMVECTOR pos = XMLoadFloat3(&transform.Position);
+		XMMATRIX T = XMMatrixTranslationFromVector(pos);
+		XMMATRIX S = XMMatrixScaling(transform.UniformScale, transform.UniformScale, transform.UniformScale);
 		XMMATRIX base = XMLoadFloat4x4(&transform.BaseMatrix);
-		XMMATRIX world = XMMatrixScaling(transform.UniformScale, transform.UniformScale, transform.UniformScale)
-			* base * XMMatrixRotationY(transform.RotationY);
+		XMMATRIX R = XMMatrixRotationY(transform.RotationY);
+		XMMATRIX world = T * S * base * R;
 		transform.WorldMatrix = XMMatrixTranspose(world);
 	}
 }

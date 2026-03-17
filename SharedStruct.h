@@ -49,6 +49,12 @@ struct PBRConstants {
     DirectX::XMFLOAT4 CameraPos;
 };
 
+// 地形用: 4レイヤー色 + カメラ位置（Terrain_PS で PBR 用）
+struct TerrainConstants {
+    DirectX::XMFLOAT4 LayerColor[4]; // 0=地面, 1=雪, 2=水, 3=木
+    DirectX::XMFLOAT4 CameraPos;
+};
+
 struct Mesh {
     std::string Name; 
     std::vector<Vertex> Vertices;

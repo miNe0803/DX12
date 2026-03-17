@@ -26,6 +26,8 @@
 #include "Engine/ECS/Systems/TransformSystem.h"
 #include "Engine/ECS/Systems/LODSystem.h"
 #include "Engine/ECS/Systems/RenderSystem.h"
+#include "Engine/ECS/Systems/TerrainSystem.h"
+#include "Graphics/TerrainGenerator.h"
 
 #include <filesystem>
 #include <vector>
@@ -51,6 +53,9 @@ ConstantBuffer* pbrPropertyBuffer[Engine::FRAME_BUFFER_COUNT];
 
 RootSignature* rootSignature;
 PipelineState* pipelineState;
+RootSignature* terrainRootSignature = nullptr;
+PipelineState* terrainPipelineState = nullptr;
+ConstantBuffer* terrainConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 Camera* g_Camera;
 
 // Base transform from loader (XMFLOAT4X4)
@@ -70,6 +75,7 @@ namespace {
 	PostProcessSystem* s_postProcess = nullptr;
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
 	DescriptorHandle* s_envCubemapHandle = nullptr; // PBR用 t4+t5+t6 の先頭
+	DescriptorHandle* s_terrainMaskHandle = nullptr; // 地形マスク t0-t7 の先頭
 	PostProcessSettings s_postProcessSettings;
 }
 
@@ -170,6 +176,91 @@ bool Scene::Init()
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
 
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
+	}
+
+	// 地形：EXR 優先で高さ生成し、マスク8枚＋地形用 PSO でエンティティ化
+	{
+		TerrainGenerateResult terrainResult = {};
+		const float cellSpacing = 2.0f, maxHeight = 50.0f;
+		if (!TerrainGenerator_GenerateFromExr("assets/terrain/Weathering_Out.exr", cellSpacing, maxHeight, terrainResult))
+		{
+			if (!TerrainGenerator_GenerateFromFile(L"assets\\terrain_heightmap.png", cellSpacing, maxHeight, terrainResult))
+				terrainResult = {};
+		}
+		if (terrainResult.pVB && terrainResult.pIB)
+		{
+			// マスク 8 枚を順に登録（t0-t7）
+			static const wchar_t* terrainMaskPaths[] = {
+				L"assets\\terrain\\Snow_Snow.png",
+				L"assets\\terrain\\Trees2_Trees.png",
+				L"assets\\terrain\\Rivers_Rivers.png",
+				L"assets\\terrain\\WaterColor_Out.png",
+				L"assets\\terrain\\INHIBITORS_Out.png",
+				L"assets\\terrain\\Snow_Depth.png",
+				L"assets\\terrain\\Trees2_FreshWater.png",
+				L"assets\\terrain\\Rivers_Depth.png",
+			};
+			s_terrainMaskHandle = nullptr;
+			for (const wchar_t* path : terrainMaskPaths)
+			{
+				Texture2D* tex = Texture2D::Get(std::wstring(path));
+				if (!tex) tex = Texture2D::GetWhite();
+				DescriptorHandle* h = descriptorHeap->Register(tex);
+				if (!s_terrainMaskHandle) s_terrainMaskHandle = h;
+			}
+
+			terrainRootSignature = new RootSignature(true);
+			terrainPipelineState = new PipelineState();
+			terrainPipelineState->SetInputLayout(Vertex::InputLayout);
+			terrainPipelineState->SetRootSignature(terrainRootSignature->Get());
+			terrainPipelineState->SetVS(L"SimpleVS.cso");
+			terrainPipelineState->SetPS(L"Terrain_PS.cso");
+			terrainPipelineState->Create();
+
+			for (size_t i = 0; i < Engine::FRAME_BUFFER_COUNT; i++)
+			{
+				terrainConstantBuffer[i] = new ConstantBuffer(sizeof(TerrainConstants));
+				if (!terrainConstantBuffer[i]->IsValid()) continue;
+				auto* tc = terrainConstantBuffer[i]->GetPtr<TerrainConstants>();
+				tc->LayerColor[0] = XMFLOAT4(0.35f, 0.28f, 0.2f, 1.0f);   // 地面
+				tc->LayerColor[1] = XMFLOAT4(0.95f, 0.95f, 1.0f, 1.0f);   // 雪
+				tc->LayerColor[2] = XMFLOAT4(0.2f, 0.4f, 0.7f, 1.0f);     // 水
+				tc->LayerColor[3] = XMFLOAT4(0.12f, 0.25f, 0.1f, 1.0f);   // 木
+				tc->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+			}
+
+			if (!terrainPipelineState->IsValid())
+				; // Terrain_PS.cso 未ビルド等でスキップ（地形エンティティは作らない）
+			else
+			{
+			auto terrainEntity = m_registry.create();
+			TransformComponent tcTerrain = {};
+			XMStoreFloat4x4(&tcTerrain.BaseMatrix, XMMatrixIdentity());
+			tcTerrain.Position    = { 0.0f, 0.0f, 0.0f };
+			tcTerrain.UniformScale = 1.0f;
+			tcTerrain.RotationY   = 0.0f;
+			tcTerrain.WorldMatrix = XMMatrixIdentity();
+			m_registry.emplace<TransformComponent>(terrainEntity, tcTerrain);
+
+			MeshRendererComponent mrcTerrain = {};
+			mrcTerrain.pVB = terrainResult.pVB;
+			mrcTerrain.pIB = terrainResult.pIB;
+			mrcTerrain.IndexCount = terrainResult.IndexCount;
+			mrcTerrain.MaterialHandle = s_terrainMaskHandle;
+			mrcTerrain.CastShadow = true;
+			m_registry.emplace<MeshRendererComponent>(terrainEntity, mrcTerrain);
+
+			TerrainComponent terrComp = {};
+			terrComp.HeightData  = std::move(terrainResult.HeightData);
+			terrComp.GridWidth   = terrainResult.GridWidth;
+			terrComp.GridDepth   = terrainResult.GridDepth;
+			terrComp.CellSpacing = cellSpacing;
+			terrComp.MaxHeight   = maxHeight;
+			m_registry.emplace<TerrainComponent>(terrainEntity, terrComp);
+
+			m_registry.emplace<LODComponent>(terrainEntity, 0, 0.0f);
+			}
+		}
 	}
 
 	rootSignature = new RootSignature();
@@ -342,13 +433,22 @@ void Scene::Update()
 		XMVECTOR camPos = g_Camera->GetPosition();
 		XMStoreFloat4(&pbrConst->CameraPos, camPos);
 	}
+	if (terrainConstantBuffer[currentIndex])
+	{
+		auto* terrConst = terrainConstantBuffer[currentIndex]->GetPtr<TerrainConstants>();
+		if (terrConst)
+		{
+			XMVECTOR camPos = g_Camera->GetPosition();
+			XMStoreFloat4(&terrConst->CameraPos, camPos);
+		}
+	}
 
 	XMFLOAT3 cameraPos;
 	XMStoreFloat3(&cameraPos, g_Camera->GetPosition());
 	// グローバル回転（キーボード等で更新される rotateY）を全エンティティに反映
 	m_registry.view<TransformComponent>().each([&](TransformComponent& tc) { tc.RotationY = rotateY; });
+	TransformSystem::Update(m_registry);  // WorldMatrix を先に更新
 	LODSystem::Update(m_registry, cameraPos);
-	TransformSystem::Update(m_registry);
 }
 
 void Scene::Draw()
@@ -382,9 +482,11 @@ void Scene::Draw()
 	commandList->SetPipelineState(pipelineState->Get());
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	RenderSystem::DrawMain(m_registry, commandList,
 		constantBuffer[currentIndex], pbrPropertyBuffer[currentIndex],
-		rootSignature, pipelineState, descriptorHeap, envHandle);
+		rootSignature, pipelineState, descriptorHeap, envHandle,
+		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU);
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
 	{

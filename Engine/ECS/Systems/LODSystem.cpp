@@ -1,4 +1,4 @@
-﻿#include "LODSystem.h"
+#include "LODSystem.h"
 #include "../Components.h"
 #include <DirectXMath.h>
 #include <cmath>
@@ -13,9 +13,12 @@ static float Distance(const XMFLOAT3& a, const XMFLOAT3& b)
 	return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-static XMFLOAT3 GetPositionFromBaseMatrix(const XMFLOAT4X4& m)
+// ワールド行列の平行移動成分（Position と BaseMatrix のどちらで動かしても正しい距離計算になる）
+static XMFLOAT3 GetPositionFromWorldMatrix(const DirectX::XMMATRIX& m)
 {
-	return XMFLOAT3(m._41, m._42, m._43);
+	DirectX::XMFLOAT4X4 f;
+	DirectX::XMStoreFloat4x4(&f, m);
+	return XMFLOAT3(f._41, f._42, f._43);
 }
 
 void LODSystem::Update(entt::registry& registry, const DirectX::XMFLOAT3& cameraPos)
@@ -27,7 +30,7 @@ void LODSystem::Update(entt::registry& registry, const DirectX::XMFLOAT3& camera
 		auto& transform = view.get<TransformComponent>(entity);
 		auto& lod = view.get<LODComponent>(entity);
 
-		XMFLOAT3 pos = GetPositionFromBaseMatrix(transform.BaseMatrix);
+		XMFLOAT3 pos = GetPositionFromWorldMatrix(transform.WorldMatrix);
 		float dist = Distance(pos, cameraPos);
 		lod.DistanceToCamera = dist;
 

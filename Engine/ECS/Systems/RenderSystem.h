@@ -10,6 +10,7 @@ class DescriptorHeap;
 
 namespace RenderSystem
 {
+	// 地形用: いずれか null/0 の場合は地形描画を行わない（通常メッシュのみ）
 	void DrawMain(
 		entt::registry& registry,
 		ID3D12GraphicsCommandList* cmdList,
@@ -18,5 +19,9 @@ namespace RenderSystem
 		RootSignature* rootSignature,
 		PipelineState* pipelineState,
 		DescriptorHeap* descriptorHeap,
-		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU);
+		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
+		RootSignature* terrainRootSignature = nullptr,
+		PipelineState* terrainPipelineState = nullptr,
+		ConstantBuffer* terrainCB = nullptr,
+		D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU = { 0 });
 }

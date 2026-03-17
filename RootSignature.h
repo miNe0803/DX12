@@ -6,7 +6,8 @@ struct ID3D12RootSignature;
 class RootSignature
 {
 public:
-	RootSignature(); // コンストラクタでルートシグネチャを生成
+	// forTerrain=false: メッシュ用 (t0-t3 マテリアル, t4-t6 IBL)。true: 地形用 (t0-t7 マスク, t8-t10 IBL)
+	explicit RootSignature(bool forTerrain = false);
 	bool IsValid(); // ルートシグネチャの生成に成功したかどうかを返す
 	ID3D12RootSignature* Get(); // ルートシグネチャを返す
 
