@@ -16,16 +16,16 @@ public:
 class DescriptorHeap
 {
 public:
-	DescriptorHeap(); // �R���X�g���N�^�Ő�������
-	ID3D12DescriptorHeap* GetHeap(); // �f�B�X�N���v�^�q�[�v��Ԃ�
-	DescriptorHandle* Register(Texture2D* texture); // �e�N�X�`���[���f�B�X�N���v�^�q�[�v�ɓo�^���A�n���h����Ԃ�
-	// ECS/Skybox: �C�Ӄ��\�[�X��SRV�܂���UAV�œo�^�i�L���[�u�}�b�v���j
+	DescriptorHeap();
+	~DescriptorHeap();
+	ID3D12DescriptorHeap* GetHeap();
+	DescriptorHandle* Register(Texture2D* texture);
 	DescriptorHandle* RegisterResource(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc);
 	DescriptorHandle* CreateUAV(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& uavDesc);
 
 private:
-	bool m_IsValid = false; // �����ɐ����������ǂ���
+	bool m_IsValid = false;
 	UINT m_IncrementSize = 0;
-	ComPtr<ID3D12DescriptorHeap> m_pHeap = nullptr; // �f�B�X�N���v�^�q�[�v�{��
-	std::vector<DescriptorHandle*> m_pHandles; // �o�^����Ă���n���h��
+	ComPtr<ID3D12DescriptorHeap> m_pHeap = nullptr;
+	std::vector<DescriptorHandle*> m_pHandles;
 };

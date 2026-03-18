@@ -2,7 +2,16 @@
 #include "Engine.h"
 #include "Scene.h"
 #include "keyboard.h"
+#include "Editor/ImGuiManager.h"
+#include "Editor/EditorUI.h"
+#include "Engine/Core/AsyncModelLoader.h"
+#include "Texture2D.h"
+#include "Engine/ECS/Systems/TransformSystem.h"
 #include <tchar.h>
+#include <windows.h>
+#include <imgui.h>
+#include <backends/imgui_impl_win32.h>
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -10,6 +19,9 @@
 
 extern Engine* g_Engine;
 extern Scene* g_Scene;
+
+static ImGuiManager* g_ImGuiManager = nullptr;
+static EditorUI      g_EditorUI;
 
 void StartApp(const TCHAR* appName) {
     App app;
@@ -23,6 +35,10 @@ App::~App() {
 }
 
 void App::Run(const TCHAR* appName) {
+    // 重要: DPI aware はウィンドウ生成前に有効化しないと、マウス座標がスケーリングされて
+    // ImGui のクリック位置が大きくズレることがある。
+    ImGui_ImplWin32_EnableDpiAwareness();
+
     if (!InitWindow(appName)) {
         return;
     }
@@ -42,6 +58,25 @@ void App::Run(const TCHAR* appName) {
             printf("Scene init failed. Window only.\n");
             delete g_Scene;
             g_Scene = nullptr;
+        }
+        else {
+            g_ImGuiManager = new ImGuiManager();
+            if (!g_ImGuiManager->Init(
+                    g_Engine->Device(),
+                    g_Engine->Queue(),
+                    m_hWnd,
+                    Engine::FRAME_BUFFER_COUNT,
+                    DXGI_FORMAT_R8G8B8A8_UNORM))
+            {
+                delete g_ImGuiManager;
+                g_ImGuiManager = nullptr;
+            }
+            else
+            {
+                // After ImGui uploads on shared queue, advance engine fence.
+                g_Engine->WaitForGpuIdle();
+            }
+            g_AsyncModelLoader = new AsyncModelLoader();
         }
     } else {
         g_Scene = nullptr;
@@ -103,9 +138,27 @@ void App::MainLoop() {
                 g_Scene->Update();
             }
 
+            if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
+                g_ImGuiManager->NewFrame();
+                if (g_Scene)
+                    g_EditorUI.Draw(g_Scene->GetRegistry());
+            }
+
+            // Update() 内の TransformSystem のあとに ImGui で Position 等を書き換えるため、
+            // 描画直前にもう一度 WorldMatrix を計算しないとモデルが動かない。
+            if (g_Scene)
+                TransformSystem::Update(g_Scene->GetRegistry());
+
             if (g_Engine && g_Scene) {
                 g_Engine->BeginRender();
                 g_Scene->Draw();
+                if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
+                    g_ImGuiManager->Render(
+                        g_Engine->CommandList(),
+                        g_Engine->GetBackBufferRtvCpuHandle(),
+                        g_Engine->GetFrameBufferWidth(),
+                        g_Engine->GetFrameBufferHeight());
+                }
                 g_Engine->EndRender();
             }
         }
@@ -113,10 +166,19 @@ void App::MainLoop() {
 }
 
 void App::Terminate() {
+    if (g_AsyncModelLoader) {
+        delete g_AsyncModelLoader;
+        g_AsyncModelLoader = nullptr;
+    }
+    if (g_ImGuiManager) {
+        delete g_ImGuiManager;
+        g_ImGuiManager = nullptr;
+    }
     if (g_Scene) {
         delete g_Scene;
         g_Scene = nullptr;
     }
+    Texture2D::ReleaseAllDeviceResources();
     if (g_Engine) {
         delete g_Engine;
         g_Engine = nullptr;
@@ -124,6 +186,11 @@ void App::Terminate() {
 }
 
 LRESULT CALLBACK App::WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
+        if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wp, lp))
+            return 1;
+    }
+
     Keyboard_ProcessMessage(msg, wp, lp);
 
     switch (msg) {

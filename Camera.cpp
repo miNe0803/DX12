@@ -1,6 +1,8 @@
-#include "Camera.h"
-#include "keyboard.h" // Šù‘¶‚ÌƒL[ƒ{[ƒh“ü—ÍƒNƒ‰ƒX‚ğg—p
-// ƒ}ƒEƒX“ü—ÍƒNƒ‰ƒX‚à“K‹XƒCƒ“ƒNƒ‹[ƒh‚µ‚Ä‚­‚¾‚³‚¢
+ï»¿#include "Camera.h"
+
+#include <Windows.h>
+#include <algorithm>
+#include <imgui.h>
 
 using namespace DirectX;
 
@@ -9,42 +11,106 @@ Camera::Camera() :
     m_targetPos(XMVectorSet(0, 200, 0, 0)),
     m_up(XMVectorSet(0, 1, 0, 0)),
     m_yaw(0.0f), m_pitch(0.0f),
-    m_moveSpeed(500.0f), m_rotationSpeed(0.1f) {
+    m_moveSpeed(500.0f),
+    m_keyRotationSpeed(2.2f),      // ãƒ©ã‚¸ã‚¢ãƒ³/ç§’
+    m_mouseSensitivity(0.0035f)    // ãƒ©ã‚¸ã‚¢ãƒ³/ãƒ”ã‚¯ã‚»ãƒ«
+{
 }
 
 void Camera::Update(float dt) {
-    // 1. ‰ñ“]ˆ— (ŠÈˆÕ“I‚ÈƒL[‘€ì—áFŒã‚Åƒ}ƒEƒXÀ•W‚Ì·•ª‚É•Ï‚¦‚é‚Ì‚ªƒxƒXƒg)
-    if (GetAsyncKeyState(VK_RIGHT)) m_yaw += m_rotationSpeed * dt;
-    if (GetAsyncKeyState(VK_LEFT))  m_yaw -= m_rotationSpeed * dt;
-    if (GetAsyncKeyState(VK_UP))    m_pitch += m_rotationSpeed * dt;
-    if (GetAsyncKeyState(VK_DOWN))  m_pitch -= m_rotationSpeed * dt;
+    // ImGui ãŒå…¥åŠ›ã‚’ä½¿ç”¨ã—ã¦ã„ã‚‹å ´åˆã¯ã‚«ãƒ¡ãƒ©æ“ä½œã‚’ç„¡åŠ¹åŒ–
+    if (ImGui::GetCurrentContext() != nullptr)
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.WantCaptureMouse || io.WantCaptureKeyboard)
+        {
+            // UIæ“ä½œä¸­ã¯ã‚«ãƒ¡ãƒ©ã‚’æ›´æ–°ã—ãªã„ï¼ˆLookAt ãªã©å¤–éƒ¨åˆ¶å¾¡ã‚’æƒ³å®šï¼‰
+            return;
+        }
+    }
 
-    // ƒsƒbƒ`‚Ì§ŒÀ
-    m_pitch = __max(-XM_PIDIV2 + 0.1f, __min(XM_PIDIV2 - 0.1f, m_pitch));
+    // 1) å›è»¢å‡¦ç†ï¼šãƒã‚¦ã‚¹ãƒ‰ãƒ©ãƒƒã‚°ã§ Yaw / Pitch ã‚’æ“ä½œï¼ˆFPSé¢¨ï¼‰
+    const bool lmbDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    POINT p{};
+    if (GetCursorPos(&p))
+    {
+        if (lmbDown)
+        {
+            if (!m_mouseDragging)
+            {
+                m_mouseDragging = true;
+                m_lastMouseX = p.x;
+                m_lastMouseY = p.y;
+            }
+            const long dx = p.x - m_lastMouseX;
+            const long dy = p.y - m_lastMouseY;
+            m_lastMouseX = p.x;
+            m_lastMouseY = p.y;
 
-    // 2. ‰ñ“]s—ñ‚©‚ç•ûŒü‚ğZo
+            m_yaw += static_cast<float>(dx) * m_mouseSensitivity;
+            m_pitch += static_cast<float>(dy) * m_mouseSensitivity; // ä¸Šä¸‹åè»¢ï¼ˆè‡ªç„¶ãªè¦–ç‚¹æ“ä½œï¼‰
+        }
+        else
+        {
+            m_mouseDragging = false;
+        }
+    }
+
+    // ã‚­ãƒ¼ãƒœãƒ¼ãƒ‰ã§ã‚‚å›è»¢å¯èƒ½ï¼ˆçŸ¢å°ã‚­ãƒ¼ï¼‰
+    if (GetAsyncKeyState(VK_RIGHT) & 0x8000) m_yaw += m_keyRotationSpeed * dt;
+    if (GetAsyncKeyState(VK_LEFT) & 0x8000) m_yaw -= m_keyRotationSpeed * dt;
+    if (GetAsyncKeyState(VK_UP) & 0x8000) m_pitch += m_keyRotationSpeed * dt;
+    if (GetAsyncKeyState(VK_DOWN) & 0x8000) m_pitch -= m_keyRotationSpeed * dt;
+
+    // ãƒ”ãƒƒãƒåˆ¶é™ï¼ˆçœŸä¸Šãƒ»çœŸä¸‹ã‚’å‘ã‹ãªã„ã‚ˆã†ã«ï¼‰
+    m_pitch = std::clamp(m_pitch, -XM_PIDIV2 + 0.1f, XM_PIDIV2 - 0.1f);
+
+    // 2) å›è»¢è¡Œåˆ—ã‚’ç”Ÿæˆ
     XMMATRIX rotation = XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0);
 
-    // ¶èŒn‚Ì‘O•û‚Í +Z
+    // å‰æ–¹å‘ãƒ™ã‚¯ãƒˆãƒ«ï¼ˆãƒ­ãƒ¼ã‚«ãƒ« +Zï¼‰
     XMVECTOR forward = XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), rotation);
-    // ¶èŒn‚Ì‰E•ûŒü = Up x Forward
+    // å³æ–¹å‘ãƒ™ã‚¯ãƒˆãƒ« = Up Ã— Forward
     XMVECTOR right = XMVector3Normalize(XMVector3Cross(m_up, forward));
 
-    if (GetAsyncKeyState('W')) m_position += forward * m_moveSpeed * dt;
-    if (GetAsyncKeyState('S')) m_position -= forward * m_moveSpeed * dt;
-    if (GetAsyncKeyState('D')) m_position += right * m_moveSpeed * dt;
-    if (GetAsyncKeyState('A')) m_position -= right * m_moveSpeed * dt;
+    // 3) ç§»å‹•å‡¦ç†ï¼ˆWASDï¼‰
+    if (GetAsyncKeyState('W') & 0x8000) m_position += forward * m_moveSpeed * dt;
+    if (GetAsyncKeyState('S') & 0x8000) m_position -= forward * m_moveSpeed * dt;
+    if (GetAsyncKeyState('D') & 0x8000) m_position += right * m_moveSpeed * dt;
+    if (GetAsyncKeyState('A') & 0x8000) m_position -= right * m_moveSpeed * dt;
 
-    // 3. ’‹“_‚ÌXV
+    // 4) æ³¨è¦–ç‚¹ã®æ›´æ–°
+    m_targetPos = m_position + forward;
+}
+
+void Camera::LookAt(const XMVECTOR& worldTarget)
+{
+    XMVECTOR d = XMVectorSubtract(worldTarget, m_position);
+    float x = XMVectorGetX(d);
+    float y = XMVectorGetY(d);
+    float z = XMVectorGetZ(d);
+    float horizDist = sqrtf(x * x + z * z);
+    if (horizDist < 1e-5f)
+        horizDist = 1e-5f;
+
+    m_pitch = atan2f(y, horizDist);
+    m_yaw = atan2f(x, z);
+
+    // ãƒ”ãƒƒãƒåˆ¶é™
+    m_pitch = std::clamp(m_pitch, -XM_PIDIV2 + 0.1f, XM_PIDIV2 - 0.1f);
+
+    XMMATRIX rotation = XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0);
+    XMVECTOR forward = XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), rotation);
     m_targetPos = m_position + forward;
 }
 
 XMMATRIX Camera::GetViewMatrix() const {
-    // ¶èŒnŠÖ”‚ğg—p
-    return XMMatrixLookAtLH(m_position, m_position + XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0)), m_up);
+    return XMMatrixLookAtLH(
+        m_position,
+        m_position + XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0)),
+        m_up);
 }
 
 XMMATRIX Camera::GetProjectionMatrix(float aspect) const {
-    // ¶èŒnŠÖ”‚ğg—pB‹‘åƒ‚ƒfƒ‹—p‚ÉFar‚ğ’²®
-    return XMMatrixPerspectiveFovLH(XMConvertToRadians(60), aspect, 0.1f, 2000.0f);
+    return XMMatrixPerspectiveFovLH(XMConvertToRadians(60), aspect, 0.1f, 5000.0f);
 }

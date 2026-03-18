@@ -3,17 +3,19 @@
 #include <d3dx12.h>
 #include "Engine.h"
 
-const UINT HANDLE_MAX = 512;
+namespace {
+const unsigned kHeapSrvCount = 4096u;
+}
 
 DescriptorHeap::DescriptorHeap()
 {
 	m_pHandles.clear();
-	m_pHandles.reserve(HANDLE_MAX);
+	m_pHandles.reserve(kHeapSrvCount);
 
 	D3D12_DESCRIPTOR_HEAP_DESC desc{};
 	desc.NodeMask = 0;
 	desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-	desc.NumDescriptors = HANDLE_MAX;
+	desc.NumDescriptors = kHeapSrvCount;
 	desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
 	auto device = g_Engine->Device();
@@ -33,6 +35,15 @@ DescriptorHeap::DescriptorHeap()
 	m_IsValid = true;
 }
 
+DescriptorHeap::~DescriptorHeap()
+{
+	for (DescriptorHandle* h : m_pHandles)
+		delete h;
+	m_pHandles.clear();
+	m_pHeap.Reset();
+	m_IsValid = false;
+}
+
 ID3D12DescriptorHeap* DescriptorHeap::GetHeap()
 {
 	return m_pHeap.Get();
@@ -43,8 +54,9 @@ DescriptorHandle* DescriptorHeap::Register(Texture2D* texture)
 	if (texture == nullptr)
 		return nullptr;
 	auto count = m_pHandles.size();
-	if (HANDLE_MAX <= count)
+	if (kHeapSrvCount <= count)
 	{
+		printf("DescriptorHeap::Register: SRV cap %u reached.\n", kHeapSrvCount);
 		return nullptr;
 	}
 
@@ -72,7 +84,7 @@ DescriptorHandle* DescriptorHeap::RegisterResource(ID3D12Resource* resource, con
 {
 	if (resource == nullptr) return nullptr;
 	auto count = m_pHandles.size();
-	if (HANDLE_MAX <= count) return nullptr;
+	if (kHeapSrvCount <= count) return nullptr;
 
 	DescriptorHandle* pHandle = new DescriptorHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE handleCPU = m_pHeap->GetCPUDescriptorHandleForHeapStart();
@@ -92,7 +104,7 @@ DescriptorHandle* DescriptorHeap::CreateUAV(ID3D12Resource* resource, const D3D1
 {
 	if (resource == nullptr) return nullptr;
 	auto count = m_pHandles.size();
-	if (HANDLE_MAX <= count) return nullptr;
+	if (kHeapSrvCount <= count) return nullptr;
 
 	DescriptorHandle* pHandle = new DescriptorHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE handleCPU = m_pHeap->GetCPUDescriptorHandleForHeapStart();

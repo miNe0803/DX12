@@ -7,7 +7,10 @@
 
 Engine* g_Engine;
 
-
+namespace {
+// First BeginRender only: flush queue (avoids COMMAND_ALLOCATOR_SYNC).
+int g_EngineFirstBeginRender = 1;
+}
 
 bool Engine::Init(HWND hwnd, UINT windowWidth, UINT windowHeight)
 {
@@ -17,45 +20,44 @@ bool Engine::Init(HWND hwnd, UINT windowWidth, UINT windowHeight)
 
 	if (!CreateDevice())
 	{
-		printf("?f?o?C?X?????????s");
+		printf("Engine::Init: CreateDevice failed.\n");
 		return false;
 	}
 	if (!CreateCommandQueue())
 	{
-		printf("?R?}???h?L???[?????????s");
+		printf("Engine::Init: CreateCommandQueue failed.\n");
 		return false;
 	}
 	if (!CreateSwapChain())
 	{
-		printf("?X???b?v?`?F?C???????????s");
+		printf("Engine::Init: CreateSwapChain failed.\n");
 		return false;
 	}
 	if (!CreateCommandList())
 	{
-		printf("?R?}???h???X?g?????????s");
+		printf("Engine::Init: CreateCommandList failed.\n");
 		return false;
 	}
 	if (!CreateFence())
 	{
-		printf("?t?F???X?????????s");
+		printf("Engine::Init: CreateFence failed.\n");
 		return false;
 	}
 	if (!CreateDepthStencil())
 	{
-		printf("?f?v?X?X?e???V???o?b?t?@?????????s\n");
+		printf("Engine::Init: CreateDepthStencil failed.\n");
 		return false;
 	}
-	// ?r???[?|?[?g??V?U?[??`???
 	CreateViewPort();
 	CreateScissorRect();
 
 	if (!CreateRenderTarget())
 	{
-		printf("?????_?[?^?[?Q?b?g?????????s");
+		printf("Engine::Init: CreateRenderTarget failed.\n");
 		return false;
 	}
 
-	printf("?`??G???W??????????????\n");
+	printf("Engine::Init: OK.\n");
 	return true;
 }
 
@@ -64,7 +66,6 @@ bool Engine::CreateDevice()
 	auto hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(m_pDevice.ReleaseAndGetAddressOf()));
 	if (FAILED(hr)) return false;
 #if defined(_DEBUG)
-	// D3D12 ?f?o?b?O: ?G???[????u???[?N???A?o??E?B???h?E??????o???iIntel/NVIDIA ?????????????��????L???j
 	ComPtr<ID3D12InfoQueue> infoQueue;
 	if (SUCCEEDED(m_pDevice->QueryInterface(IID_PPV_ARGS(&infoQueue))))
 	{
@@ -90,7 +91,6 @@ bool Engine::CreateCommandQueue()
 
 bool Engine::CreateSwapChain()
 {
-	// DXGI?t?@?N?g???[?????
 	IDXGIFactory4* pFactory = nullptr;
 	HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&pFactory));
 	if (FAILED(hr))
@@ -98,7 +98,6 @@ bool Engine::CreateSwapChain()
 		return false;
 	}
 
-	// ?X???b?v?`?F?C???????
 	DXGI_SWAP_CHAIN_DESC desc = {};
 	desc.BufferDesc.Width = m_FrameBufferWidth;
 	desc.BufferDesc.Height = m_FrameBufferHeight;
@@ -116,7 +115,6 @@ bool Engine::CreateSwapChain()
 	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
 
-	// ?X???b?v?`?F?C???????
 	IDXGISwapChain* pSwapChain = nullptr;
 	hr = pFactory->CreateSwapChain(m_pQueue.Get(), &desc, &pSwapChain);
 	if (FAILED(hr))
@@ -125,7 +123,6 @@ bool Engine::CreateSwapChain()
 		return false;
 	}
 
-	// IDXGISwapChain3?????
 	hr = pSwapChain->QueryInterface(IID_PPV_ARGS(m_pSwapChain.ReleaseAndGetAddressOf()));
 	if (FAILED(hr))
 	{
@@ -134,7 +131,6 @@ bool Engine::CreateSwapChain()
 		return false;
 	}
 
-	// ?o?b?N?o?b?t?@????????
 	m_CurrentBackBufferIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 
 	pFactory->Release();
@@ -144,7 +140,6 @@ bool Engine::CreateSwapChain()
 
 bool Engine::CreateCommandList()
 {
-	// ?R?}???h?A???P?[?^?[???
 	HRESULT hr;
 	for (size_t i = 0; i < FRAME_BUFFER_COUNT; i++)
 	{
@@ -158,11 +153,14 @@ bool Engine::CreateCommandList()
 		return false;
 	}
 
-	// ?R?}???h???X?g?????
+	// Always create the command list on allocator 0. If we used allocator
+	// m_CurrentBackBufferIndex here and that index is 1, allocator 1 would hold a
+	// closed-but-never-executed list; init (IBL) only uses allocator 0, so the first
+	// BeginRender for back buffer 1 would Reset allocator 1 -> COMMAND_ALLOCATOR_SYNC.
 	hr = m_pDevice->CreateCommandList(
 		0,
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		m_pAllocator[m_CurrentBackBufferIndex].Get(),
+		m_pAllocator[0].Get(),
 		nullptr,
 		IID_PPV_ARGS(&m_pCommandList)
 	);
@@ -172,7 +170,6 @@ bool Engine::CreateCommandList()
 		return false;
 	}
 
-	//?R?}???h???X?g??J???????????????????A????????????B
 	m_pCommandList->Close();
 
 	return true;
@@ -191,11 +188,29 @@ bool Engine::CreateFence()
 		return false;
 	}
 
-	m_fenceValue[m_CurrentBackBufferIndex]++;
-
-	//???????s???????C?x???g?n???h??????????B
 	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	return m_fenceEvent != nullptr;
+}
+
+void Engine::WaitForGpuIdle()
+{
+	if (!m_pQueue || !m_pFence || !m_fenceEvent)
+		return;
+	UINT64 v = m_mainGraphicsFenceValue;
+	if (m_fenceValue[0] > v) v = m_fenceValue[0];
+	if (m_fenceValue[1] > v) v = m_fenceValue[1];
+	++v;
+	m_pQueue->Signal(m_pFence.Get(), v);
+	if (m_pFence->GetCompletedValue() < v)
+	{
+		if (FAILED(m_pFence->SetEventOnCompletion(v, m_fenceEvent)))
+			return;
+		if (WAIT_OBJECT_0 != WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE))
+			return;
+	}
+	if (m_fenceValue[0] < v) m_fenceValue[0] = v;
+	if (m_fenceValue[1] < v) m_fenceValue[1] = v;
+	m_mainGraphicsFenceValue = v;
 }
 
 void Engine::CreateViewPort()
@@ -218,7 +233,7 @@ void Engine::CreateScissorRect()
 
 bool Engine::CreateRenderTarget()
 {
-	// RTV用ヒープ: バックバッファ2 + HDR用1
+	// RTV heap: swap chain buffers + HDR
 	D3D12_DESCRIPTOR_HEAP_DESC desc = {};
 	desc.NumDescriptors = FRAME_BUFFER_COUNT + 1;
 	desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -239,7 +254,7 @@ bool Engine::CreateRenderTarget()
 		rtvHandle.ptr += m_RtvDescriptorSize;
 	}
 
-	// HDR カラーバッファ (R16G16B16A16_FLOAT)
+	// HDR color buffer R16G16B16A16_FLOAT
 	D3D12_CLEAR_VALUE clearValue = {};
 	clearValue.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	clearValue.Color[0] = clearValue.Color[1] = clearValue.Color[2] = 0.0f;
@@ -251,7 +266,7 @@ bool Engine::CreateRenderTarget()
 		m_FrameBufferHeight,
 		1, 1, 1, 0,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-	// 初回は BeginRender で PIXEL_SHADER_RESOURCE → RENDER_TARGET に遷移する
+	// Scene transitions to RT in Draw; starts as SRV
 	hr = m_pDevice->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
@@ -273,7 +288,6 @@ bool Engine::CreateRenderTarget()
 
 bool Engine::CreateDepthStencil()
 {
-	//DSV?p??f?B?X?N???v?^?q?[?v????????
 	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
 	heapDesc.NumDescriptors = 1;
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
@@ -284,7 +298,6 @@ bool Engine::CreateDepthStencil()
 		return false;
 	}
 
-	//?f?B?X?N???v?^??T?C?Y?????
 	m_DsvDescriptorSize = m_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
 	D3D12_CLEAR_VALUE dsvClearValue;
@@ -319,7 +332,6 @@ bool Engine::CreateDepthStencil()
 		return false;
 	}
 
-	//?f?B?X?N???v?^????
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_pDsvHeap->GetCPUDescriptorHandleForHeapStart();
 
 	m_pDevice->CreateDepthStencilView(m_pDepthStencilBuffer.Get(), nullptr, dsvHandle);
@@ -329,42 +341,32 @@ bool Engine::CreateDepthStencil()
 
 void Engine::BeginRender()
 {
-	m_currentRenderTarget = m_pHdrColor.Get();
-	m_pAllocator[m_CurrentBackBufferIndex]->Reset();
-	m_pCommandList->Reset(m_pAllocator[m_CurrentBackBufferIndex].Get(), nullptr);
-	m_pCommandList->RSSetViewports(1, &m_Viewport);
-	m_pCommandList->RSSetScissorRects(1, &m_Scissor);
-	// HDR への RTV セット・クリアは Scene::Draw() 先頭で「1.バリア → 2.セット → 3.クリア」の順で行う
-}
-
-void Engine::WaitRender()
-{
-	//?`??I?????
-	const UINT64 fenceValue = m_fenceValue[m_CurrentBackBufferIndex];
-	m_pQueue->Signal(m_pFence.Get(), fenceValue);
-	m_fenceValue[m_CurrentBackBufferIndex]++;
-
-	// ????t???[????`??????????????????@????.
-	if (m_pFence->GetCompletedValue() < fenceValue)
+	// Main pass always uses allocator 0. (Per-buffer allocators + m_fenceValue[i] diverged from
+	// real GPU use and caused Reset on buffer 1 before that allocator had ever completed.)
+	if (g_EngineFirstBeginRender)
 	{
-		// ????????C?x???g????.
-		auto hr = m_pFence->SetEventOnCompletion(fenceValue, m_fenceEvent);
-		if (FAILED(hr))
+		g_EngineFirstBeginRender = 0;
+		this->WaitForGpuIdle();
+	}
+	else if (m_mainGraphicsFenceValue > 0 && m_pFence && m_fenceEvent)
+	{
+		if (m_pFence->GetCompletedValue() < m_mainGraphicsFenceValue)
 		{
-			return;
-		}
-
-		// ??@????.
-		if (WAIT_OBJECT_0 != WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE))
-		{
-			return;
+			if (SUCCEEDED(m_pFence->SetEventOnCompletion(m_mainGraphicsFenceValue, m_fenceEvent)))
+				WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 		}
 	}
+
+	m_currentRenderTarget = m_pHdrColor.Get();
+	m_pAllocator[0]->Reset();
+	m_pCommandList->Reset(m_pAllocator[0].Get(), nullptr);
+	m_pCommandList->RSSetViewports(1, &m_Viewport);
+	m_pCommandList->RSSetScissorRects(1, &m_Scissor);
+	// HDR clear: Scene::Draw (barrier, OMSetRTV, Clear)
 }
 
 void Engine::EndRender()
 {
-	// ポストプロセスでバックバッファに描画済み → バックバッファを PRESENT へ
 	ID3D12Resource* backBuffer = m_pRenderTargets[m_CurrentBackBufferIndex].Get();
 	EngineDoTransition(m_pCommandList.Get(), backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
@@ -373,8 +375,12 @@ void Engine::EndRender()
 	ID3D12CommandList* ppCmdLists[] = { m_pCommandList.Get() };
 	m_pQueue->ExecuteCommandLists(1, ppCmdLists);
 
+	++m_mainGraphicsFenceValue;
+	m_pQueue->Signal(m_pFence.Get(), m_mainGraphicsFenceValue);
+	m_fenceValue[0] = m_mainGraphicsFenceValue;
+	m_fenceValue[1] = m_mainGraphicsFenceValue;
+
 	m_pSwapChain->Present(1, 0);
-	WaitRender();
 	m_CurrentBackBufferIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 }
 
@@ -438,12 +444,20 @@ void Engine::ExecuteAndWait()
 	m_pCommandList->Close();
 	ID3D12CommandList* ppCmdLists[] = { m_pCommandList.Get() };
 	m_pQueue->ExecuteCommandLists(1, ppCmdLists);
-	const UINT64 fenceValue = m_fenceValue[0];
+
+	UINT64 fenceValue = m_mainGraphicsFenceValue;
+	if (m_fenceValue[0] > fenceValue) fenceValue = m_fenceValue[0];
+	if (m_fenceValue[1] > fenceValue) fenceValue = m_fenceValue[1];
+	++fenceValue;
 	m_pQueue->Signal(m_pFence.Get(), fenceValue);
-	m_fenceValue[0]++;
+
 	if (m_pFence->GetCompletedValue() < fenceValue)
 	{
 		m_pFence->SetEventOnCompletion(fenceValue, m_fenceEvent);
 		WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 	}
+
+	if (m_fenceValue[0] < fenceValue) m_fenceValue[0] = fenceValue;
+	if (m_fenceValue[1] < fenceValue) m_fenceValue[1] = fenceValue;
+	m_mainGraphicsFenceValue = fenceValue;
 }

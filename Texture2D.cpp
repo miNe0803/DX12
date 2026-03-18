@@ -1,12 +1,23 @@
 #include "Texture2D.h"
 #include <DirectXTex.h>
 #include "Engine.h"
+#include <mutex>
+#include <unordered_map>
 
 #pragma comment(lib, "DirectXTex.lib")
 
+namespace {
+	std::mutex g_texMutex;
+	std::unordered_map<std::wstring, Texture2D*> g_pathCache;
+	Texture2D* g_white = nullptr;
+	Texture2D* g_black = nullptr;
+	Texture2D* g_metal = nullptr;
+	Texture2D* g_rough = nullptr;
+}
+
 using namespace DirectX;
 
-// std::string(マルチバイト)からstd::wstring(ワイド)へ。AssimpLoaderと同様の用途用
+// std::string(?}???`?o?C?g)????std::wstring(???C?h)??BAssimpLoader????l??p?r?p
 std::wstring GetWideString(const std::string& str)
 {
 	auto num1 = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED | MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0);
@@ -20,7 +31,7 @@ std::wstring GetWideString(const std::string& str)
 	return wstr;
 }
 
-// 拡張子を返す
+// ?g???q????
 std::wstring FileExtension(const std::wstring& path)
 {
 	auto idx = path.rfind(L'.');
@@ -51,7 +62,7 @@ bool Texture2D::Load(std::string& path)
 
 bool Texture2D::Load(std::wstring& path)
 {
-	// WICでテクスチャロード
+	// WIC??e?N?X?`?????[?h
 	TexMetadata meta = {};
 	ScratchImage scratch = {};
 	auto ext = FileExtension(path);
@@ -71,7 +82,7 @@ bool Texture2D::Load(std::wstring& path)
 		return false;
 	}
 
-	// D3D12は幅・高さが0のリソースを許可しない
+	// D3D12????E??????0????\?[?X??????????
 	if (meta.width == 0 || meta.height == 0)
 		return false;
 
@@ -89,7 +100,7 @@ bool Texture2D::Load(std::wstring& path)
 		arraySize,
 		mipLevels);
 
-	// リソース生成
+	// ???\?[?X????
 	hr = g_Engine->Device()->CreateCommittedResource(
 		&prop,
 		D3D12_HEAP_FLAG_NONE,
@@ -105,7 +116,7 @@ bool Texture2D::Load(std::wstring& path)
 	}
 
 	hr = m_pResource->WriteToSubresource(0,
-		nullptr,   // 全領域へコピー
+		nullptr,   // ?S????R?s?[
 		img->pixels,
 		static_cast<UINT>(img->rowPitch),
 		static_cast<UINT>(img->slicePitch)
@@ -126,51 +137,85 @@ Texture2D* Texture2D::Get(std::string path)
 
 Texture2D* Texture2D::Get(std::wstring path)
 {
-	auto tex = new Texture2D(path);
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	auto it = g_pathCache.find(path);
+	if (it != g_pathCache.end())
+		return it->second;
+	auto* tex = new Texture2D(path);
 	if (!tex->IsValid())
 	{
-		return GetWhite(); // 読み込み失敗時は白テクスチャを返す
+		delete tex;
+		if (!g_white)
+		{
+			ID3D12Resource* buff = GetDefaultResource(4, 4);
+			if (!buff) return nullptr;
+			std::vector<unsigned char> data(4 * 4 * 4);
+			std::fill(data.begin(), data.end(), 0xff);
+			if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size())))
+			{
+				buff->Release();
+				return nullptr;
+			}
+			g_white = new Texture2D(buff);
+		}
+		return g_white;
 	}
+	g_pathCache[path] = tex;
 	return tex;
 }
 
 Texture2D* Texture2D::GetWhite()
 {
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	if (g_white)
+		return g_white;
 	ID3D12Resource* buff = GetDefaultResource(4, 4);
-
+	if (!buff) return nullptr;
 	std::vector<unsigned char> data(4 * 4 * 4);
 	std::fill(data.begin(), data.end(), 0xff);
-
-	auto hr = buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size());
-	if (FAILED(hr))
+	if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size())))
 	{
+		buff->Release();
 		return nullptr;
 	}
-
-	return new Texture2D(buff);
+	g_white = new Texture2D(buff);
+	return g_white;
 }
 
 Texture2D* Texture2D::GetDefaultMetallic()
 {
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	if (g_metal)
+		return g_metal;
 	ID3D12Resource* buff = GetDefaultResource(4, 4);
-
+	if (!buff) return nullptr;
 	std::vector<unsigned char> data(4 * 4 * 4);
 	std::fill(data.begin(), data.end(), 0x00);
-
-	auto hr = buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size());
-	if (FAILED(hr))
+	if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size())))
 	{
+		buff->Release();
 		return nullptr;
 	}
-
-	return new Texture2D(buff);
+	g_metal = new Texture2D(buff);
+	return g_metal;
 }
 
 Texture2D* Texture2D::GetDefaultRoughness()
 {
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	if (g_rough)
+		return g_rough;
 	ID3D12Resource* buff = GetDefaultResource(4, 4);
-
-	const unsigned char byteVal = 235; // 0.92 (木・樹皮向けで濡れ感を抑える)
+	if (!buff) return nullptr;
+	const unsigned char byteVal = 235;
 	std::vector<unsigned char> data(4 * 4 * 4);
 	for (size_t i = 0; i < data.size(); i += 4)
 	{
@@ -179,14 +224,49 @@ Texture2D* Texture2D::GetDefaultRoughness()
 		data[i + 2] = byteVal;
 		data[i + 3] = 0xff;
 	}
-
-	auto hr = buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size());
-	if (FAILED(hr))
+	if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size())))
 	{
+		buff->Release();
 		return nullptr;
 	}
+	g_rough = new Texture2D(buff);
+	return g_rough;
+}
 
-	return new Texture2D(buff);
+Texture2D* Texture2D::GetBlack()
+{
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	if (g_black)
+		return g_black;
+	ID3D12Resource* buff = GetDefaultResource(4, 4);
+	if (!buff) return nullptr;
+	std::vector<unsigned char> data(4 * 4 * 4);
+	std::fill(data.begin(), data.end(), 0x00);
+	if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), 4 * 4, data.size())))
+	{
+		buff->Release();
+		return nullptr;
+	}
+	g_black = new Texture2D(buff);
+	return g_black;
+}
+
+void Texture2D::ReleaseAllDeviceResources()
+{
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	for (auto& kv : g_pathCache)
+		delete kv.second;
+	g_pathCache.clear();
+	delete g_white;
+	g_white = nullptr;
+	delete g_black;
+	g_black = nullptr;
+	delete g_metal;
+	g_metal = nullptr;
+	delete g_rough;
+	g_rough = nullptr;
 }
 
 ID3D12Resource* Texture2D::GetDefaultResource(size_t width, size_t height)

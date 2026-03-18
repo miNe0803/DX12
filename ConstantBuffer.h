@@ -8,6 +8,7 @@ class ConstantBuffer
 {
 public:
     ConstantBuffer(size_t size); // コンストラクタで定数バッファを生成
+    ~ConstantBuffer();
     bool IsValid(); // バッファ生成に成功したかを返す
     D3D12_GPU_VIRTUAL_ADDRESS GetAddress() const; // バッファのGPU上のアドレスを返す
     D3D12_CONSTANT_BUFFER_VIEW_DESC ViewDesc(); // 定数バッファビューを返す

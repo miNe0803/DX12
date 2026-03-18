@@ -4,12 +4,12 @@
 ConstantBuffer::ConstantBuffer(size_t size)
 {
     size_t align = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-    UINT64 sizeAligned = (size + (align - 1)) & ~(align - 1); // alignに切り上げる.
+    UINT64 sizeAligned = (size + (align - 1)) & ~(align - 1); // alignに旙り昴げる.
 
-    auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD); // ヒーププロパティ
-    auto desc = CD3DX12_RESOURCE_DESC::Buffer(sizeAligned); // リソースの設定
+    auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD); // ヒ拏ププ�揀pティ
+    auto desc = CD3DX12_RESOURCE_DESC::Buffer(sizeAligned); // リソ拏スの昊定
 
-    // リソースを生成
+    // リソ拏スを攜擣
     auto hr = g_Engine->Device()->CreateCommittedResource(
         &prop,
         D3D12_HEAP_FLAG_NONE,
@@ -19,14 +19,14 @@ ConstantBuffer::ConstantBuffer(size_t size)
         IID_PPV_ARGS(m_pBuffer.GetAddressOf()));
     if (FAILED(hr))
     {
-        printf("定数バッファリソースの生成に失敗\n");
+        printf("定摧バッファリソ拏スの攜擣に失敗\n");
         return;
     }
 
     hr = m_pBuffer->Map(0, nullptr, &m_pMappedPtr);
     if (FAILED(hr))
     {
-        printf("定数バッファのマッピングに失敗\n");
+        printf("定摧バッファのマッピングに失敗\n");
         return;
     }
 
@@ -35,6 +35,17 @@ ConstantBuffer::ConstantBuffer(size_t size)
     m_Desc.SizeInBytes = UINT(sizeAligned);
 
     m_IsValid = true;
+}
+
+ConstantBuffer::~ConstantBuffer()
+{
+    if (m_pBuffer && m_pMappedPtr)
+    {
+        m_pBuffer->Unmap(0, nullptr);
+        m_pMappedPtr = nullptr;
+    }
+    m_pBuffer.Reset();
+    m_IsValid = false;
 }
 
 bool ConstantBuffer::IsValid()

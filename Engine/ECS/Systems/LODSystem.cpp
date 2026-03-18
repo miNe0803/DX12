@@ -13,12 +13,12 @@ static float Distance(const XMFLOAT3& a, const XMFLOAT3& b)
 	return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-// ワールド行列の平行移動成分（Position と BaseMatrix のどちらで動かしても正しい距離計算になる）
-static XMFLOAT3 GetPositionFromWorldMatrix(const DirectX::XMMATRIX& m)
+// CPU 側 WorldMatrix は XMMatrixTranspose(T*S*B*R)。転置後は行ベクトル用の「第4行」が列4に来るため _14,_24,_34 がワールド原点
+static XMFLOAT3 GetWorldOriginFromGPUWorldMatrix(const DirectX::XMMATRIX& m)
 {
 	DirectX::XMFLOAT4X4 f;
 	DirectX::XMStoreFloat4x4(&f, m);
-	return XMFLOAT3(f._41, f._42, f._43);
+	return XMFLOAT3(f._14, f._24, f._34);
 }
 
 void LODSystem::Update(entt::registry& registry, const DirectX::XMFLOAT3& cameraPos)
@@ -30,7 +30,7 @@ void LODSystem::Update(entt::registry& registry, const DirectX::XMFLOAT3& camera
 		auto& transform = view.get<TransformComponent>(entity);
 		auto& lod = view.get<LODComponent>(entity);
 
-		XMFLOAT3 pos = GetPositionFromWorldMatrix(transform.WorldMatrix);
+		XMFLOAT3 pos = GetWorldOriginFromGPUWorldMatrix(transform.WorldMatrix);
 		float dist = Distance(pos, cameraPos);
 		lod.DistanceToCamera = dist;
 

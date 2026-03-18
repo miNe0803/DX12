@@ -1,4 +1,6 @@
 // --- [b0: Transform] ---
+// DirectXMath は行メジャー・行ベクトル (pos * W * V * P)。cbuffer の既定は列メジャーなので row_major を付けないと
+// 平行移動・スケールがシェーダー側で取り違えられ、エディタの Position が画面に反映されないことがある。
 cbuffer Transform : register(b0)
 {
     matrix World;

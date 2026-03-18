@@ -15,8 +15,10 @@ float TerrainSystem::GetHeight(const entt::registry& registry, float worldX, flo
 	if (terrain.HeightData.empty() || terrain.GridWidth == 0 || terrain.GridDepth == 0 || terrain.CellSpacing <= 0.0f)
 		return 0.0f;
 
-	float gx = worldX / terrain.CellSpacing;
-	float gz = worldZ / terrain.CellSpacing;
+	const float halfWidth = static_cast<float>(terrain.GridWidth) * terrain.CellSpacing * 0.5f;
+	const float halfDepth = static_cast<float>(terrain.GridDepth) * terrain.CellSpacing * 0.5f;
+	float gx = (worldX + halfWidth) / terrain.CellSpacing;
+	float gz = (worldZ + halfDepth) / terrain.CellSpacing;
 
 	int ix0 = static_cast<int>(std::floor(gx));
 	int iz0 = static_cast<int>(std::floor(gz));

@@ -10,44 +10,55 @@ struct VSOutput
 };
 
 SamplerState smp : register(s0);
-// t0-t7: 地形マスク (0=Snow_Snow, 1=Trees2_Trees, 2=Rivers_Rivers, 3=WaterColor_Out, 4=INHIBITORS_Out, 5=Snow_Depth, 6=Trees2_FreshWater, 7=Rivers_Depth)
-Texture2D _Mask0 : register(t0);
-Texture2D _Mask1 : register(t1);
-Texture2D _Mask2 : register(t2);
-Texture2D _Mask3 : register(t3);
-Texture2D _Mask4 : register(t4);
-Texture2D _Mask5 : register(t5);
-Texture2D _Mask6 : register(t6);
-Texture2D _Mask7 : register(t7);
-TextureCube _PrefilterEnv  : register(t8);
-TextureCube _IrradianceMap : register(t9);
-Texture2D _BrdfLut         : register(t10);
+Texture2D _TreeMask   : register(t0); // R/G/B = 3種の木
+Texture2D _NatureMask : register(t1); // R=雪, G=川, B=予備(インヒビタ等)
+TextureCube _PrefilterEnv  : register(t4);
+TextureCube _IrradianceMap : register(t5);
+Texture2D _BrdfLut         : register(t6);
 
 cbuffer TerrainParams : register(b1)
 {
-    float4 LayerColor[4]; // 0=地面, 1=雪, 2=水, 3=木
+    float4 LayerColor[6]; // 0=地面, 1..3=木3種, 4=雪, 5=川
     float4 CameraPos;
 };
+
+float3 BlendTreeLayers(float3 mask, float3 ground, float3 tree0, float3 tree1, float3 tree2)
+{
+    float weightSum = mask.r + mask.g + mask.b;
+    if (weightSum <= 1e-4)
+        return ground;
+
+    return (tree0 * mask.r + tree1 * mask.g + tree2 * mask.b) / weightSum;
+}
 
 float4 main(VSOutput input) : SV_TARGET
 {
     float2 uv = input.uv;
-    float s = _Mask0.Sample(smp, uv).r;   // Snow_Snow
-    float t = _Mask1.Sample(smp, uv).r;   // Trees2_Trees
-    float r = _Mask2.Sample(smp, uv).r;   // Rivers_Rivers
-    float w = _Mask3.Sample(smp, uv).r;   // WaterColor_Out
-    float inhib = _Mask4.Sample(smp, uv).r; // INHIBITORS_Out
+    float3 treeMask = saturate(_TreeMask.Sample(smp, uv).rgb);
+    float3 natureMask = saturate(_NatureMask.Sample(smp, uv).rgb);
 
-    float3 albedo = LayerColor[0].rgb; // 地面
-    albedo = lerp(albedo, LayerColor[1].rgb, s);  // 雪
-    albedo = lerp(albedo, LayerColor[2].rgb, max(r, w)); // 水（河川 or 水面）
-    albedo = lerp(albedo, LayerColor[3].rgb, t);  // 木
-    albedo *= (1.0 - saturate(inhib)); // INHIBITORS でマスクアウト
+    float treeWeight = saturate(treeMask.r + treeMask.g + treeMask.b);
+    float snowWeight = natureMask.r;
+    float riverWeight = natureMask.g;
+    float inhibit = natureMask.b;
 
+    float3 ground = LayerColor[0].rgb;
+    float3 treeBlend = BlendTreeLayers(treeMask, ground, LayerColor[1].rgb, LayerColor[2].rgb, LayerColor[3].rgb);
+
+    float3 albedo = ground;
+    albedo = lerp(albedo, treeBlend, treeWeight);
+    albedo = lerp(albedo, LayerColor[5].rgb, riverWeight);
+    albedo = lerp(albedo, LayerColor[4].rgb, snowWeight);
+    albedo *= (1.0 - saturate(inhibit));
+
+    float roughness = 0.92;
+    roughness = lerp(roughness, 0.80, treeWeight);
+    roughness = lerp(roughness, 0.18, riverWeight);
+    roughness = lerp(roughness, 0.45, snowWeight);
+    roughness = clamp(roughness, 0.04, 1.0);
     float metallic = 0.0;
-    float roughness = 0.85;
-    float3 N = normalize(input.normal);
 
+    float3 N = normalize(input.normal);
     float3 L = normalize(float3(0.5, 0.7, -1.0));
     float3 LightColor = float3(1.2, 1.2, 1.2);
     float diffuseFactor = max(dot(N, L), 0.0);

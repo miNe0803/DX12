@@ -16,9 +16,9 @@ RootSignature::RootSignature(bool forTerrain)
 	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
 	if (forTerrain)
 	{
-		// 地形: t0-t7 マスク8枚, t8-t10 IBL 3枚
-		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
-		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 8);
+		// 地形: t0=tree_mask, t1=nature_mask, t4-t6 IBL
+		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
 	}
 	else
 	{

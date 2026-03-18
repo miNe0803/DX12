@@ -46,6 +46,15 @@
       <UniqueIdentifier>{D3E4F5A6-B7C8-4D9E-0F1A-2B3C4D5E6F7A}</UniqueIdentifier>
       <Filter>ECS</Filter>
     </Filter>
+    <Filter Include="Core">
+      <UniqueIdentifier>{E4F5A6B7-C8D9-4E0F-1A2B-3C4D5E6F7A8B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Components">
+      <UniqueIdentifier>{F5A6B7C8-D9E0-4F1A-2B3C-4D5E6F7A8B9C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="AppSystems">
+      <UniqueIdentifier>{A6B7C8D9-E0F1-4A2B-3C4D-5E6F7A8B9C0D}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -90,8 +99,11 @@
     <ClInclude Include="RootSignature.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
-    <ClInclude Include="Scene.h">
-      <Filter>ヘッダー ファイル</Filter>
+    <ClInclude Include="Core\Scene.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Components\PlayerComponent.h">
+      <Filter>Components</Filter>
     </ClInclude>
     <ClInclude Include="SharedStruct.h">
       <Filter>ヘッダー ファイル</Filter>
@@ -128,6 +140,12 @@
     </ClInclude>
     <ClInclude Include="Engine\ECS\Systems\LODSystem.h">
       <Filter>Systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Systems\PlayerSystem.h">
+      <Filter>AppSystems</Filter>
+    </ClInclude>
+    <ClInclude Include="Systems\CameraSystem.h">
+      <Filter>AppSystems</Filter>
     </ClInclude>
     <ClInclude Include="Engine\ECS\Systems\RenderSystem.h">
       <Filter>Systems</Filter>
@@ -176,8 +194,8 @@
     <ClCompile Include="RootSignature.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
-    <ClCompile Include="Scene.cpp">
-      <Filter>ソース ファイル</Filter>
+    <ClCompile Include="Core\Scene.cpp">
+      <Filter>Core</Filter>
     </ClCompile>
     <ClCompile Include="SharedStruct.cpp">
       <Filter>ソース ファイル</Filter>
@@ -190,6 +208,12 @@
     </ClCompile>
     <ClCompile Include="PipelineState.cpp">
       <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="Systems\PlayerSystem.cpp">
+      <Filter>AppSystems</Filter>
+    </ClCompile>
+    <ClCompile Include="Systems\CameraSystem.cpp">
+      <Filter>AppSystems</Filter>
     </ClCompile>
     <ClCompile Include="Source\Graphics\EXRLoader.cpp">
       <Filter>Graphics</Filter>

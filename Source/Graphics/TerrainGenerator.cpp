@@ -16,6 +16,11 @@ using namespace DirectX;
 
 namespace
 {
+	float Clamp01(float v)
+	{
+		return (std::max)(0.0f, (std::min)(v, 1.0f));
+	}
+
 	float SampleHeight(const uint8_t* pixels, UINT width, UINT height, size_t rowPitch, UINT i, UINT j)
 	{
 		UINT x = (std::min)(i, width > 0 ? width - 1u : 0u);
@@ -43,6 +48,38 @@ namespace
 		XMVECTOR n = XMVector3Cross(v1, v2);
 		n = XMVector3Normalize(n);
 		XMStoreFloat3(&outN, n);
+	}
+
+	void SmoothHeightMap(std::vector<float>& heightData, UINT w, UINT h, float blend)
+	{
+		if (heightData.empty() || w == 0 || h == 0)
+			return;
+
+		blend = Clamp01(blend);
+		if (blend <= 0.0f)
+			return;
+
+		std::vector<float> src = heightData;
+		for (UINT j = 0; j < h; ++j)
+		{
+			for (UINT i = 0; i < w; ++i)
+			{
+				float sum = 0.0f;
+				int count = 0;
+				for (int dj = -1; dj <= 1; ++dj)
+				{
+					int y = (std::max)(0, (std::min)(static_cast<int>(j) + dj, static_cast<int>(h) - 1));
+					for (int di = -1; di <= 1; ++di)
+					{
+						int x = (std::max)(0, (std::min)(static_cast<int>(i) + di, static_cast<int>(w) - 1));
+						sum += src[x + y * w];
+						++count;
+					}
+				}
+				float blurred = (count > 0) ? (sum / static_cast<float>(count)) : src[i + j * w];
+				heightData[i + j * w] = src[i + j * w] * (1.0f - blend) + blurred * blend;
+			}
+		}
 	}
 }
 
@@ -73,6 +110,7 @@ bool TerrainGenerator_GenerateFromFile(
 	for (UINT j = 0; j < h; j++)
 		for (UINT i = 0; i < w; i++)
 			out.HeightData[i + j * w] = SampleHeight(img->pixels, w, h, rowPitch, i, j);
+	SmoothHeightMap(out.HeightData, w, h, 0.25f);
 
 	out.GridWidth  = w;
 	out.GridDepth  = h;
@@ -80,6 +118,8 @@ bool TerrainGenerator_GenerateFromFile(
 	// Vertices: (w+1) * (h+1) でグリッド頂点
 	UINT numVerts = (w + 1) * (h + 1);
 	std::vector<Vertex> vertices(numVerts);
+	const float halfWidth = static_cast<float>(w) * cellSpacing * 0.5f;
+	const float halfDepth = static_cast<float>(h) * cellSpacing * 0.5f;
 
 	for (UINT j = 0; j <= h; j++)
 	{
@@ -91,9 +131,9 @@ bool TerrainGenerator_GenerateFromFile(
 
 			Vertex v = {};
 			v.Position = XMFLOAT3(
-				static_cast<float>(i) * cellSpacing,
+				static_cast<float>(i) * cellSpacing - halfWidth,
 				height,
-				static_cast<float>(j) * cellSpacing
+				static_cast<float>(j) * cellSpacing - halfDepth
 			);
 			v.UV = XMFLOAT2(
 				(w > 0) ? static_cast<float>(i) / static_cast<float>(w) : 0.0f,
@@ -156,21 +196,21 @@ bool TerrainGenerator_GenerateFromExr(
 	for (int i = 0; i < total; i++)
 	{
 		const float r = rgba[i * 4 + 0];
-		const float g = rgba[i * 4 + 1];
-		const float b = rgba[i * 4 + 2];
-		float heightNorm = (r + g + b) / 3.0f;
-		if (heightNorm < 0.0f) heightNorm = 0.0f;
-		if (heightNorm > 1.0f) heightNorm = 1.0f;
-		out.HeightData[static_cast<size_t>(i)] = heightNorm;
+		float heightNorm = Clamp01(r);
+		heightNorm = heightNorm * 0.85f;
+		out.HeightData[static_cast<size_t>(i)] = Clamp01(heightNorm);
 	}
 	free(rgba);
 
 	out.GridWidth  = static_cast<UINT>(w);
 	out.GridDepth  = static_cast<UINT>(h);
 	const UINT uw = out.GridWidth, uh = out.GridDepth;
+	SmoothHeightMap(out.HeightData, uw, uh, 0.35f);
 
 	UINT numVerts = (uw + 1) * (uh + 1);
 	std::vector<Vertex> vertices(numVerts);
+	const float halfWidth = static_cast<float>(uw) * cellSpacing * 0.5f;
+	const float halfDepth = static_cast<float>(uh) * cellSpacing * 0.5f;
 
 	for (UINT j = 0; j <= uh; j++)
 	{
@@ -182,9 +222,9 @@ bool TerrainGenerator_GenerateFromExr(
 
 			Vertex v = {};
 			v.Position = XMFLOAT3(
-				static_cast<float>(i) * cellSpacing,
+				static_cast<float>(i) * cellSpacing - halfWidth,
 				height,
-				static_cast<float>(j) * cellSpacing
+				static_cast<float>(j) * cellSpacing - halfDepth
 			);
 			v.UV = XMFLOAT2(
 				(uw > 0) ? static_cast<float>(i) / static_cast<float>(uw) : 0.0f,

@@ -2,7 +2,11 @@
 
 #include <DirectXMath.h>
 #include <d3d12.h>
+#include <entt/entt.hpp>
+#include <string>
 #include <vector>
+
+#include "Components/PlayerComponent.h"
 
 struct DescriptorHandle;
 
@@ -10,11 +14,19 @@ struct DescriptorHandle;
 // 地形などは Position で配置。木などは BaseMatrix + UniformScale + RotationY のまま（Position は 0 でよい）
 struct TransformComponent
 {
-	DirectX::XMFLOAT4X4 BaseMatrix;
+	// NOTE: 未初期化だと TransformSystem の合成で「全部動かない」になり得るため、
+	// デフォルトは Identity / scale=1 / rot=0 に揃える。
+	DirectX::XMFLOAT4X4 BaseMatrix = {
+		1.f, 0.f, 0.f, 0.f,
+		0.f, 1.f, 0.f, 0.f,
+		0.f, 0.f, 1.f, 0.f,
+		0.f, 0.f, 0.f, 1.f
+	};
 	DirectX::XMFLOAT3   Position = { 0.0f, 0.0f, 0.0f }; // ワールド位置（地形エンティティなどで使用）
-	float               UniformScale;
-	float               RotationY;
-	DirectX::XMMATRIX   WorldMatrix;
+	float               UniformScale = 1.0f;
+	float               RotationY = 0.0f;
+	// XMMATRIX は 16 バイト境界必須。ここまでのオフセットが 84 のままだと未定義動作になり Position が反映されない
+	alignas(16) DirectX::XMMATRIX WorldMatrix;
 };
 
 // 描画に必要な D3D12 ラッパーとマテリアル（PBR テクスチャ 4 つの先頭ハンドル）、影フラグ
@@ -42,4 +54,21 @@ struct TerrainComponent
 	UINT  GridDepth   = 0;
 	float CellSpacing = 1.0f;
 	float MaxHeight   = 100.0f;
+};
+
+// Editor / Hierarchy 表示用（非同期ロード等でスポーンしたメッシュに自動付与）
+struct EditorHierarchyLabelComponent
+{
+	std::wstring displayName;
+};
+
+// 1ファイルロード＝1親 + 複数子メッシュ（親で位置・回転・スケール一括）
+struct ModelGroupRootComponent
+{
+	std::vector<entt::entity> children;
+};
+
+struct ModelGroupChildComponent
+{
+	entt::entity parent{};
 };

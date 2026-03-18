@@ -10,6 +10,8 @@ void TransformSystem::Update(entt::registry& registry)
 
 	for (auto entity : view)
 	{
+		if (registry.all_of<ModelGroupChildComponent>(entity))
+			continue;
 		auto& transform = view.get<TransformComponent>(entity);
 		XMVECTOR pos = XMLoadFloat3(&transform.Position);
 		XMMATRIX T = XMMatrixTranslationFromVector(pos);
@@ -19,4 +21,12 @@ void TransformSystem::Update(entt::registry& registry)
 		XMMATRIX world = T * S * base * R;
 		transform.WorldMatrix = XMMatrixTranspose(world);
 	}
+
+	registry.view<ModelGroupChildComponent, TransformComponent>().each(
+		[&registry](entt::entity entity, ModelGroupChildComponent& link, TransformComponent& tc) {
+			if (!registry.valid(link.parent))
+				return;
+			const auto& parentTc = registry.get<TransformComponent>(link.parent);
+			tc.WorldMatrix = parentTc.WorldMatrix;
+		});
 }

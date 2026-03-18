@@ -107,7 +107,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -131,7 +131,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -164,7 +164,14 @@
     <ClInclude Include="PipelineState.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="RootSignature.h" />
-    <ClInclude Include="Scene.h" />
+    <ClInclude Include="Core\Scene.h" />
+    <ClInclude Include="Core\ModelSpawnOptions.h" />
+    <ClInclude Include="Core\ModelBounds.h" />
+    <ClInclude Include="Editor\ImGuiManager.h" />
+    <ClInclude Include="Editor\DebugUI.h" />
+    <ClInclude Include="Editor\EditorUI.h" />
+    <ClInclude Include="Engine\Core\AsyncModelLoader.h" />
+    <ClInclude Include="Components\PlayerComponent.h" />
     <ClInclude Include="SharedStruct.h" />
     <ClInclude Include="Source\Graphics\SkyboxRenderer.h" />
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
@@ -172,6 +179,8 @@
     <ClInclude Include="Engine\ECS\Components.h" />
     <ClInclude Include="Engine\ECS\Systems\TransformSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\LODSystem.h" />
+    <ClInclude Include="Systems\PlayerSystem.h" />
+    <ClInclude Include="Systems\CameraSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\RenderSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\TerrainSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGenerator.h" />
@@ -196,12 +205,25 @@
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="PipelineState.cpp" />
     <ClCompile Include="RootSignature.cpp" />
-    <ClCompile Include="Scene.cpp" />
+    <ClCompile Include="Core\Scene.cpp" />
+    <ClCompile Include="Editor\ImGuiManager.cpp" />
+    <ClCompile Include="Editor\DebugUI.cpp" />
+    <ClCompile Include="Editor\EditorUI.cpp" />
+    <ClCompile Include="Engine\Core\AsyncModelLoader.cpp" />
+    <ClCompile Include="ThirdParty\imgui\imgui.cpp" />
+    <ClCompile Include="ThirdParty\imgui\imgui_draw.cpp" />
+    <ClCompile Include="ThirdParty\imgui\imgui_tables.cpp" />
+    <ClCompile Include="ThirdParty\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="ThirdParty\imgui\imgui_demo.cpp" />
+    <ClCompile Include="ThirdParty\imgui\backends\imgui_impl_dx12.cpp" />
+    <ClCompile Include="ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="SharedStruct.cpp" />
     <ClCompile Include="Source\Graphics\SkyboxRenderer.cpp" />
     <ClCompile Include="Source\Graphics\PostProcessSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\LODSystem.cpp" />
+    <ClCompile Include="Systems\PlayerSystem.cpp" />
+    <ClCompile Include="Systems\CameraSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\TerrainSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGenerator.cpp" />

@@ -43,15 +43,20 @@ struct alignas(256) Transform {
     DirectX::XMMATRIX Proj;
 };
 
+// Draw ごとに b0 を別スロットに分ける（同一アドレスだと GPU 実行時は最後の World だけが全メッシュに効く）
+inline constexpr size_t kPerDrawTransformSlotCount = 16384u;
+inline constexpr size_t kPerDrawTransformCBBytes = sizeof(Transform) * kPerDrawTransformSlotCount;
+static_assert(sizeof(Transform) == 256u, "Transform CB stride must be 256 for root CBV offsets");
+
 // PBR用: RimParams (NormalScale等) + カメラ位置（反射ベクトル計算用）
 struct PBRConstants {
     DirectX::XMFLOAT4 RimParams;
     DirectX::XMFLOAT4 CameraPos;
 };
 
-// 地形用: 4レイヤー色 + カメラ位置（Terrain_PS で PBR 用）
+// 地形用: ベース地面 + 3種の木 + 雪 + 川 + カメラ位置
 struct TerrainConstants {
-    DirectX::XMFLOAT4 LayerColor[4]; // 0=地面, 1=雪, 2=水, 3=木
+    DirectX::XMFLOAT4 LayerColor[6]; // 0=地面, 1..3=木3種, 4=雪, 5=川
     DirectX::XMFLOAT4 CameraPos;
 };
 
