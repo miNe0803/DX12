@@ -15,7 +15,8 @@ void DebugUI::Draw()
 	ImGui::Begin("Debug / Async load");
 	const RenderSystem::GpuDrawStats gpu = RenderSystem::GetLastGpuDrawStats();
 	ImGui::TextUnformatted("--- GPU (prev frame DrawMain) ---");
-	ImGui::Text("DrawIndexed total: %u (terrain %u + PBR %u)", gpu.drawIndexedTotal, gpu.terrainDraws, gpu.pbrDraws);
+	ImGui::Text("DrawIndexed total: %u (terrain %u + PBR batches %u)", gpu.drawIndexedTotal, gpu.terrainDraws, gpu.pbrBatchDrawCalls);
+	ImGui::Text("PBR instances drawn: %u", gpu.pbrInstancesDrawn);
 	ImGui::Text("Player-model submesh draws: %u", gpu.playerModelSubmeshDraws);
 	ImGui::TextDisabled("PlayerComponent is on parent; mesh draws are children. 0 => no DrawIndexed for that model.");
 	ImGui::Separator();

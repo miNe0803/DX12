@@ -5,6 +5,7 @@
 #include "Editor/ImGuiManager.h"
 #include "Editor/EditorUI.h"
 #include "Engine/Core/AsyncModelLoader.h"
+#include "Engine/Profiling/Profiler.h"
 #include "Texture2D.h"
 #include "Engine/ECS/Systems/TransformSystem.h"
 #include <tchar.h>
@@ -134,6 +135,9 @@ void App::MainLoop() {
         else {
             Keyboard_Update();
 
+            // CPU中心のフレーム時間計測（メインループ1周）
+            Profiler::BeginFrame();
+
             if (g_Scene) {
                 g_Scene->Update();
             }
@@ -161,6 +165,8 @@ void App::MainLoop() {
                 }
                 g_Engine->EndRender();
             }
+
+            Profiler::EndFrame();
         }
     }
 }

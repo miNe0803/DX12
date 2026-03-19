@@ -1,18 +1,11 @@
-// PBR instanced path: b0 = View/Proj (space0), StructuredBuffer World at t0 space1.
-// Root: CBV0 scene, CBV1 material, Root SRV instance (t0,s1), tables t0-t3 / t4-t6 (space0) on PS.
-// View/Proj: C++ は XMMATRIX をそのまま書く（列メジャー格納）→ HLSL 既定 column_major と一致
-cbuffer SceneCB : register(b0)
+// Terrain path (non-instanced): full Transform in b0. Root signature has no instance SRV.
+
+cbuffer Transform : register(b0)
 {
+    matrix World;
     matrix View;
     matrix Proj;
 };
-
-struct InstanceData
-{
-    matrix World;
-};
-
-StructuredBuffer<InstanceData> gInstanceData : register(t0, space1);
 
 struct VSInput
 {
@@ -33,13 +26,11 @@ struct VSOutput
     float3 worldPos : TEXCOORD1;
 };
 
-VSOutput vert(VSInput input, uint instanceID : SV_InstanceID)
+VSOutput vert(VSInput input)
 {
     VSOutput output;
 
-    matrix worldM = gInstanceData[instanceID].World;
-
-    float4 worldPos = mul(float4(input.pos, 1.0f), worldM);
+    float4 worldPos = mul(float4(input.pos, 1.0f), World);
     float4 viewPos = mul(worldPos, View);
     output.svpos = mul(viewPos, Proj);
 
@@ -49,8 +40,8 @@ VSOutput vert(VSInput input, uint instanceID : SV_InstanceID)
     float3 n = (length(input.normal) > 0.1) ? input.normal : float3(0, 0, 1);
     float3 t = (length(input.tangent) > 0.1) ? input.tangent : float3(1, 0, 0);
 
-    output.normal = normalize(mul(n, (float3x3)worldM));
-    output.tangent = normalize(mul(t, (float3x3)worldM));
+    output.normal = normalize(mul(n, (float3x3)World));
+    output.tangent = normalize(mul(t, (float3x3)World));
     output.worldPos = worldPos.xyz;
 
     return output;

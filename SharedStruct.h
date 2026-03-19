@@ -37,6 +37,21 @@ struct Vertex {
 
 static_assert(sizeof(Vertex) == 84, "Vertex size must be 84 bytes.");
 
+/// PBR instancing: one row-major world matrix per instance (HLSL row_major + mul(pos, World)).
+struct InstanceData {
+    DirectX::XMFLOAT4X4 World;
+};
+
+/// Per-frame ring slices; keep in sync with Engine::FRAME_BUFFER_COUNT.
+inline constexpr size_t kMaxPbrInstancesPerFrame = 16384u;
+inline constexpr size_t kPbrInstanceRingFrameCount = 2u;
+
+/// PBR path b0: camera only (View/Proj). 256-byte aligned for CBV.
+struct alignas(256) SceneConstants {
+    DirectX::XMMATRIX View;
+    DirectX::XMMATRIX Proj;
+};
+
 struct alignas(256) Transform {
     DirectX::XMMATRIX World;
     DirectX::XMMATRIX View;

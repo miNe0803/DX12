@@ -9,41 +9,77 @@ RootSignature::RootSignature(bool forTerrain)
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
-	CD3DX12_ROOT_PARAMETER rootParam[4] = {};
-	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
-	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
-
+	CD3DX12_ROOT_PARAMETER rootParam[5] = {};
 	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
+
 	if (forTerrain)
 	{
-		// 地形: t0=tree_mask, t1=nature_mask, t4-t6 IBL
+		// Terrain (legacy): CBV0 transform, CBV1 terrain constants, table masks, table IBL
+		rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+		rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
 		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
-	}
-	else
-	{
-		// メッシュ: t0-t3 マテリアル, t4-t6 IBL
-		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
-		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
-	}
-	rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
-	rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
+		rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
+		rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 
-	// スタティックサンプラー (s0)
+		auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+
+		D3D12_ROOT_SIGNATURE_DESC desc = {};
+		desc.NumParameters = 4;
+		desc.NumStaticSamplers = 1;
+		desc.pParameters = rootParam;
+		desc.pStaticSamplers = &sampler;
+		desc.Flags = flag;
+
+		ComPtr<ID3DBlob> pBlob;
+		ComPtr<ID3DBlob> pErrorBlob;
+		auto hr = D3D12SerializeRootSignature(
+			&desc,
+			D3D_ROOT_SIGNATURE_VERSION_1_0,
+			pBlob.GetAddressOf(),
+			pErrorBlob.GetAddressOf());
+		if (FAILED(hr))
+		{
+			printf("Terrain root signature serialize failed\n");
+			return;
+		}
+
+		hr = g_Engine->Device()->CreateRootSignature(
+			0,
+			pBlob->GetBufferPointer(),
+			pBlob->GetBufferSize(),
+			IID_PPV_ARGS(m_pRootSignature.GetAddressOf()));
+		if (FAILED(hr))
+		{
+			printf("Terrain root signature create failed\n");
+			return;
+		}
+
+		m_IsValid = true;
+		return;
+	}
+
+	// PBR instanced: CBV0 scene (b0,s0), CBV1 material (b1,s0), Root SRV instances (t0,s1),
+	// table materials (t0-t3,s0), table IBL (t4-t6,s0)
+	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+	rootParam[2].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX);
+	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
+	rootParam[3].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
+	rootParam[4].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
+
 	auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 
-	// ルートシグニチャの設定（設定したいルートパラメーターとスタティックサンプラーを入れる）
 	D3D12_ROOT_SIGNATURE_DESC desc = {};
-	desc.NumParameters = std::size(rootParam); // ルートパラメーターの個数をいれる
-	desc.NumStaticSamplers = 1; // サンプラーの個数をいれる
-	desc.pParameters = rootParam; // ルートパラメーターのポインタをいれる
-	desc.pStaticSamplers = &sampler; // サンプラーのポインタを入れる
-	desc.Flags = flag; // フラグを設定
+	desc.NumParameters = 5;
+	desc.NumStaticSamplers = 1;
+	desc.pParameters = rootParam;
+	desc.pStaticSamplers = &sampler;
+	desc.Flags = flag;
 
 	ComPtr<ID3DBlob> pBlob;
 	ComPtr<ID3DBlob> pErrorBlob;
-
-	// シリアライズ
 	auto hr = D3D12SerializeRootSignature(
 		&desc,
 		D3D_ROOT_SIGNATURE_VERSION_1_0,
@@ -51,19 +87,18 @@ RootSignature::RootSignature(bool forTerrain)
 		pErrorBlob.GetAddressOf());
 	if (FAILED(hr))
 	{
-		printf("PBRルートシグネチャシリアライズに失敗\n");
+		printf("PBR root signature serialize failed\n");
 		return;
 	}
 
-	// ルートシグネチャ生成
 	hr = g_Engine->Device()->CreateRootSignature(
-		0, // GPUが複数ある場合のノードマスク（今回は1個しか無い想定なので0）
-		pBlob->GetBufferPointer(), // シリアライズしたデータのポインタ
-		pBlob->GetBufferSize(), // シリアライズしたデータのサイズ
-		IID_PPV_ARGS(m_pRootSignature.GetAddressOf())); // ルートシグニチャ格納先のポインタ
+		0,
+		pBlob->GetBufferPointer(),
+		pBlob->GetBufferSize(),
+		IID_PPV_ARGS(m_pRootSignature.GetAddressOf()));
 	if (FAILED(hr))
 	{
-		printf("PBRルートシグネチャの生成に失敗\n");
+		printf("PBR root signature create failed\n");
 		return;
 	}
 

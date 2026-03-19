@@ -24,6 +24,7 @@ public:
 private:
 	bool InitDescriptorHeap();
 	bool InitCameraAndFrameBuffers();
+	bool InitPbrInstanceRingBuffer();
 	bool SpawnModelEntities(const wchar_t* path, const ModelSpawnOptions& opt);
 	/// Assimp 済みメッシュからエンティティ生成（メインスレッド専用）。非同期ロード完了時に使用。
 	/// @param outEntitiesSpawned スポーンしたエンティティ数（任意）

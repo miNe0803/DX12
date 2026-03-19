@@ -51,6 +51,7 @@ DescriptorHeap* descriptorHeap = nullptr;
 
 Scene* g_Scene = nullptr;
 ConstantBuffer* constantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
+ConstantBuffer* sceneConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 ConstantBuffer* pbrPropertyBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 
 RootSignature* rootSignature = nullptr;
@@ -86,6 +87,9 @@ namespace {
 	DescriptorHandle* s_envCubemapHandle = nullptr;
 	DescriptorHandle* s_terrainMaskHandle = nullptr;
 	PostProcessSettings s_postProcessSettings;
+
+	ComPtr<ID3D12Resource> s_pbrInstanceRingBuffer;
+	InstanceData* s_pbrInstanceRingMapped = nullptr;
 
 	DescriptorHandle* RegisterPBRMaterial(DescriptorHeap* heap, const Mesh& mesh)
 	{
@@ -134,10 +138,19 @@ Scene::~Scene()
 	m_ownedIndexBuffers.clear();
 	m_registry.clear();
 
+	if (s_pbrInstanceRingBuffer && s_pbrInstanceRingMapped)
+	{
+		s_pbrInstanceRingBuffer->Unmap(0, nullptr);
+		s_pbrInstanceRingMapped = nullptr;
+	}
+	s_pbrInstanceRingBuffer.Reset();
+
 	for (size_t i = 0; i < Engine::FRAME_BUFFER_COUNT; ++i)
 	{
 		delete constantBuffer[i];
 		constantBuffer[i] = nullptr;
+		delete sceneConstantBuffer[i];
+		sceneConstantBuffer[i] = nullptr;
 		delete pbrPropertyBuffer[i];
 		pbrPropertyBuffer[i] = nullptr;
 		delete terrainConstantBuffer[i];
@@ -394,6 +407,10 @@ bool Scene::InitCameraAndFrameBuffers()
 		if (!constantBuffer[i]->IsValid())
 			return false;
 
+		sceneConstantBuffer[i] = new ConstantBuffer(sizeof(SceneConstants));
+		if (!sceneConstantBuffer[i]->IsValid())
+			return false;
+
 		pbrPropertyBuffer[i] = new ConstantBuffer(sizeof(PBRConstants));
 		if (!pbrPropertyBuffer[i]->IsValid())
 			return false;
@@ -401,6 +418,38 @@ bool Scene::InitCameraAndFrameBuffers()
 		pbr->RimParams = XMFLOAT4(1.0f, 1.5f, 0.0f, 0.0f);
 		pbr->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
+	return InitPbrInstanceRingBuffer();
+}
+
+bool Scene::InitPbrInstanceRingBuffer()
+{
+	static_assert(kPbrInstanceRingFrameCount == 2, "Ring frames must match Engine::FRAME_BUFFER_COUNT");
+	const UINT64 byteSize = sizeof(InstanceData) * kMaxPbrInstancesPerFrame * kPbrInstanceRingFrameCount;
+	const auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	const auto resDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+
+	HRESULT hr = g_Engine->Device()->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&resDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(s_pbrInstanceRingBuffer.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+	{
+		printf("Scene::InitPbrInstanceRingBuffer: CreateCommittedResource failed (0x%08X)\n", static_cast<unsigned>(hr));
+		return false;
+	}
+
+	void* mapped = nullptr;
+	hr = s_pbrInstanceRingBuffer->Map(0, nullptr, &mapped);
+	if (FAILED(hr) || !mapped)
+	{
+		printf("Scene::InitPbrInstanceRingBuffer: Map failed\n");
+		s_pbrInstanceRingBuffer.Reset();
+		return false;
+	}
+	s_pbrInstanceRingMapped = static_cast<InstanceData*>(mapped);
 	return true;
 }
 
@@ -440,7 +489,7 @@ bool Scene::InitTerrain()
 	terrainPipelineState = new PipelineState();
 	terrainPipelineState->SetInputLayout(Vertex::InputLayout);
 	terrainPipelineState->SetRootSignature(terrainRootSignature->Get());
-	terrainPipelineState->SetVS(L"SimpleVS.cso");
+	terrainPipelineState->SetVS(L"TerrainVS.cso");
 	terrainPipelineState->SetPS(L"Terrain_PS.cso");
 	terrainPipelineState->Create();
 
@@ -698,13 +747,21 @@ void Scene::Update()
 	CameraSystem::Update(g_Camera, dt, m_registry);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
-	auto currentTransform = constantBuffer[currentIndex]->GetPtr<Transform>();
-	if (!currentTransform)
+	auto* sc = sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetPtr<SceneConstants>() : nullptr;
+	if (!sc)
 		return;
 
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
-	currentTransform->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
-	currentTransform->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
+	sc->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
+	sc->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
+
+	// Terrain DrawMain reads SceneConstants; keep slot0 in sync for any legacy readers.
+	auto currentTransform = constantBuffer[currentIndex]->GetPtr<Transform>();
+	if (currentTransform)
+	{
+		currentTransform->View = sc->View;
+		currentTransform->Proj = sc->Proj;
+	}
 
 	auto pbrConst = pbrPropertyBuffer[currentIndex]->GetPtr<PBRConstants>();
 	if (pbrConst)
@@ -754,7 +811,12 @@ void Scene::Draw()
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	RenderSystem::DrawMain(m_registry, commandList,
-		constantBuffer[currentIndex], pbrPropertyBuffer[currentIndex],
+		constantBuffer[currentIndex],
+		sceneConstantBuffer[currentIndex],
+		pbrPropertyBuffer[currentIndex],
+		s_pbrInstanceRingBuffer.Get(),
+		s_pbrInstanceRingMapped,
+		currentIndex,
 		rootSignature, pipelineState, descriptorHeap, envHandle,
 		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU);
 

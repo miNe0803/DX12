@@ -170,7 +170,9 @@
     <ClInclude Include="Editor\ImGuiManager.h" />
     <ClInclude Include="Editor\DebugUI.h" />
     <ClInclude Include="Editor\EditorUI.h" />
+    <ClInclude Include="Editor\Windows\ProfilerWindow.h" />
     <ClInclude Include="Engine\Core\AsyncModelLoader.h" />
+    <ClInclude Include="Engine\Profiling\Profiler.h" />
     <ClInclude Include="Components\PlayerComponent.h" />
     <ClInclude Include="SharedStruct.h" />
     <ClInclude Include="Source\Graphics\SkyboxRenderer.h" />
@@ -222,6 +224,8 @@
     <ClCompile Include="Source\Graphics\PostProcessSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\LODSystem.cpp" />
+    <ClCompile Include="Editor\Windows\ProfilerWindow.cpp" />
+    <ClCompile Include="Engine\Profiling\Profiler.cpp" />
     <ClCompile Include="Systems\PlayerSystem.cpp" />
     <ClCompile Include="Systems\CameraSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp" />
@@ -293,6 +297,14 @@
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="TerrainVS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TerrainVS.cso</ObjectFileName>
     </FxCompile>
     <FxCompile Include="Shaders\Skybox\Skybox_PS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>

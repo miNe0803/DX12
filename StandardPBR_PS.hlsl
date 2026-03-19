@@ -1,4 +1,4 @@
-﻿// --- [VS output struct] ---
+// --- [VS output struct] ---
 struct VSOutput
 {
     float4 svpos : SV_POSITION;
@@ -9,19 +9,19 @@ struct VSOutput
     float3 worldPos : TEXCOORD1;
 };
 
-// --- [Textures and sampler] ---
+// --- [Textures and sampler] --- (space0: VS instance buffer uses space1)
 SamplerState smp : register(s0);
-Texture2D _AlbedoMap : register(t0);
-Texture2D _NormalMap : register(t1);
-Texture2D _MetallicMap : register(t2);
-Texture2D _RoughnessMap : register(t3);
-TextureCube _PrefilterEnv  : register(t4); // Specular IBL用（Mip付き・粗さ別ぼかし）
-TextureCube _IrradianceMap : register(t5); // 拡散IBL用
-Texture2D _BrdfLut         : register(t6); // Split Sum用 (NdotV, roughness) -> (A, B)
+Texture2D _AlbedoMap : register(t0, space0);
+Texture2D _NormalMap : register(t1, space0);
+Texture2D _MetallicMap : register(t2, space0);
+Texture2D _RoughnessMap : register(t3, space0);
+TextureCube _PrefilterEnv  : register(t4, space0);
+TextureCube _IrradianceMap : register(t5, space0);
+Texture2D _BrdfLut         : register(t6, space0);
 
 // --- [Material params (b1)] ---
 // RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
-cbuffer MaterialParams : register(b1)
+cbuffer MaterialParams : register(b1, space0)
 {
     float4 RimParams;
     float4 CameraPos;

@@ -266,6 +266,9 @@
     <FxCompile Include="SimpleVS.hlsl">
       <Filter>リソース ファイル</Filter>
     </FxCompile>
+    <FxCompile Include="TerrainVS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
     <FxCompile Include="Shaders\IBL\Equirect2Cube_CS.hlsl">
       <Filter>IBL</Filter>
     </FxCompile>

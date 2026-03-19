@@ -14,6 +14,7 @@
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/ECS/Components.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
+#include "Editor/Windows/ProfilerWindow.h"
 
 namespace
 {
@@ -190,9 +191,8 @@ void EditorUI::DrawWindows(entt::registry& registry)
 
 	if (m_State.showProfiler)
 	{
-		if (ImGui::Begin("Performance Profiler", &m_State.showProfiler))
-			ImGui::TextUnformatted("FPS, draw calls, and VRAM usage will go here.");
-		ImGui::End();
+		static ProfilerWindow s_profilerWindow;
+		s_profilerWindow.Draw(&m_State.showProfiler);
 	}
 
 	if (m_State.showAsyncModelLoad)
