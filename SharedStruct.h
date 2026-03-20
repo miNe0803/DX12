@@ -64,6 +64,7 @@ inline constexpr size_t kPerDrawTransformCBBytes = sizeof(Transform) * kPerDrawT
 static_assert(sizeof(Transform) == 256u, "Transform CB stride must be 256 for root CBV offsets");
 
 // PBR用: RimParams (NormalScale等) + カメラ位置（反射ベクトル計算用）
+// RimParams: .y=PBR 法線スケール / .z=NPR リムべき指数（NPR_PS.hlsl）
 struct PBRConstants {
     DirectX::XMFLOAT4 RimParams;
     DirectX::XMFLOAT4 CameraPos;
@@ -76,13 +77,19 @@ struct TerrainConstants {
 };
 
 struct Mesh {
-    std::string Name; 
+    std::string Name;
+    /// Assimp マテリアル名（透明ルール `_tr` 判定など）
+    std::string MaterialName;
     std::vector<Vertex> Vertices;
     std::vector<uint32_t> Indices;
     std::wstring DiffuseMap;
     std::wstring NormalMap;   
     std::wstring MetallicMap; 
     std::wstring RoughnessMap;
-    std::vector<Bone> Bones;  
+    std::vector<Bone> Bones;
+    /// マテリアル不透明度（AI_MATKEY_OPACITY 等）
+    float Opacity = 1.0f;
+    /// マテリアル名 `_tr` または Opacity<1 に基づく「透明パス対象」フラグ（NPR タグ付きモデルのみ使用）
+    bool NprTransparentByRule = false;
 };
 

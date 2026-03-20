@@ -43,7 +43,12 @@ struct MeshRendererComponent
 	ModelBounds          LocalBounds{};
 	/// true のとき CPU 視錐台カリングをしない（スキン: バインドポーズ AABB が枝先を表さないため）
 	bool                 SkipCpuFrustumCull = false;
+	/// NPR 透明パス用（親に NPRTag かつ Assimp 透明ルール）
+	bool                 NprTransparent = false;
 };
+
+/// NPR（トゥーン）描画対象のモデルルートに付与
+struct NPRTag {};
 
 // 広域パフォーマンス管理（建物、地形、木、草など）
 struct LODComponent

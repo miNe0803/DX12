@@ -321,6 +321,12 @@
     <FxCompile Include="StandardPBR_PS.hlsl">
       <Filter>リソース ファイル</Filter>
     </FxCompile>
+    <FxCompile Include="NPR_PS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="NPR_PS_Transparent.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
     <FxCompile Include="Terrain_PS.hlsl">
       <Filter>リソース ファイル</Filter>
     </FxCompile>

@@ -21,6 +21,8 @@ namespace
 	RenderSystem::GpuDrawStats s_lastGpuStats;
 	std::vector<RenderSystem::RenderQueueEntry> s_lastRenderQueue;
 	bool s_frustumCullPbrEnabled = true;
+	/// DrawMain 終了時点のインスタンスリング書き込み終端（exclusive）。NPR が続きから使用。
+	uint32_t s_instanceRingWriteEndExclusive = 0;
 
 	/// SceneConstants の View/Proj（シェーダと同一）から視錐台を作り、ローカル AABB をワールド AABB に変換して交差判定。
 	/// （SDK によっては BoundingBox→OBB の Transform が無いため、ワールド AABB は回転時やや保守的＝誤カリングしにくい）
@@ -178,7 +180,8 @@ void RenderSystem::DrawMain(
 	ID3D12GraphicsCommandList* cmdListPbrRecord1,
 	ID3D12DescriptorHeap* sharedSrvHeapForPbr,
 	D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
-	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu)
+	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu,
+	bool skipNprFamilyInPbr)
 {
 	(void)descriptorHeap;
 	auto view = registry.view<TransformComponent, MeshRendererComponent, LODComponent>();
@@ -242,6 +245,14 @@ void RenderSystem::DrawMain(
 		}
 		else
 		{
+			if (skipNprFamilyInPbr)
+			{
+				if (const auto* link = registry.try_get<ModelGroupChildComponent>(entity))
+				{
+					if (registry.valid(link->parent) && registry.all_of<NPRTag>(link->parent))
+						continue;
+				}
+			}
 			if (!pbrResourcesOk || !mesh.MaterialHandle)
 			{
 				if (isPlayer)
@@ -521,6 +532,8 @@ void RenderSystem::DrawMain(
 		flushPbrBatchLegacy();
 	}
 
+	s_instanceRingWriteEndExclusive = static_cast<uint32_t>(writeCursor);
+
 	s_lastGpuStats.drawIndexedTotal = statTotal;
 	s_lastGpuStats.terrainDraws = statTerr;
 	s_lastGpuStats.pbrBatchDrawCalls = statPbrBatches;
@@ -537,4 +550,139 @@ bool RenderSystem::GetFrustumCullPbrEnabled()
 void RenderSystem::SetFrustumCullPbrEnabled(bool enabled)
 {
 	s_frustumCullPbrEnabled = enabled;
+}
+
+void RenderSystem::DrawNprPasses(
+	entt::registry& registry,
+	ID3D12GraphicsCommandList* cmdList,
+	ConstantBuffer* sceneConstantsCB,
+	ConstantBuffer* pbrPropertyBuffer,
+	ID3D12Resource* pbrInstanceBuffer,
+	InstanceData* pbrInstanceMapped,
+	UINT instanceRingFrameIndex,
+	RootSignature* rootSignature,
+	PipelineState* nprOpaquePso,
+	PipelineState* nprTransparentPso,
+	DescriptorHeap* descriptorHeap,
+	D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
+	ID3D12DescriptorHeap* materialHeap,
+	D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
+	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu,
+	const DirectX::XMFLOAT3& cameraWorldPos)
+{
+	(void)descriptorHeap;
+	using namespace DirectX;
+
+	if (!cmdList || !rootSignature || !sceneConstantsCB || !pbrPropertyBuffer || !pbrInstanceBuffer || !pbrInstanceMapped)
+		return;
+	const bool haveOpaque = nprOpaquePso && nprOpaquePso->IsValid();
+	const bool haveTrans = nprTransparentPso && nprTransparentPso->IsValid();
+	if (!haveOpaque && !haveTrans)
+		return;
+
+	struct NprItem
+	{
+		entt::entity e{};
+		UINT64 materialKey = 0;
+	};
+	std::vector<NprItem> opaqueList;
+	std::vector<NprItem> transList;
+	opaqueList.reserve(64);
+	transList.reserve(32);
+
+	for (auto entity : registry.view<TransformComponent, MeshRendererComponent, LODComponent>())
+	{
+		const auto& lod = registry.get<LODComponent>(entity);
+		if (lod.CurrentLODLevel == 3)
+			continue;
+		if (!registry.all_of<ModelGroupChildComponent>(entity))
+			continue;
+		const auto& ch = registry.get<ModelGroupChildComponent>(entity);
+		if (!registry.valid(ch.parent) || !registry.all_of<NPRTag>(ch.parent))
+			continue;
+		const auto& mesh = registry.get<MeshRendererComponent>(entity);
+		if (!mesh.pVB || !mesh.pIB || !mesh.MaterialHandle)
+			continue;
+		NprItem it{ entity, mesh.MaterialHandle->HandleGPU.ptr };
+		if (mesh.NprTransparent)
+			transList.push_back(it);
+		else
+			opaqueList.push_back(it);
+	}
+
+	if (opaqueList.empty() && transList.empty())
+		return;
+
+	std::sort(opaqueList.begin(), opaqueList.end(), [](const NprItem& a, const NprItem& b) {
+		return a.materialKey < b.materialKey;
+	});
+
+	XMVECTOR cam = XMLoadFloat3(&cameraWorldPos);
+	std::vector<std::pair<float, entt::entity>> transSorted;
+	transSorted.reserve(transList.size());
+	for (const auto& it : transList)
+	{
+		const auto& t = registry.get<TransformComponent>(it.e);
+		XMVECTOR pos = t.WorldMatrix.r[3];
+		const float dsq = XMVectorGetX(XMVector3LengthSq(pos - cam));
+		transSorted.push_back({ dsq, it.e });
+	}
+	std::sort(transSorted.begin(), transSorted.end(), [](const std::pair<float, entt::entity>& a,
+				  const std::pair<float, entt::entity>& b) {
+		return a.first > b.first;
+	});
+
+	const UINT sliceBase = static_cast<UINT>(instanceRingFrameIndex * kMaxPbrInstancesPerFrame);
+	const UINT sliceEnd = sliceBase + static_cast<UINT>(kMaxPbrInstancesPerFrame);
+	uint32_t writeCursor = s_instanceRingWriteEndExclusive;
+
+	ID3D12DescriptorHeap* heaps[] = { materialHeap };
+	cmdList->SetDescriptorHeaps(1, heaps);
+	if (mainPassRtvCpu.ptr != 0 && mainPassDsvCpu.ptr != 0)
+		cmdList->OMSetRenderTargets(1, &mainPassRtvCpu, FALSE, &mainPassDsvCpu);
+	cmdList->SetGraphicsRootSignature(rootSignature->Get());
+	cmdList->SetGraphicsRootConstantBufferView(0, sceneConstantsCB->GetAddress());
+	cmdList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer->GetAddress());
+
+	auto drawOne = [&](entt::entity entity, PipelineState* pso) -> bool {
+		if (!pso || !pso->IsValid())
+			return false;
+		if (writeCursor >= sliceEnd)
+		{
+			DebugLog("[Render] NPR instance ring full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
+			return false;
+		}
+		const auto& transform = registry.get<TransformComponent>(entity);
+		const auto& mesh = registry.get<MeshRendererComponent>(entity);
+		XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
+		const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
+		cmdList->SetPipelineState(pso->Get());
+		cmdList->SetGraphicsRootDescriptorTable(3, mesh.MaterialHandle->HandleGPU);
+		if (envCubemapHandleGPU.ptr != 0)
+			cmdList->SetGraphicsRootDescriptorTable(4, envCubemapHandleGPU);
+		cmdList->SetGraphicsRootShaderResourceView(2, pbrInstanceBuffer->GetGPUVirtualAddress() + batchBaseOffsetBytes);
+		D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
+		D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();
+		cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cmdList->IASetVertexBuffers(0, 1, &vbView);
+		cmdList->IASetIndexBuffer(&ibView);
+		cmdList->DrawIndexedInstanced(mesh.IndexCount, 1, 0, 0, 0);
+		++writeCursor;
+		return true;
+	};
+
+	for (const auto& it : opaqueList)
+	{
+		if (!haveOpaque)
+			break;
+		if (!drawOne(it.e, nprOpaquePso))
+			break;
+	}
+	for (const auto& pr : transSorted)
+	{
+		if (!haveTrans)
+			break;
+		if (!drawOne(pr.second, nprTransparentPso))
+			break;
+	}
 }

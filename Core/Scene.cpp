@@ -59,6 +59,8 @@ ConstantBuffer* pbrPropertyBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 
 RootSignature* rootSignature = nullptr;
 PipelineState* pipelineState = nullptr;
+PipelineState* nprPipelineState = nullptr;
+PipelineState* nprTransparentPipelineState = nullptr;
 RootSignature* terrainRootSignature = nullptr;
 PipelineState* terrainPipelineState = nullptr;
 ConstantBuffer* terrainConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
@@ -186,6 +188,10 @@ Scene::~Scene()
 	rootSignature = nullptr;
 	delete pipelineState;
 	pipelineState = nullptr;
+	delete nprPipelineState;
+	nprPipelineState = nullptr;
+	delete nprTransparentPipelineState;
+	nprTransparentPipelineState = nullptr;
 	delete terrainRootSignature;
 	terrainRootSignature = nullptr;
 	delete terrainPipelineState;
@@ -258,6 +264,8 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		m_registry.emplace<EditorHierarchyLabelComponent>(parentEnt,
 			EditorHierarchyLabelComponent{ fs::path(path).filename().wstring() });
 		m_registry.emplace<LODComponent>(parentEnt, 0, 0.0f);
+		if (opt.addNprTag)
+			m_registry.emplace<NPRTag>(parentEnt);
 		if (opt.addPlayerComponent)
 		{
 			PlayerComponent pc = {};
@@ -330,6 +338,7 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		mrc.HasLocalBounds = IsValidModelBounds(mrc.LocalBounds);
 		// スキンメッシュは頂点がバインド空間に近く、CPU AABB+親 World では枝先の花が視錐外扱いで消える
 		mrc.SkipCpuFrustumCull = !m.Bones.empty();
+		mrc.NprTransparent = opt.addNprTag && m.NprTransparentByRule;
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 		m_registry.emplace<EditorHierarchyLabelComponent>(entity,
@@ -441,7 +450,8 @@ bool Scene::InitCameraAndFrameBuffers()
 		if (!pbrPropertyBuffer[i]->IsValid())
 			return false;
 		auto pbr = pbrPropertyBuffer[i]->GetPtr<PBRConstants>();
-		pbr->RimParams = XMFLOAT4(1.0f, 1.5f, 0.0f, 0.0f);
+		// x:予備 y:法線スケール z:リムべき指数（NPR） w:予備
+		pbr->RimParams = XMFLOAT4(1.0f, 1.5f, 3.0f, 0.0f);
 		pbr->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
 	return InitPbrInstanceRingBuffer();
@@ -575,7 +585,29 @@ bool Scene::InitMainPipeline()
 	pipelineState->SetVS(L"SimpleVS.cso");
 	pipelineState->SetPS(L"StandardPBR_PS.cso");
 	pipelineState->Create();
-	return pipelineState->IsValid();
+	if (!pipelineState->IsValid())
+		return false;
+
+	nprPipelineState = new PipelineState();
+	nprPipelineState->SetInputLayout(Vertex::InputLayout);
+	nprPipelineState->SetRootSignature(rootSignature->Get());
+	nprPipelineState->SetVS(L"SimpleVS.cso");
+	nprPipelineState->SetPS(L"NPR_PS.cso");
+	nprPipelineState->SetCullMode(D3D12_CULL_MODE_BACK);
+	nprPipelineState->Create();
+
+	nprTransparentPipelineState = new PipelineState();
+	nprTransparentPipelineState->SetInputLayout(Vertex::InputLayout);
+	nprTransparentPipelineState->SetRootSignature(rootSignature->Get());
+	nprTransparentPipelineState->SetVS(L"SimpleVS.cso");
+	nprTransparentPipelineState->SetPS(L"NPR_PS_Transparent.cso");
+	// 板ポリの目・ハイライト等が欠けないよう半透明パスは両面
+	nprTransparentPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	nprTransparentPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO);
+	nprTransparentPipelineState->SetAlphaBlendPremultiplied();
+	nprTransparentPipelineState->Create();
+
+	return true;
 }
 
 bool Scene::InitSkyboxAndIBL()
@@ -729,7 +761,9 @@ bool Scene::Init()
 		L"TerrainVS.cso",
 		L"Terrain_PS.cso",
 		L"SimpleVS.cso",
-		L"StandardPBR_PS.cso"
+		L"StandardPBR_PS.cso",
+		L"NPR_PS.cso",
+		L"NPR_PS_Transparent.cso"
 	});
 
 	if (!InitDescriptorHeap())
@@ -759,6 +793,7 @@ bool Scene::Init()
 		player.rotationY = 0.0f;
 		player.foot = ModelSpawnOptions::FootPlacement::SnapFeetToTerrain;
 		player.addPlayerComponent = true;
+		player.addNprTag = true;
 		if (!SpawnModelEntities(L"assets\\hibana\\hibana.pmx", player))
 			return false;
 	}
@@ -861,6 +896,16 @@ void Scene::Draw()
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+	bool hasNprTag = false;
+	for ([[maybe_unused]] entt::entity e : m_registry.view<NPRTag>())
+	{
+		(void)e;
+		hasNprTag = true;
+		break;
+	}
+	const bool nprOpaquePsoOk = nprPipelineState && nprPipelineState->IsValid();
+	const bool useNprDrawPath = hasNprTag && nprOpaquePsoOk;
+	const bool disableParallelPbr = useNprDrawPath;
 	RenderSystem::DrawMain(m_registry, commandList,
 		constantBuffer[currentIndex],
 		sceneConstantBuffer[currentIndex],
@@ -870,11 +915,33 @@ void Scene::Draw()
 		currentIndex,
 		rootSignature, pipelineState, descriptorHeap, envHandle,
 		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU,
-		g_Engine->PbrRecordCmdList(0),
-		g_Engine->PbrRecordCmdList(1),
+		disableParallelPbr ? nullptr : g_Engine->PbrRecordCmdList(0),
+		disableParallelPbr ? nullptr : g_Engine->PbrRecordCmdList(1),
 		materialHeap,
 		hdrRtvHandle,
-		dsvHandle);
+		dsvHandle,
+		useNprDrawPath);
+
+	if (useNprDrawPath)
+	{
+		XMFLOAT3 camPos{};
+		XMStoreFloat3(&camPos, g_Camera->GetPosition());
+		RenderSystem::DrawNprPasses(m_registry, commandList,
+			sceneConstantBuffer[currentIndex],
+			pbrPropertyBuffer[currentIndex],
+			s_pbrInstanceRingBuffer.Get(),
+			s_pbrInstanceRingMapped,
+			currentIndex,
+			rootSignature,
+			nprPipelineState,
+			nprTransparentPipelineState,
+			descriptorHeap,
+			envHandle,
+			materialHeap,
+			hdrRtvHandle,
+			dsvHandle,
+			camPos);
+	}
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
 	{

@@ -60,6 +60,13 @@ namespace
 				<< ":" << static_cast<int>(e.InputSlotClass)
 				<< ":" << e.InstanceDataStepRate;
 		}
+		const D3D12_RENDER_TARGET_BLEND_DESC& rt0 = d.BlendState.RenderTarget[0];
+		oss << "|Cull=" << static_cast<int>(d.RasterizerState.CullMode)
+			<< "|DWM=" << static_cast<int>(d.DepthStencilState.DepthWriteMask)
+			<< "|BE=" << static_cast<int>(rt0.BlendEnable)
+			<< "|SB=" << static_cast<int>(rt0.SrcBlend)
+			<< "|DB=" << static_cast<int>(rt0.DestBlend)
+			<< "|BO=" << static_cast<int>(rt0.BlendOp);
 		return oss.str();
 	}
 }
@@ -118,6 +125,30 @@ void PipelineState::SetPS(std::wstring filePath)
 	}
 
 	desc.PS = CD3DX12_SHADER_BYTECODE(m_pPSBlob.Get());
+}
+
+void PipelineState::SetCullMode(D3D12_CULL_MODE mode)
+{
+	desc.RasterizerState.CullMode = mode;
+}
+
+void PipelineState::SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask)
+{
+	desc.DepthStencilState.DepthWriteMask = mask;
+}
+
+void PipelineState::SetAlphaBlendPremultiplied()
+{
+	D3D12_RENDER_TARGET_BLEND_DESC& rt = desc.BlendState.RenderTarget[0];
+	rt.BlendEnable = TRUE;
+	rt.LogicOpEnable = FALSE;
+	rt.SrcBlend = D3D12_BLEND_ONE;
+	rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	rt.BlendOp = D3D12_BLEND_OP_ADD;
+	rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+	rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+	rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 }
 
 void PipelineState::Create()

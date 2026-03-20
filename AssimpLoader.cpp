@@ -4,7 +4,10 @@
 #include <assimp/postprocess.h>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
+#include <string>
 #include <Windows.h> // WideCharToMultiByte
+#include <assimp/material.h>
 #include "SharedStruct.h"
 
 #include "Texture2D.h"
@@ -214,6 +217,25 @@ bool AssimpLoader::Load(ImportSettings& settings)
         Resolve(aiTextureType_NORMALS, dst.NormalMap);
         Resolve(aiTextureType_METALNESS, dst.MetallicMap);
         Resolve(aiTextureType_DIFFUSE_ROUGHNESS, dst.RoughnessMap);
+
+        aiString matNameAi;
+        if (mat->Get(AI_MATKEY_NAME, matNameAi) == AI_SUCCESS)
+            dst.MaterialName = matNameAi.C_Str();
+
+        float opacity = 1.0f;
+        if (mat->Get(AI_MATKEY_OPACITY, opacity) != AI_SUCCESS)
+        {
+            aiColor4D diffuse{};
+            if (mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS)
+                opacity = diffuse.a;
+        }
+        dst.Opacity = opacity;
+
+        std::string lower = dst.MaterialName;
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool nameSuggestsTransparent = (lower.find("_tr") != std::string::npos);
+        dst.NprTransparentByRule = (opacity < 0.99f) || nameSuggestsTransparent;
     }
 
     if (scene->HasAnimations() && settings.outClips)

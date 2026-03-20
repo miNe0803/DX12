@@ -15,4 +15,6 @@ struct ModelSpawnOptions
 	float rotationY = 0.0f;
 	FootPlacement foot = FootPlacement::None;
 	bool addPlayerComponent = false;
+	/// true のとき親に NPRTag を付与し、マテリアルルールに従い子 MeshRenderer に透明 NPR を割り当てる
+	bool addNprTag = false;
 };

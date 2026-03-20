@@ -68,5 +68,25 @@ namespace RenderSystem
 		ID3D12GraphicsCommandList* cmdListPbrRecord1 = nullptr,
 		ID3D12DescriptorHeap* sharedSrvHeapForPbr = nullptr,
 		D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu = {},
-		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu = {});
+		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu = {},
+		bool skipNprFamilyInPbr = false);
+
+	/// DrawMain の後。PBR キューから NPR 親子は除外済み。不透明 NPR → 透明 NPR（距離ソート）。
+	void DrawNprPasses(
+		entt::registry& registry,
+		ID3D12GraphicsCommandList* cmdList,
+		ConstantBuffer* sceneConstantsCB,
+		ConstantBuffer* pbrPropertyBuffer,
+		ID3D12Resource* pbrInstanceBuffer,
+		InstanceData* pbrInstanceMapped,
+		UINT instanceRingFrameIndex,
+		RootSignature* rootSignature,
+		PipelineState* nprOpaquePso,
+		PipelineState* nprTransparentPso,
+		DescriptorHeap* descriptorHeap,
+		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
+		ID3D12DescriptorHeap* materialHeap,
+		D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
+		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu,
+		const DirectX::XMFLOAT3& cameraWorldPos);
 }
