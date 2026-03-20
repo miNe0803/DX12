@@ -5,15 +5,18 @@
 #include <algorithm>
 
 std::chrono::high_resolution_clock::time_point Profiler::s_frameStartTime = {};
+std::chrono::high_resolution_clock::time_point Profiler::s_renderStartTime = {};
 std::array<ProfilerFrameStats, Profiler::kHistorySize> Profiler::s_history{};
 size_t Profiler::s_head = 0;
 size_t Profiler::s_count = 0;
 uint32_t Profiler::s_currentMiscDrawCalls = 0;
+float Profiler::s_currentRenderCpuTimeMs = 0.0f;
 
 void Profiler::BeginFrame()
 {
 	s_frameStartTime = std::chrono::high_resolution_clock::now();
 	s_currentMiscDrawCalls = 0;
+	s_currentRenderCpuTimeMs = 0.0f;
 }
 
 void Profiler::EndFrame()
@@ -23,6 +26,7 @@ void Profiler::EndFrame()
 
 	ProfilerFrameStats stats{};
 	stats.frameTimeMs = timeMs;
+	stats.renderCpuTimeMs = s_currentRenderCpuTimeMs;
 	stats.fps = (timeMs > 0.0f) ? (1000.0f / timeMs) : 0.0f;
 
 	// A案: RenderSystemからPull
@@ -33,6 +37,17 @@ void Profiler::EndFrame()
 	s_history[s_head] = stats;
 	s_head = (s_head + 1) % kHistorySize;
 	s_count = std::min(s_count + 1, kHistorySize);
+}
+
+void Profiler::BeginRenderCpuSection()
+{
+	s_renderStartTime = std::chrono::high_resolution_clock::now();
+}
+
+void Profiler::EndRenderCpuSection()
+{
+	const auto end = std::chrono::high_resolution_clock::now();
+	s_currentRenderCpuTimeMs += std::chrono::duration<float, std::milli>(end - s_renderStartTime).count();
 }
 
 const ProfilerFrameStats& Profiler::GetLatest()

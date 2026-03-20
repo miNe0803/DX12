@@ -33,9 +33,9 @@ bool Engine::Init(HWND hwnd, UINT windowWidth, UINT windowHeight)
 		printf("Engine::Init: CreateSwapChain failed.\n");
 		return false;
 	}
-	if (!CreateCommandList())
+	if (!InitGfxCommandLists())
 	{
-		printf("Engine::Init: CreateCommandList failed.\n");
+		printf("Engine::Init: InitGfxCommandLists failed.\n");
 		return false;
 	}
 	if (!CreateFence())
@@ -138,7 +138,7 @@ bool Engine::CreateSwapChain()
 	return true;
 }
 
-bool Engine::CreateCommandList()
+bool Engine::InitGfxCommandLists()
 {
 	HRESULT hr;
 	for (size_t i = 0; i < FRAME_BUFFER_COUNT; i++)
@@ -162,7 +162,7 @@ bool Engine::CreateCommandList()
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
 		m_pAllocator[0].Get(),
 		nullptr,
-		IID_PPV_ARGS(&m_pCommandList)
+		IID_PPV_ARGS(&m_pMainGfxCmdList)
 	);
 
 	if (FAILED(hr))
@@ -170,7 +170,40 @@ bool Engine::CreateCommandList()
 		return false;
 	}
 
-	m_pCommandList->Close();
+	m_pMainGfxCmdList->Close();
+
+	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
+	{
+		hr = m_pDevice->CreateCommandAllocator(
+			D3D12_COMMAND_LIST_TYPE_DIRECT,
+			IID_PPV_ARGS(m_pPbrRecordAllocator[w].ReleaseAndGetAddressOf()));
+		if (FAILED(hr))
+			return false;
+		hr = m_pDevice->CreateCommandList(
+			0,
+			D3D12_COMMAND_LIST_TYPE_DIRECT,
+			m_pPbrRecordAllocator[w].Get(),
+			nullptr,
+			IID_PPV_ARGS(m_pPbrRecordGfxCmdList[w].ReleaseAndGetAddressOf()));
+		if (FAILED(hr))
+			return false;
+		m_pPbrRecordGfxCmdList[w]->Close();
+	}
+
+	hr = m_pDevice->CreateCommandAllocator(
+		D3D12_COMMAND_LIST_TYPE_DIRECT,
+		IID_PPV_ARGS(m_pPostAllocator.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+		return false;
+	hr = m_pDevice->CreateCommandList(
+		0,
+		D3D12_COMMAND_LIST_TYPE_DIRECT,
+		m_pPostAllocator.Get(),
+		nullptr,
+		IID_PPV_ARGS(m_pPostGfxCmdList.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+		return false;
+	m_pPostGfxCmdList->Close();
 
 	return true;
 }
@@ -313,11 +346,11 @@ bool Engine::CreateDepthStencil()
 		m_FrameBufferHeight,
 		1,
 		1,
-		Engine::kDepthStencilFormat,
+		Engine::kDepthStencilResourceFormat,
 		1,
 		0,
 		D3D12_TEXTURE_LAYOUT_UNKNOWN,
-		D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+		D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
 	hr = m_pDevice->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
@@ -334,7 +367,12 @@ bool Engine::CreateDepthStencil()
 
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_pDsvHeap->GetCPUDescriptorHandleForHeapStart();
 
-	m_pDevice->CreateDepthStencilView(m_pDepthStencilBuffer.Get(), nullptr, dsvHandle);
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+	dsvDesc.Format = Engine::kDepthStencilFormat;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	dsvDesc.Texture2D.MipSlice = 0;
+	m_pDevice->CreateDepthStencilView(m_pDepthStencilBuffer.Get(), &dsvDesc, dsvHandle);
 
 	return true;
 }
@@ -359,21 +397,41 @@ void Engine::BeginRender()
 
 	m_currentRenderTarget = m_pHdrColor.Get();
 	m_pAllocator[0]->Reset();
-	m_pCommandList->Reset(m_pAllocator[0].Get(), nullptr);
-	m_pCommandList->RSSetViewports(1, &m_Viewport);
-	m_pCommandList->RSSetScissorRects(1, &m_Scissor);
+	m_pMainGfxCmdList->Reset(m_pAllocator[0].Get(), nullptr);
+	m_pMainGfxCmdList->RSSetViewports(1, &m_Viewport);
+	m_pMainGfxCmdList->RSSetScissorRects(1, &m_Scissor);
 	// HDR clear: Scene::Draw (barrier, OMSetRTV, Clear)
+
+	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
+	{
+		m_pPbrRecordAllocator[w]->Reset();
+		m_pPbrRecordGfxCmdList[w]->Reset(m_pPbrRecordAllocator[w].Get(), nullptr);
+		m_pPbrRecordGfxCmdList[w]->RSSetViewports(1, &m_Viewport);
+		m_pPbrRecordGfxCmdList[w]->RSSetScissorRects(1, &m_Scissor);
+	}
+	m_pPostAllocator->Reset();
+	m_pPostGfxCmdList->Reset(m_pPostAllocator.Get(), nullptr);
+	m_pPostGfxCmdList->RSSetViewports(1, &m_Viewport);
+	m_pPostGfxCmdList->RSSetScissorRects(1, &m_Scissor);
 }
 
 void Engine::EndRender()
 {
 	ID3D12Resource* backBuffer = m_pRenderTargets[m_CurrentBackBufferIndex].Get();
-	EngineDoTransition(m_pCommandList.Get(), backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+	// バックバッファ最終書き込みは Post（ポストプロセス・ImGui）のあと
+	EngineDoTransition(m_pPostGfxCmdList.Get(), backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
-	m_pCommandList->Close();
+	m_pMainGfxCmdList->Close();
+	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
+		m_pPbrRecordGfxCmdList[w]->Close();
+	m_pPostGfxCmdList->Close();
 
-	ID3D12CommandList* ppCmdLists[] = { m_pCommandList.Get() };
-	m_pQueue->ExecuteCommandLists(1, ppCmdLists);
+	ID3D12CommandList* ppCmdLists[1 + PBR_RECORD_WORKERS + 1];
+	ppCmdLists[0] = m_pMainGfxCmdList.Get();
+	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
+		ppCmdLists[1 + w] = m_pPbrRecordGfxCmdList[w].Get();
+	ppCmdLists[1 + PBR_RECORD_WORKERS] = m_pPostGfxCmdList.Get();
+	m_pQueue->ExecuteCommandLists(1 + PBR_RECORD_WORKERS + 1, ppCmdLists);
 
 	++m_mainGraphicsFenceValue;
 	m_pQueue->Signal(m_pFence.Get(), m_mainGraphicsFenceValue);
@@ -389,9 +447,21 @@ ID3D12Device6* Engine::Device()
 	return m_pDevice.Get();
 }
 
-ID3D12GraphicsCommandList* Engine::CommandList()
+ID3D12GraphicsCommandList* Engine::MainGraphicsCmdList()
 {
-	return m_pCommandList.Get();
+	return m_pMainGfxCmdList.Get();
+}
+
+ID3D12GraphicsCommandList* Engine::PbrRecordCmdList(int workerIndex)
+{
+	if (workerIndex < 0 || workerIndex >= PBR_RECORD_WORKERS)
+		return nullptr;
+	return m_pPbrRecordGfxCmdList[workerIndex].Get();
+}
+
+ID3D12GraphicsCommandList* Engine::PostGraphicsCmdList()
+{
+	return m_pPostGfxCmdList.Get();
 }
 
 ID3D12CommandAllocator* Engine::Allocator(UINT index)
@@ -441,8 +511,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE Engine::GetDsvCpuHandle()
 
 void Engine::ExecuteAndWait()
 {
-	m_pCommandList->Close();
-	ID3D12CommandList* ppCmdLists[] = { m_pCommandList.Get() };
+	m_pMainGfxCmdList->Close();
+	ID3D12CommandList* ppCmdLists[] = { m_pMainGfxCmdList.Get() };
 	m_pQueue->ExecuteCommandLists(1, ppCmdLists);
 
 	UINT64 fenceValue = m_mainGraphicsFenceValue;

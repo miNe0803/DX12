@@ -36,10 +36,17 @@ namespace RenderSystem
 		uint32_t pbrInstancesDrawn = 0;
 		/// 親に PlayerComponent がある ModelGroup の子メッシュ（キャラ本体のパーツ描画）
 		uint32_t playerModelSubmeshDraws = 0;
+		/// 直近フレームで視錐台外として PBR キューから省いたエンティティ数
+		uint32_t pbrFrustumCulledEntities = 0;
 	};
 	GpuDrawStats GetLastGpuDrawStats();
 
+	/// PBR 視錐台カリング（ロードマップ: Hi-Z 前段の CPU オクルージョン）。デフォルト ON。
+	bool GetFrustumCullPbrEnabled();
+	void SetFrustumCullPbrEnabled(bool enabled);
+
 	// 地形: perDrawTransformCB（スロットごと World+View+Proj）。PBR: sceneConstantsCB + instance ring。
+	// cmdList: 地形のみ。cmdListPbrRecord0/1 と sharedSrvHeapForPbr が非 nullptr のとき PBR を2スレッドで記録（Engine とセットで使用）。
 	void DrawMain(
 		entt::registry& registry,
 		ID3D12GraphicsCommandList* cmdList,
@@ -56,5 +63,10 @@ namespace RenderSystem
 		RootSignature* terrainRootSignature = nullptr,
 		PipelineState* terrainPipelineState = nullptr,
 		ConstantBuffer* terrainCB = nullptr,
-		D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU = { 0 });
+		D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU = { 0 },
+		ID3D12GraphicsCommandList* cmdListPbrRecord0 = nullptr,
+		ID3D12GraphicsCommandList* cmdListPbrRecord1 = nullptr,
+		ID3D12DescriptorHeap* sharedSrvHeapForPbr = nullptr,
+		D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu = {},
+		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu = {});
 }

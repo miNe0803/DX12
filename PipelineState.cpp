@@ -2,8 +2,67 @@
 #include "Engine.h"
 #include <d3dx12.h>
 #include <d3dcompiler.h>
+#include <unordered_map>
+#include <sstream>
+#include <string>
 
 #pragma comment(lib, "d3dcompiler.lib")
+
+namespace
+{
+	std::unordered_map<std::wstring, ComPtr<ID3DBlob>> s_shaderBlobCache;
+	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> s_graphicsPsoCache;
+
+	ComPtr<ID3DBlob> LoadShaderBlobCached(const std::wstring& filePath)
+	{
+		if (auto it = s_shaderBlobCache.find(filePath); it != s_shaderBlobCache.end())
+			return it->second;
+
+		ComPtr<ID3DBlob> blob;
+		const HRESULT hr = D3DReadFileToBlob(filePath.c_str(), blob.GetAddressOf());
+		if (FAILED(hr))
+			return nullptr;
+
+		s_shaderBlobCache[filePath] = blob;
+		return blob;
+	}
+
+	std::string NarrowAscii(const std::wstring& s)
+	{
+		std::string out;
+		out.reserve(s.size());
+		for (wchar_t c : s)
+			out.push_back(static_cast<char>(c & 0xFF));
+		return out;
+	}
+
+	std::string BuildPsoCacheKey(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, const std::wstring& vsPath, const std::wstring& psPath)
+	{
+		std::ostringstream oss;
+		oss << "RS=" << reinterpret_cast<uintptr_t>(d.pRootSignature)
+			<< "|VS=" << NarrowAscii(vsPath)
+			<< "|PS=" << NarrowAscii(psPath)
+			<< "|RTV0=" << static_cast<int>(d.RTVFormats[0])
+			<< "|DSV=" << static_cast<int>(d.DSVFormat)
+			<< "|SM=" << d.SampleMask
+			<< "|SC=" << d.SampleDesc.Count
+			<< "|PT=" << static_cast<int>(d.PrimitiveTopologyType)
+			<< "|ILN=" << d.InputLayout.NumElements;
+		for (UINT i = 0; i < d.InputLayout.NumElements; ++i)
+		{
+			const D3D12_INPUT_ELEMENT_DESC& e = d.InputLayout.pInputElementDescs[i];
+			oss << "|E" << i
+				<< ":" << (e.SemanticName ? e.SemanticName : "")
+				<< ":" << e.SemanticIndex
+				<< ":" << static_cast<int>(e.Format)
+				<< ":" << e.InputSlot
+				<< ":" << e.AlignedByteOffset
+				<< ":" << static_cast<int>(e.InputSlotClass)
+				<< ":" << e.InstanceDataStepRate;
+		}
+		return oss.str();
+	}
+}
 
 PipelineState::PipelineState()
 {
@@ -37,8 +96,9 @@ void PipelineState::SetRootSignature(ID3D12RootSignature* rootSignature)
 
 void PipelineState::SetVS(std::wstring filePath)
 {
-	auto hr = D3DReadFileToBlob(filePath.c_str(), m_pVsBlob.GetAddressOf());
-	if (FAILED(hr))
+	m_vsPath = std::move(filePath);
+	m_pVsBlob = LoadShaderBlobCached(m_vsPath);
+	if (!m_pVsBlob)
 	{
 		printf("VS load failed\n");
 		return;
@@ -49,8 +109,9 @@ void PipelineState::SetVS(std::wstring filePath)
 
 void PipelineState::SetPS(std::wstring filePath)
 {
-	auto hr = D3DReadFileToBlob(filePath.c_str(), m_pPSBlob.GetAddressOf());
-	if (FAILED(hr))
+	m_psPath = std::move(filePath);
+	m_pPSBlob = LoadShaderBlobCached(m_psPath);
+	if (!m_pPSBlob)
 	{
 		printf("PS load failed\n");
 		return;
@@ -66,6 +127,14 @@ void PipelineState::Create()
 		printf("PipelineState: shader not loaded\n");
 		return;
 	}
+	const std::string key = BuildPsoCacheKey(desc, m_vsPath, m_psPath);
+	if (auto it = s_graphicsPsoCache.find(key); it != s_graphicsPsoCache.end())
+	{
+		m_pPipelineState = it->second;
+		m_IsValid = true;
+		return;
+	}
+
 	auto hr = g_Engine->Device()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_pPipelineState.ReleaseAndGetAddressOf()));
 	if (FAILED(hr))
 	{
@@ -73,7 +142,16 @@ void PipelineState::Create()
 		return;
 	}
 
+	s_graphicsPsoCache[key] = m_pPipelineState;
 	m_IsValid = true;
+}
+
+void PipelineState::WarmupShaderBytecode(const std::vector<std::wstring>& shaderPaths)
+{
+	for (const std::wstring& path : shaderPaths)
+	{
+		(void)LoadShaderBlobCached(path);
+	}
 }
 
 ID3D12PipelineState* PipelineState::Get()

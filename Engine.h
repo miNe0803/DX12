@@ -16,8 +16,11 @@
 class Engine
 {
 public:
-	enum { FRAME_BUFFER_COUNT = 2 };
+	static constexpr int FRAME_BUFFER_COUNT = 2;
+	static constexpr int PBR_RECORD_WORKERS = 2;
+	// DSV / PSO format; resource is R32_TYPELESS with this DSV view.
 	static constexpr DXGI_FORMAT kDepthStencilFormat = DXGI_FORMAT_D32_FLOAT;
+	static constexpr DXGI_FORMAT kDepthStencilResourceFormat = DXGI_FORMAT_R32_TYPELESS;
 
 	bool Init(HWND hwnd, UINT windowWidth, UINT windowHeight);
 
@@ -25,23 +28,24 @@ public:
 	void EndRender();
 
 	ID3D12Device6* Device();
-	ID3D12GraphicsCommandList* CommandList();
+	// Main pass: HDR clear + terrain (avoid "CommandList" in method names; some SDKs macro it)
+	ID3D12GraphicsCommandList* MainGraphicsCmdList();
+	ID3D12GraphicsCommandList* PbrRecordCmdList(int workerIndex);
+	ID3D12GraphicsCommandList* PostGraphicsCmdList();
 	ID3D12CommandAllocator* Allocator(UINT index);
 	ID3D12CommandQueue* Queue();
 	UINT CurrentBackBufferIndex();
 
-	// Close, execute, wait (e.g. IBL generation on init).
 	void ExecuteAndWait();
-
-	// Block until GPU queue is idle (resource teardown, after external queue use).
 	void WaitForGpuIdle();
 
-	// HDR color, RTVs, back buffer
 	ID3D12Resource* GetHdrColorResource();
 	ID3D12Resource* GetBackBufferResource();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetHdrRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle();
+	// Depth buffer as R32_FLOAT SRV (Hi-Z, etc.)
+	ID3D12Resource* GetDepthStencilResource() const { return m_pDepthStencilBuffer.Get(); }
 	UINT GetFrameBufferWidth() const { return m_FrameBufferWidth; }
 	UINT GetFrameBufferHeight() const { return m_FrameBufferHeight; }
 
@@ -49,7 +53,7 @@ private:
 	bool CreateDevice();
 	bool CreateCommandQueue();
 	bool CreateSwapChain();
-	bool CreateCommandList();
+	bool InitGfxCommandLists();
 	bool CreateFence();
 	void CreateViewPort();
 	void CreateScissorRect();
@@ -67,12 +71,15 @@ private:
 	ComPtr<ID3D12CommandQueue> m_pQueue = nullptr;
 	ComPtr<IDXGISwapChain3> m_pSwapChain = nullptr;
 	ComPtr<ID3D12CommandAllocator> m_pAllocator[FRAME_BUFFER_COUNT] = { nullptr };
-	ComPtr<ID3D12GraphicsCommandList> m_pCommandList = nullptr;
+	ComPtr<ID3D12GraphicsCommandList> m_pMainGfxCmdList = nullptr;
+	ComPtr<ID3D12CommandAllocator> m_pPbrRecordAllocator[PBR_RECORD_WORKERS] = { nullptr };
+	ComPtr<ID3D12GraphicsCommandList> m_pPbrRecordGfxCmdList[PBR_RECORD_WORKERS] = { nullptr };
+	ComPtr<ID3D12CommandAllocator> m_pPostAllocator = nullptr;
+	ComPtr<ID3D12GraphicsCommandList> m_pPostGfxCmdList = nullptr;
 
 	HANDLE m_fenceEvent = nullptr;
 	ComPtr<ID3D12Fence> m_pFence = nullptr;
 	UINT64 m_fenceValue[FRAME_BUFFER_COUNT] = {};
-	// Last fence signaled after main command list Execute (allocator 0 only for rendering).
 	UINT64 m_mainGraphicsFenceValue = 0;
 
 	D3D12_VIEWPORT m_Viewport{};

@@ -2,6 +2,7 @@
 #include "ComPtr.h"
 #include <d3dx12.h>
 #include <string>
+#include <vector>
 
 class PipelineState
 {
@@ -14,6 +15,7 @@ public:
 	void SetVS(std::wstring filePath); // 頂点シェーダーを設定
 	void SetPS(std::wstring filePath); // ピクセルシェーダーを設定
 	void Create(); // パイプラインステートを生成
+	static void WarmupShaderBytecode(const std::vector<std::wstring>& shaderPaths);
 
 	ID3D12PipelineState* Get();
 
@@ -23,5 +25,7 @@ private:
 	ComPtr<ID3D12PipelineState> m_pPipelineState = nullptr; // パイプラインステート
 	ComPtr<ID3DBlob> m_pVsBlob; // 頂点シェーダー
 	ComPtr<ID3DBlob> m_pPSBlob; // ピクセルシェーダー
+	std::wstring m_vsPath;
+	std::wstring m_psPath;
 };
 

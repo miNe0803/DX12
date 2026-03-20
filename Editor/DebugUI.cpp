@@ -4,8 +4,10 @@
 #include <imgui.h>
 
 #include "Core/ModelSpawnOptions.h"
+#include "Core/Scene.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/ECS/Systems/RenderSystem.h"
+#include "Graphics/HiZSystem.h"
 
 #include <cstdio>
 #include <string>
@@ -15,10 +17,25 @@ void DebugUI::Draw()
 	ImGui::Begin("Debug / Async load");
 	const RenderSystem::GpuDrawStats gpu = RenderSystem::GetLastGpuDrawStats();
 	ImGui::TextUnformatted("--- GPU (prev frame DrawMain) ---");
+	bool frustumCull = RenderSystem::GetFrustumCullPbrEnabled();
+	if (ImGui::Checkbox("PBR frustum cull (CPU / Hi-Z precursor)", &frustumCull))
+		RenderSystem::SetFrustumCullPbrEnabled(frustumCull);
+	ImGui::Text("PBR entities frustum-culled (prev): %u", gpu.pbrFrustumCulledEntities);
 	ImGui::Text("DrawIndexed total: %u (terrain %u + PBR batches %u)", gpu.drawIndexedTotal, gpu.terrainDraws, gpu.pbrBatchDrawCalls);
 	ImGui::Text("PBR instances drawn: %u", gpu.pbrInstancesDrawn);
 	ImGui::Text("Player-model submesh draws: %u", gpu.playerModelSubmeshDraws);
 	ImGui::TextDisabled("PlayerComponent is on parent; mesh draws are children. 0 => no DrawIndexed for that model.");
+	if (g_Scene)
+	{
+		HiZSystem* hz = g_Scene->GetHiZSystem();
+		if (hz && hz->IsValid())
+		{
+			bool hzOn = hz->GetEnabled();
+			if (ImGui::Checkbox("Hi-Z pyramid (GPU, min-depth mips)", &hzOn))
+				hz->SetEnabled(hzOn);
+			ImGui::Text("Hi-Z mips: %u", hz->GetMipCount());
+		}
+	}
 	ImGui::Separator();
 	static bool showDemo = false;
 	ImGui::Checkbox("ImGui Demo", &showDemo);

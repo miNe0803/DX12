@@ -154,16 +154,18 @@ void App::MainLoop() {
                 TransformSystem::Update(g_Scene->GetRegistry());
 
             if (g_Engine && g_Scene) {
+                Profiler::BeginRenderCpuSection();
                 g_Engine->BeginRender();
                 g_Scene->Draw();
                 if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
                     g_ImGuiManager->Render(
-                        g_Engine->CommandList(),
+                        g_Engine->PostGraphicsCmdList(),
                         g_Engine->GetBackBufferRtvCpuHandle(),
                         g_Engine->GetFrameBufferWidth(),
                         g_Engine->GetFrameBufferHeight());
                 }
                 g_Engine->EndRender();
+                Profiler::EndRenderCpuSection();
             }
 
             Profiler::EndFrame();

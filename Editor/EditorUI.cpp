@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Core/ModelSpawnOptions.h"
+#include "Scene.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/ECS/Components.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
@@ -475,6 +476,16 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 	ImGui::Checkbox("Load with X +15m", &offsetPlus15X);
 	static bool addPlayerOnLoad = false;
 	ImGui::Checkbox("Add Player component on load (TPS / Movement panel)", &addPlayerOnLoad);
+
+	int spawnBudget = 1;
+	if (g_Scene)
+		spawnBudget = static_cast<int>(g_Scene->GetAsyncSpawnBudgetPerFrame());
+	if (ImGui::SliderInt("Async spawn budget / frame", &spawnBudget, 1, 16))
+	{
+		if (g_Scene)
+			g_Scene->SetAsyncSpawnBudgetPerFrame(static_cast<size_t>(spawnBudget));
+	}
+	ImGui::TextDisabled("Higher = faster load finish, but larger frame-time spikes.");
 
 	ImGui::Separator();
 	ImGui::TextWrapped(

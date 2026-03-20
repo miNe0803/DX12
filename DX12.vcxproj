@@ -107,6 +107,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -177,6 +178,7 @@
     <ClInclude Include="SharedStruct.h" />
     <ClInclude Include="Source\Graphics\SkyboxRenderer.h" />
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
+    <ClInclude Include="Source\Graphics\HiZSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
     <ClInclude Include="Engine\ECS\Components.h" />
     <ClInclude Include="Engine\ECS\Systems\TransformSystem.h" />
@@ -203,6 +205,7 @@
       <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\vcpkg\installed\x64-windows\include;C:\vcpkg\installed\x64-windows\include\OpenEXR;C:\vcpkg\installed\x64-windows\include\Imath;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClCompile Include="Source\Graphics\IBLGenerator.cpp" />
+    <ClCompile Include="Source\Graphics\HiZSystem.cpp" />
     <ClCompile Include="IndexBuffer.cpp" />
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="PipelineState.cpp" />
@@ -276,6 +279,20 @@
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">4.0</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\HiZ_CopyDepth_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)HiZ_CopyDepth_CS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\HiZ_ReduceMin_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)HiZ_ReduceMin_CS.cso</ObjectFileName>
     </FxCompile>
     <FxCompile Include="Prefilter_CS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>

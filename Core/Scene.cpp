@@ -30,6 +30,7 @@
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
 #include "Graphics/TerrainGenerator.h"
+#include "Graphics/HiZSystem.h"
 #include "ModelBounds.h"
 #include "Engine/Core/AsyncModelLoader.h"
 
@@ -40,6 +41,8 @@
 
 using namespace DirectX;
 namespace fs = std::filesystem;
+
+static HiZSystem* s_hiz = nullptr;
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -103,19 +106,24 @@ namespace {
 		if (!normalTex && !mesh.NormalMap.empty())
 			normalTex = Texture2D::Get(ReplaceExtension(mesh.NormalMap, "tga"));
 		if (!normalTex) normalTex = Texture2D::GetWhite();
-		heap->Register(normalTex);
+		DescriptorHandle* normalHandle = heap->Register(normalTex);
 
 		Texture2D* metallicTex = Texture2D::Get(mesh.MetallicMap);
 		if (!metallicTex && !mesh.MetallicMap.empty())
 			metallicTex = Texture2D::Get(ReplaceExtension(mesh.MetallicMap, "tga"));
 		if (!metallicTex) metallicTex = Texture2D::GetDefaultMetallic();
-		heap->Register(metallicTex);
+		DescriptorHandle* metallicHandle = heap->Register(metallicTex);
 
 		Texture2D* roughnessTex = Texture2D::Get(mesh.RoughnessMap);
 		if (!roughnessTex && !mesh.RoughnessMap.empty())
 			roughnessTex = Texture2D::Get(ReplaceExtension(mesh.RoughnessMap, "tga"));
 		if (!roughnessTex) roughnessTex = Texture2D::GetDefaultRoughness();
-		heap->Register(roughnessTex);
+		DescriptorHandle* roughnessHandle = heap->Register(roughnessTex);
+
+		// t0..t3 を「先頭ハンドルから連番で期待」しているため、
+		// normal/metallic/roughness の Register が失敗した場合は不整合を避ける。
+		if (!firstHandle || !normalHandle || !metallicHandle || !roughnessHandle)
+			return nullptr;
 
 		return firstHandle;
 	}
@@ -161,6 +169,8 @@ Scene::~Scene()
 	s_skyboxRenderer = nullptr;
 	delete s_postProcess;
 	s_postProcess = nullptr;
+	delete s_hiz;
+	s_hiz = nullptr;
 
 	s_hdrSrvHandle = nullptr;
 	s_envCubemapHandle = nullptr;
@@ -243,6 +253,8 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		m_registry.emplace<TransformComponent>(parentEnt, ptc);
 		auto& root = m_registry.emplace<ModelGroupRootComponent>(parentEnt);
 		root.children.reserve(nToSpawn);
+		root.combinedModelBounds = bounds;
+		root.hasCombinedModelBounds = IsValidModelBounds(bounds);
 		m_registry.emplace<EditorHierarchyLabelComponent>(parentEnt,
 			EditorHierarchyLabelComponent{ fs::path(path).filename().wstring() });
 		m_registry.emplace<LODComponent>(parentEnt, 0, 0.0f);
@@ -314,6 +326,10 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		mrc.IndexCount = static_cast<UINT>(m.Indices.size());
 		mrc.MaterialHandle = matHandle;
 		mrc.CastShadow = true;
+		mrc.LocalBounds = ComputeMeshBounds(m);
+		mrc.HasLocalBounds = IsValidModelBounds(mrc.LocalBounds);
+		// スキンメッシュは頂点がバインド空間に近く、CPU AABB+親 World では枝先の花が視錐外扱いで消える
+		mrc.SkipCpuFrustumCull = !m.Bones.empty();
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 		m_registry.emplace<EditorHierarchyLabelComponent>(entity,
@@ -353,9 +369,9 @@ void Scene::ProcessAsyncModelLoads()
 
 	// 1フレームでの GPU リソース生成(VB/IB) + SRV 登録を分散してスパイクを抑える
 	// (Assimp パース自体はワーカー側で完了している前提)
-	constexpr size_t kSpawnBudgetPerFrame = 1;
+	const size_t spawnBudget = std::max<size_t>(1, m_asyncSpawnBudgetPerFrame);
 
-	g_AsyncModelLoader->DrainCompleted(kSpawnBudgetPerFrame, [this](AsyncModelLoadResult&& r) {
+	g_AsyncModelLoader->DrainCompleted(spawnBudget, [this](AsyncModelLoadResult&& r) {
 		if (r.filePath.empty())
 			return;
 		if (!r.success)
@@ -388,6 +404,16 @@ void Scene::ProcessAsyncModelLoads()
 			spawned ? L"" : detail,
 			finalPos.x, finalPos.y, finalPos.z);
 	});
+}
+
+void Scene::SetAsyncSpawnBudgetPerFrame(size_t budget)
+{
+	m_asyncSpawnBudgetPerFrame = std::max<size_t>(1, budget);
+}
+
+size_t Scene::GetAsyncSpawnBudgetPerFrame() const
+{
+	return std::max<size_t>(1, m_asyncSpawnBudgetPerFrame);
 }
 
 bool Scene::InitDescriptorHeap()
@@ -556,14 +582,14 @@ bool Scene::InitSkyboxAndIBL()
 {
 	DebugLog("[Skybox] --- init begin ---\n");
 	g_Engine->Allocator(0)->Reset();
-	g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+	g_Engine->MainGraphicsCmdList()->Reset(g_Engine->Allocator(0), nullptr);
 
 	ID3D12Resource* cubemap = nullptr;
 	ID3D12Resource* equirect = nullptr;
 	IBLGenerator ibl;
 	const auto doExecuteAndWait = []() { g_Engine->ExecuteAndWait(); };
 
-	if (ibl.Generate(g_Engine->Device(), g_Engine->CommandList(), L"assets\\skybox.exr", 2560u, &cubemap, doExecuteAndWait, &equirect))
+	if (ibl.Generate(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), L"assets\\skybox.exr", 2560u, &cubemap, doExecuteAndWait, &equirect))
 	{
 		skyboxCubemap = cubemap;
 		skyboxEquirect = equirect;
@@ -574,7 +600,7 @@ bool Scene::InitSkyboxAndIBL()
 		DebugLog("[Skybox] Generate failed. Creating fallback...\n");
 		ID3D12Resource* defaultCubemap = nullptr;
 		ComPtr<ID3D12Resource> defaultUpload;
-		if (IBLGenerator::CreateDefaultCubemap(g_Engine->Device(), g_Engine->CommandList(), 4, 0.25f, 0.45f, 0.85f, 1.0f, &defaultCubemap, defaultUpload.GetAddressOf()))
+		if (IBLGenerator::CreateDefaultCubemap(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), 4, 0.25f, 0.45f, 0.85f, 1.0f, &defaultCubemap, defaultUpload.GetAddressOf()))
 		{
 			skyboxCubemap = defaultCubemap;
 			g_Engine->ExecuteAndWait();
@@ -595,23 +621,23 @@ bool Scene::InitSkyboxAndIBL()
 
 		g_Engine->WaitForGpuIdle();
 		g_Engine->Allocator(0)->Reset();
-		g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+		g_Engine->MainGraphicsCmdList()->Reset(g_Engine->Allocator(0), nullptr);
 		ID3D12Resource* irradianceRaw = nullptr;
-		if (ibl.GenerateIrradianceMap(g_Engine->Device(), g_Engine->CommandList(), skyboxCubemap.Get(), doExecuteAndWait, &irradianceRaw))
+		if (ibl.GenerateIrradianceMap(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), skyboxCubemap.Get(), doExecuteAndWait, &irradianceRaw))
 			s_irradianceCubemap = irradianceRaw;
 
 		g_Engine->WaitForGpuIdle();
 		g_Engine->Allocator(0)->Reset();
-		g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+		g_Engine->MainGraphicsCmdList()->Reset(g_Engine->Allocator(0), nullptr);
 		ID3D12Resource* prefilterRaw = nullptr;
-		if (ibl.GeneratePrefilteredEnvMap(g_Engine->Device(), g_Engine->CommandList(), skyboxCubemap.Get(), doExecuteAndWait, &prefilterRaw))
+		if (ibl.GeneratePrefilteredEnvMap(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), skyboxCubemap.Get(), doExecuteAndWait, &prefilterRaw))
 			s_prefilterCubemap = prefilterRaw;
 
 		g_Engine->WaitForGpuIdle();
 		g_Engine->Allocator(0)->Reset();
-		g_Engine->CommandList()->Reset(g_Engine->Allocator(0), nullptr);
+		g_Engine->MainGraphicsCmdList()->Reset(g_Engine->Allocator(0), nullptr);
 		ID3D12Resource* brdfLutRaw = nullptr;
-		if (ibl.GenerateBrdfLut(g_Engine->Device(), g_Engine->CommandList(), doExecuteAndWait, &brdfLutRaw))
+		if (ibl.GenerateBrdfLut(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), doExecuteAndWait, &brdfLutRaw))
 			s_brdfLut = brdfLutRaw;
 
 		srvDescCube.TextureCube.MipLevels = 5;
@@ -698,6 +724,14 @@ bool Scene::InitPostProcess()
 
 bool Scene::Init()
 {
+	// Warm-up: load frequently used shader bytecode early to reduce first-use stutter.
+	PipelineState::WarmupShaderBytecode({
+		L"TerrainVS.cso",
+		L"Terrain_PS.cso",
+		L"SimpleVS.cso",
+		L"StandardPBR_PS.cso"
+	});
+
 	if (!InitDescriptorHeap())
 		return false;
 	if (!InitCameraAndFrameBuffers())
@@ -736,7 +770,23 @@ bool Scene::Init()
 	if (!InitPostProcess())
 		return false;
 
+	{
+		UINT w = g_Engine->GetFrameBufferWidth();
+		UINT h = g_Engine->GetFrameBufferHeight();
+		s_hiz = new HiZSystem();
+		if (!s_hiz->Init(g_Engine->Device(), w, h, g_Engine->GetDepthStencilResource()))
+		{
+			delete s_hiz;
+			s_hiz = nullptr;
+		}
+	}
+
 	return true;
+}
+
+HiZSystem* Scene::GetHiZSystem() const
+{
+	return s_hiz;
 }
 
 void Scene::Update()
@@ -788,7 +838,8 @@ void Scene::Update()
 
 void Scene::Draw()
 {
-	auto commandList = g_Engine->CommandList();
+	auto commandList = g_Engine->MainGraphicsCmdList();
+	auto postCommandList = g_Engine->PostGraphicsCmdList();
 
 	EngineDoTransition(commandList, g_Engine->GetHdrColorResource(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
@@ -818,13 +869,24 @@ void Scene::Draw()
 		s_pbrInstanceRingMapped,
 		currentIndex,
 		rootSignature, pipelineState, descriptorHeap, envHandle,
-		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU);
+		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU,
+		g_Engine->PbrRecordCmdList(0),
+		g_Engine->PbrRecordCmdList(1),
+		materialHeap,
+		hdrRtvHandle,
+		dsvHandle);
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
 	{
+		// Post CL でも RTV/DSV は継承されない（スカイボックス PSO は D32 DSV 前提）
+		postCommandList->SetDescriptorHeaps(1, &materialHeap);
+		postCommandList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
 		float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
-		s_skyboxRenderer->Draw(commandList, g_Camera->GetViewMatrix(), g_Camera->GetProjectionMatrix(aspect));
+		s_skyboxRenderer->Draw(postCommandList, g_Camera->GetViewMatrix(), g_Camera->GetProjectionMatrix(aspect));
 	}
+
+	if (s_hiz && s_hiz->IsValid())
+		s_hiz->Build(postCommandList, g_Engine->GetDepthStencilResource());
 
 	if (s_postProcess && s_postProcess->IsValid() && s_hdrSrvHandle)
 	{
@@ -835,9 +897,9 @@ void Scene::Draw()
 		if (backBufferRes)
 			barriers[1] = CD3DX12_RESOURCE_BARRIER::Transition(backBufferRes, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 		UINT barrierCount = backBufferRes ? 2 : 1;
-		commandList->ResourceBarrier(barrierCount, barriers);
+		postCommandList->ResourceBarrier(barrierCount, barriers);
 
-		commandList->SetDescriptorHeaps(1, &materialHeap);
-		s_postProcess->Execute(commandList, materialHeap, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings);
+		postCommandList->SetDescriptorHeaps(1, &materialHeap);
+		s_postProcess->Execute(postCommandList, materialHeap, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings);
 	}
 }

@@ -10,6 +10,7 @@
 class VertexBuffer;
 class IndexBuffer;
 struct ModelBounds;
+class HiZSystem;
 
 class Scene
 {
@@ -18,8 +19,12 @@ public:
 	bool Init();
 	void Update();
 	void Draw();
+	void SetAsyncSpawnBudgetPerFrame(size_t budget);
+	size_t GetAsyncSpawnBudgetPerFrame() const;
 
 	entt::registry& GetRegistry() { return m_registry; }
+	// Debug UI (Hi-Z toggle, etc.)
+	HiZSystem* GetHiZSystem() const;
 
 private:
 	bool InitDescriptorHeap();
@@ -43,6 +48,7 @@ private:
 	entt::registry m_registry;
 	std::vector<VertexBuffer*> m_ownedVertexBuffers;
 	std::vector<IndexBuffer*> m_ownedIndexBuffers;
+	size_t m_asyncSpawnBudgetPerFrame = 1;
 };
 
 extern Scene* g_Scene;

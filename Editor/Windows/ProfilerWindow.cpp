@@ -19,6 +19,7 @@ void ProfilerWindow::Draw(bool* pOpen)
 		// --- 1) 総合テキスト（全情報網羅） ---
 		ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "[ Engine Status ]");
 		ImGui::Text("FPS: %.1f (%.2f ms)", latest.fps, latest.frameTimeMs);
+		ImGui::Text("Render CPU: %.2f ms", latest.renderCpuTimeMs);
 		ImGui::Text("Total Draw Calls: %u", latest.render.totalDrawCalls);
 		ImGui::Text("PBR Instances: %u", latest.render.pbrInstancesDrawn);
 		ImGui::Separator();

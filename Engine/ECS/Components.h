@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Components/PlayerComponent.h"
+#include "Core/ModelBounds.h"
 
 struct DescriptorHandle;
 
@@ -37,6 +38,11 @@ struct MeshRendererComponent
 	UINT                 IndexCount;
 	DescriptorHandle*    MaterialHandle; // t0～t3 の先頭（albedo, normal, metallic, roughness）
 	bool                 CastShadow = true;
+	/// ローカル空間 AABB（スポーン時に設定）。視錐台カリング用。地形など未設定なら false。
+	bool                 HasLocalBounds = false;
+	ModelBounds          LocalBounds{};
+	/// true のとき CPU 視錐台カリングをしない（スキン: バインドポーズ AABB が枝先を表さないため）
+	bool                 SkipCpuFrustumCull = false;
 };
 
 // 広域パフォーマンス管理（建物、地形、木、草など）
@@ -66,6 +72,9 @@ struct EditorHierarchyLabelComponent
 struct ModelGroupRootComponent
 {
 	std::vector<entt::entity> children;
+	/// 全サブメッシュを含むモデル空間 AABB（スポーン時）。子の CPU 視錐台は各パーツ AABB ではなくこれを使う。
+	ModelBounds combinedModelBounds{};
+	bool hasCombinedModelBounds = false;
 };
 
 struct ModelGroupChildComponent

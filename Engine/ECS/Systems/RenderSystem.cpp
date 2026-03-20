@@ -9,15 +9,46 @@
 #include "IndexBuffer.h"
 #include "DebugLog.h"
 #include <DirectXMath.h>
+#include <DirectXCollision.h>
 #include <d3d12.h>
 #include <algorithm>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace
 {
 	RenderSystem::GpuDrawStats s_lastGpuStats;
 	std::vector<RenderSystem::RenderQueueEntry> s_lastRenderQueue;
+	bool s_frustumCullPbrEnabled = true;
+
+	/// SceneConstants の View/Proj（シェーダと同一）から視錐台を作り、ローカル AABB をワールド AABB に変換して交差判定。
+	/// （SDK によっては BoundingBox→OBB の Transform が無いため、ワールド AABB は回転時やや保守的＝誤カリングしにくい）
+	bool IsWorldAabbInFrustum(
+		const DirectX::XMMATRIX& world,
+		const ModelBounds& local,
+		const DirectX::XMMATRIX& view,
+		const DirectX::XMMATRIX& proj)
+	{
+		using namespace DirectX;
+		if (!IsValidModelBounds(local))
+			return true;
+		const XMMATRIX vp = XMMatrixMultiply(view, proj);
+		BoundingFrustum frustum;
+		BoundingFrustum::CreateFromMatrix(frustum, vp);
+		const XMFLOAT3 c{
+			0.5f * (local.Min.x + local.Max.x),
+			0.5f * (local.Min.y + local.Max.y),
+			0.5f * (local.Min.z + local.Max.z) };
+		const XMFLOAT3 e{
+			0.5f * (local.Max.x - local.Min.x),
+			0.5f * (local.Max.y - local.Min.y),
+			0.5f * (local.Max.z - local.Min.z) };
+		BoundingBox localBox(c, e);
+		BoundingBox worldAabb;
+		localBox.Transform(worldAabb, world);
+		return frustum.Intersects(worldAabb);
+	}
 
 	struct DrawSortItem
 	{
@@ -47,6 +78,67 @@ namespace
 		if (iba != ibb)
 			return iba < ibb;
 		return a.indexCount < b.indexCount;
+	}
+
+	struct PbrDrawBatch
+	{
+		D3D12_GPU_VIRTUAL_ADDRESS sceneConstantsGpu = 0;
+		D3D12_GPU_VIRTUAL_ADDRESS pbrPropertyGpu = 0;
+		D3D12_GPU_DESCRIPTOR_HANDLE materialGpu{};
+		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapGpu{};
+		D3D12_GPU_VIRTUAL_ADDRESS instanceRingSrvGpu = 0;
+		VertexBuffer* vb = nullptr;
+		IndexBuffer* ib = nullptr;
+		UINT indexCount = 0;
+		UINT instanceCount = 0;
+	};
+
+	static void RecordPbrBatchesOnCmd(
+		ID3D12GraphicsCommandList* cmd,
+		ID3D12DescriptorHeap* heap,
+		const std::vector<PbrDrawBatch>& batches,
+		size_t batchBegin,
+		size_t batchEnd,
+		RootSignature* rootSignature,
+		PipelineState* pipelineState,
+		D3D12_CPU_DESCRIPTOR_HANDLE rtvCpu,
+		D3D12_CPU_DESCRIPTOR_HANDLE dsvCpu,
+		uint32_t& outDrawCalls,
+		uint32_t& outInstances)
+	{
+		if (!cmd || batchBegin >= batchEnd)
+			return;
+		ID3D12DescriptorHeap* heaps[] = { heap };
+		cmd->SetDescriptorHeaps(1, heaps);
+		// 別 CL では OM バインドは継承されない。PSO が DSV 形式を要求するため必須。
+		if (rtvCpu.ptr != 0 && dsvCpu.ptr != 0)
+			cmd->OMSetRenderTargets(1, &rtvCpu, FALSE, &dsvCpu);
+		ID3D12PipelineState* const pso = pipelineState ? pipelineState->Get() : nullptr;
+		ID3D12RootSignature* const rs = rootSignature ? rootSignature->Get() : nullptr;
+		if (!pso || !rs)
+			return;
+		for (size_t i = batchBegin; i < batchEnd; ++i)
+		{
+			const PbrDrawBatch& b = batches[i];
+			if (!b.vb || !b.ib || b.instanceCount == 0)
+				continue;
+			cmd->SetPipelineState(pso);
+			cmd->SetGraphicsRootSignature(rs);
+			cmd->SetGraphicsRootConstantBufferView(0, b.sceneConstantsGpu);
+			cmd->SetGraphicsRootConstantBufferView(1, b.pbrPropertyGpu);
+			cmd->SetGraphicsRootDescriptorTable(3, b.materialGpu);
+			if (b.envCubemapGpu.ptr != 0)
+				cmd->SetGraphicsRootDescriptorTable(4, b.envCubemapGpu);
+			cmd->SetGraphicsRootShaderResourceView(2, b.instanceRingSrvGpu);
+			D3D12_VERTEX_BUFFER_VIEW vbView = b.vb->View();
+			D3D12_INDEX_BUFFER_VIEW ibView = b.ib->View();
+			cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			cmd->IASetVertexBuffers(0, 1, &vbView);
+			cmd->IASetIndexBuffer(&ibView);
+			cmd->DrawIndexedInstanced(b.indexCount, b.instanceCount, 0, 0, 0);
+			++outDrawCalls;
+			outInstances += b.instanceCount;
+		}
 	}
 }
 
@@ -81,7 +173,12 @@ void RenderSystem::DrawMain(
 	RootSignature* terrainRootSignature,
 	PipelineState* terrainPipelineState,
 	ConstantBuffer* terrainCB,
-	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU)
+	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU,
+	ID3D12GraphicsCommandList* cmdListPbrRecord0,
+	ID3D12GraphicsCommandList* cmdListPbrRecord1,
+	ID3D12DescriptorHeap* sharedSrvHeapForPbr,
+	D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
+	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu)
 {
 	(void)descriptorHeap;
 	auto view = registry.view<TransformComponent, MeshRendererComponent, LODComponent>();
@@ -97,8 +194,16 @@ void RenderSystem::DrawMain(
 		&& pbrPropertyBuffer && pbrPropertyBuffer->GetAddress()
 		&& pbrInstanceBuffer && pbrInstanceMapped && psoPbr;
 
+	const bool parallelPbrRecord = pbrResourcesOk && cmdListPbrRecord0 && cmdListPbrRecord1 && sharedSrvHeapForPbr
+		&& mainPassRtvCpu.ptr != 0 && mainPassDsvCpu.ptr != 0;
+
 	std::vector<DrawSortItem> queue;
 	queue.reserve(256);
+
+	const SceneConstants* sceneC = sceneConstantsCB ? sceneConstantsCB->GetPtr<SceneConstants>() : nullptr;
+	const DirectX::XMMATRIX viewM = sceneC ? sceneC->View : DirectX::XMMatrixIdentity();
+	const DirectX::XMMATRIX projM = sceneC ? sceneC->Proj : DirectX::XMMatrixIdentity();
+	uint32_t statPbrFrustumCulled = 0;
 
 	for (auto entity : view)
 	{
@@ -152,6 +257,44 @@ void RenderSystem::DrawMain(
 		if (isTerrain && !psoTerrain)
 			continue;
 
+		const auto& transform = view.get<TransformComponent>(entity);
+		if (!isTerrain && s_frustumCullPbrEnabled && sceneC)
+		{
+			bool isPlayerFamily = isPlayer;
+			if (!isPlayerFamily && registry.all_of<ModelGroupChildComponent>(entity))
+			{
+				const auto& ch = registry.get<ModelGroupChildComponent>(entity);
+				if (registry.valid(ch.parent) && registry.all_of<PlayerComponent>(ch.parent))
+					isPlayerFamily = true;
+			}
+
+			// モデルグループの子: パーツごとの AABB はノード未焼き・スキンで枝先を表さないため、
+			// 親の「全メッシュ結合バウンド」× 親 World で判定する（桜の花など）。
+			const ModelBounds* cullBounds = nullptr;
+			DirectX::XMMATRIX cullWorld = transform.WorldMatrix;
+			if (const auto* link = registry.try_get<ModelGroupChildComponent>(entity))
+			{
+				if (registry.valid(link->parent) && registry.all_of<ModelGroupRootComponent>(link->parent))
+				{
+					const auto& rootComp = registry.get<ModelGroupRootComponent>(link->parent);
+					if (rootComp.hasCombinedModelBounds)
+					{
+						cullBounds = &rootComp.combinedModelBounds;
+						cullWorld = registry.get<TransformComponent>(link->parent).WorldMatrix;
+					}
+				}
+			}
+			if (!cullBounds && mesh.HasLocalBounds)
+				cullBounds = &mesh.LocalBounds;
+
+			if (cullBounds && !mesh.SkipCpuFrustumCull && !isPlayerFamily
+				&& !IsWorldAabbInFrustum(cullWorld, *cullBounds, sceneC->View, sceneC->Proj))
+			{
+				++statPbrFrustumCulled;
+				continue;
+			}
+		}
+
 		DrawSortItem it{};
 		it.entity = entity;
 		it.isTerrain = isTerrain;
@@ -172,10 +315,6 @@ void RenderSystem::DrawMain(
 		s_lastRenderQueue[i].IsTerrain = queue[i].isTerrain;
 	}
 
-	const SceneConstants* sceneC = sceneConstantsCB ? sceneConstantsCB->GetPtr<SceneConstants>() : nullptr;
-	const DirectX::XMMATRIX viewM = sceneC ? sceneC->View : DirectX::XMMatrixIdentity();
-	const DirectX::XMMATRIX projM = sceneC ? sceneC->Proj : DirectX::XMMatrixIdentity();
-
 	std::uint8_t* const cbBase = perDrawTransformCB ? reinterpret_cast<std::uint8_t*>(perDrawTransformCB->GetPtr()) : nullptr;
 	const D3D12_GPU_VIRTUAL_ADDRESS cbGpuBase = perDrawTransformCB ? perDrawTransformCB->GetAddress() : 0;
 
@@ -185,23 +324,48 @@ void RenderSystem::DrawMain(
 	UINT writeCursor = sliceBase;
 
 	UINT pbrBatchCount = 0;
-	UINT pbrBatchStartInstanceLocation = 0;
 	UINT64 pbrBatchMaterialKey = 0;
 	VertexBuffer* pbrBatchVB = nullptr;
 	IndexBuffer* pbrBatchIB = nullptr;
 	UINT pbrBatchIndexCount = 0;
+	UINT pbrBatchRingStart = sliceBase;
+	D3D12_GPU_DESCRIPTOR_HANDLE pbrBatchMaterialGpu{};
+
+	std::vector<PbrDrawBatch> pbrBatches;
+	if (parallelPbrRecord)
+		pbrBatches.reserve(128);
 
 	size_t terrainDrawSlot = 0;
 	uint32_t statTotal = 0, statTerr = 0, statPbrBatches = 0, statPbrInstances = 0, statPlayerSub = 0;
 
-	auto flushPbrBatch = [&]()
+	auto flushPbrBatchLegacy = [&]()
 	{
 		if (pbrBatchCount == 0 || !pbrBatchVB || !pbrBatchIB)
 			return;
-		cmdList->DrawIndexedInstanced(pbrBatchIndexCount, pbrBatchCount, 0, 0, pbrBatchStartInstanceLocation);
+		// Root SRV is already rebased to batch start; instanceID starts from 0 in VS.
+		cmdList->DrawIndexedInstanced(pbrBatchIndexCount, pbrBatchCount, 0, 0, 0);
 		++statTotal;
 		++statPbrBatches;
 		statPbrInstances += pbrBatchCount;
+		pbrBatchCount = 0;
+	};
+
+	auto flushPbrBatchToVector = [&]()
+	{
+		if (!parallelPbrRecord || pbrBatchCount == 0 || !pbrBatchVB || !pbrBatchIB)
+			return;
+		PbrDrawBatch b{};
+		b.sceneConstantsGpu = sceneConstantsCB->GetAddress();
+		b.pbrPropertyGpu = pbrPropertyBuffer->GetAddress();
+		b.materialGpu = pbrBatchMaterialGpu;
+		b.envCubemapGpu = envCubemapHandleGPU;
+		b.instanceRingSrvGpu = pbrInstanceBuffer->GetGPUVirtualAddress()
+			+ static_cast<UINT64>(pbrBatchRingStart) * sizeof(InstanceData);
+		b.vb = pbrBatchVB;
+		b.ib = pbrBatchIB;
+		b.indexCount = pbrBatchIndexCount;
+		b.instanceCount = pbrBatchCount;
+		pbrBatches.push_back(b);
 		pbrBatchCount = 0;
 	};
 
@@ -214,7 +378,10 @@ void RenderSystem::DrawMain(
 
 		if (it.isTerrain)
 		{
-			flushPbrBatch();
+			if (parallelPbrRecord)
+				flushPbrBatchToVector();
+			else
+				flushPbrBatchLegacy();
 
 			if (terrainDrawSlot >= kPerDrawTransformSlotCount)
 			{
@@ -263,31 +430,42 @@ void RenderSystem::DrawMain(
 
 		if (!sameBatch)
 		{
-			flushPbrBatch();
+			if (parallelPbrRecord)
+			{
+				flushPbrBatchToVector();
+				pbrBatchRingStart = writeCursor;
+				pbrBatchMaterialKey = it.materialSortKey;
+				pbrBatchMaterialGpu = mesh.MaterialHandle->HandleGPU;
+				pbrBatchVB = it.vb;
+				pbrBatchIB = it.ib;
+				pbrBatchIndexCount = it.indexCount;
+			}
+			else
+			{
+				flushPbrBatchLegacy();
 
-			cmdList->SetPipelineState(pipelineState->Get());
-			cmdList->SetGraphicsRootSignature(rootSignature->Get());
-			cmdList->SetGraphicsRootConstantBufferView(0, sceneConstantsCB->GetAddress());
-			cmdList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer->GetAddress());
-			cmdList->SetGraphicsRootDescriptorTable(3, mesh.MaterialHandle->HandleGPU);
-			if (envCubemapHandleGPU.ptr != 0)
-				cmdList->SetGraphicsRootDescriptorTable(4, envCubemapHandleGPU);
+				cmdList->SetPipelineState(pipelineState->Get());
+				cmdList->SetGraphicsRootSignature(rootSignature->Get());
+				cmdList->SetGraphicsRootConstantBufferView(0, sceneConstantsCB->GetAddress());
+				cmdList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer->GetAddress());
+				cmdList->SetGraphicsRootDescriptorTable(3, mesh.MaterialHandle->HandleGPU);
+				if (envCubemapHandleGPU.ptr != 0)
+					cmdList->SetGraphicsRootDescriptorTable(4, envCubemapHandleGPU);
 
-			// Root signature parameter [2] is the instance SRV (PBR path).
-			// Must be bound after switching away from terrain root signature.
-			cmdList->SetGraphicsRootShaderResourceView(2, pbrInstanceBuffer->GetGPUVirtualAddress());
+				const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
+				cmdList->SetGraphicsRootShaderResourceView(2, pbrInstanceBuffer->GetGPUVirtualAddress() + batchBaseOffsetBytes);
 
-			D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
-			D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();
-			cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			cmdList->IASetVertexBuffers(0, 1, &vbView);
-			cmdList->IASetIndexBuffer(&ibView);
+				D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
+				D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();
+				cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+				cmdList->IASetVertexBuffers(0, 1, &vbView);
+				cmdList->IASetIndexBuffer(&ibView);
 
-			pbrBatchStartInstanceLocation = writeCursor;
-			pbrBatchMaterialKey = it.materialSortKey;
-			pbrBatchVB = it.vb;
-			pbrBatchIB = it.ib;
-			pbrBatchIndexCount = it.indexCount;
+				pbrBatchMaterialKey = it.materialSortKey;
+				pbrBatchVB = it.vb;
+				pbrBatchIB = it.ib;
+				pbrBatchIndexCount = it.indexCount;
+			}
 		}
 
 		if (writeCursor >= sliceEnd)
@@ -316,11 +494,47 @@ void RenderSystem::DrawMain(
 		}
 	}
 
-	flushPbrBatch();
+	if (parallelPbrRecord)
+	{
+		flushPbrBatchToVector();
+		const size_t n = pbrBatches.size();
+		const size_t mid = (n + 1) / 2;
+		uint32_t d0 = 0, inst0 = 0, d1 = 0, inst1 = 0;
+		std::thread worker0([&]()
+		{
+			RecordPbrBatchesOnCmd(cmdListPbrRecord0, sharedSrvHeapForPbr, pbrBatches, 0, mid,
+				rootSignature, pipelineState, mainPassRtvCpu, mainPassDsvCpu, d0, inst0);
+		});
+		std::thread worker1([&]()
+		{
+			RecordPbrBatchesOnCmd(cmdListPbrRecord1, sharedSrvHeapForPbr, pbrBatches, mid, n,
+				rootSignature, pipelineState, mainPassRtvCpu, mainPassDsvCpu, d1, inst1);
+		});
+		worker0.join();
+		worker1.join();
+		statPbrBatches = d0 + d1;
+		statPbrInstances = inst0 + inst1;
+		statTotal += statPbrBatches;
+	}
+	else
+	{
+		flushPbrBatchLegacy();
+	}
 
 	s_lastGpuStats.drawIndexedTotal = statTotal;
 	s_lastGpuStats.terrainDraws = statTerr;
 	s_lastGpuStats.pbrBatchDrawCalls = statPbrBatches;
 	s_lastGpuStats.pbrInstancesDrawn = statPbrInstances;
 	s_lastGpuStats.playerModelSubmeshDraws = statPlayerSub;
+	s_lastGpuStats.pbrFrustumCulledEntities = statPbrFrustumCulled;
+}
+
+bool RenderSystem::GetFrustumCullPbrEnabled()
+{
+	return s_frustumCullPbrEnabled;
+}
+
+void RenderSystem::SetFrustumCullPbrEnabled(bool enabled)
+{
+	s_frustumCullPbrEnabled = enabled;
 }
