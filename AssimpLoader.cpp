@@ -217,6 +217,8 @@ bool AssimpLoader::Load(ImportSettings& settings)
         Resolve(aiTextureType_NORMALS, dst.NormalMap);
         Resolve(aiTextureType_METALNESS, dst.MetallicMap);
         Resolve(aiTextureType_DIFFUSE_ROUGHNESS, dst.RoughnessMap);
+        // NPR ランプ用（DCC で Emissive にランプテクスチャを割り当てる想定。未設定なら Scene でデフォルト）
+        Resolve(aiTextureType_EMISSIVE, dst.RampMap);
 
         aiString matNameAi;
         if (mat->Get(AI_MATKEY_NAME, matNameAi) == AI_SUCCESS)
@@ -236,6 +238,16 @@ bool AssimpLoader::Load(ImportSettings& settings)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const bool nameSuggestsTransparent = (lower.find("_tr") != std::string::npos);
         dst.NprTransparentByRule = (opacity < 0.99f) || nameSuggestsTransparent;
+
+        // NPR: 顔・肌パーツはセル影を頂点法線寄りに（法線マップの凹凸影を抑えて「顔影固定」に近づける）
+        dst.NprCelVertexBlendOverride = -1.f;
+        if (!lower.empty())
+        {
+            if (lower.find("face") != std::string::npos || lower.find("skin") != std::string::npos
+                || lower.find("hoho") != std::string::npos || lower.find("cheek") != std::string::npos
+                || lower.find("mouth") != std::string::npos || lower.find("lip") != std::string::npos)
+                dst.NprCelVertexBlendOverride = 0.88f;
+        }
     }
 
     if (scene->HasAnimations() && settings.outClips)

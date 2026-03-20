@@ -106,6 +106,9 @@
     <ClInclude Include="Core\Scene.h">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="Core\NprTuning.h">
+      <Filter>Core</Filter>
+    </ClInclude>
     <ClInclude Include="Components\PlayerComponent.h">
       <Filter>Components</Filter>
     </ClInclude>
@@ -202,6 +205,9 @@
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="Core\Scene.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Core\NprTuning.cpp">
       <Filter>Core</Filter>
     </ClCompile>
     <ClCompile Include="SharedStruct.cpp">

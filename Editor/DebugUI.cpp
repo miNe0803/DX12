@@ -8,6 +8,7 @@
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Graphics/HiZSystem.h"
+#include "NprTuning.h"
 
 #include <cstdio>
 #include <string>
@@ -25,6 +26,23 @@ void DebugUI::Draw()
 	ImGui::Text("PBR instances drawn: %u", gpu.pbrInstancesDrawn);
 	ImGui::Text("Player-model submesh draws: %u", gpu.playerModelSubmeshDraws);
 	ImGui::TextDisabled("PlayerComponent is on parent; mesh draws are children. 0 => no DrawIndexed for that model.");
+	ImGui::Separator();
+	ImGui::TextUnformatted("--- NPR (PBR hybrid) ---");
+	ImGui::DragFloat("Opaque exposure", &g_NprGpuTuning.opaqueExposure, 0.02f, 0.1f, 2.0f);
+	ImGui::DragFloat("Normal scale", &g_NprGpuTuning.normalScale, 0.05f, 0.0f, 4.0f);
+	ImGui::DragFloat("Rim power", &g_NprGpuTuning.rimPower, 0.1f, 0.5f, 16.0f);
+	ImGui::DragFloat("Rim strength", &g_NprGpuTuning.rimStrength, 0.02f, 0.0f, 2.0f);
+	ImGui::DragFloat("Transparent virtual light", &g_NprGpuTuning.virtualLight, 0.02f, 0.0f, 2.0f);
+	ImGui::DragFloat("Transparent exposure", &g_NprGpuTuning.transExposure, 0.02f, 0.1f, 2.0f);
+	ImGui::DragFloat("Opaque alpha clip", &g_NprGpuTuning.opaqueAlphaClip, 0.01f, 0.0f, 0.99f);
+	ImGui::DragFloat("Ambient shadow strength", &g_NprGpuTuning.ambientShadowStrength, 0.02f, 0.0f, 3.0f);
+	ImGui::Separator();
+	ImGui::TextUnformatted("Cel / face (vertex normal blend)");
+	ImGui::DragFloat("Cel: vertex normal blend", &g_NprGpuTuning.celVertexNormalBlend, 0.02f, 0.0f, 1.0f);
+	ImGui::TextDisabled("1=shadow from vertex normals only (clean face). 0=full normal map.");
+	ImGui::DragFloat("Cel: ramp sharpness", &g_NprGpuTuning.celShadeSharpness, 0.02f, 0.0f, 1.0f);
+	ImGui::DragFloat("Rim: vertex blend", &g_NprGpuTuning.rimVertexNormalBlend, 0.02f, 0.0f, 1.0f);
+
 	if (g_Scene)
 	{
 		HiZSystem* hz = g_Scene->GetHiZSystem();

@@ -45,6 +45,8 @@ struct MeshRendererComponent
 	bool                 SkipCpuFrustumCull = false;
 	/// NPR 透明パス用（親に NPRTag かつ Assimp 透明ルール）
 	bool                 NprTransparent = false;
+	/// NPR セル影: 頂点法線ブレンド上書き（>=0 でインスタンスごと）。顔パーツはロード時に設定
+	float                NprCelVertexBlendOverride = -1.f;
 };
 
 /// NPR（トゥーン）描画対象のモデルルートに付与

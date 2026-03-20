@@ -107,7 +107,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -133,6 +133,7 @@
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -166,6 +167,7 @@
     <ClInclude Include="Resource.h" />
     <ClInclude Include="RootSignature.h" />
     <ClInclude Include="Core\Scene.h" />
+    <ClInclude Include="Core\NprTuning.h" />
     <ClInclude Include="Core\ModelSpawnOptions.h" />
     <ClInclude Include="Core\ModelBounds.h" />
     <ClInclude Include="Editor\ImGuiManager.h" />
@@ -211,6 +213,7 @@
     <ClCompile Include="PipelineState.cpp" />
     <ClCompile Include="RootSignature.cpp" />
     <ClCompile Include="Core\Scene.cpp" />
+    <ClCompile Include="Core\NprTuning.cpp" />
     <ClCompile Include="Editor\ImGuiManager.cpp" />
     <ClCompile Include="Editor\DebugUI.cpp" />
     <ClCompile Include="Editor\EditorUI.cpp" />

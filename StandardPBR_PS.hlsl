@@ -7,6 +7,7 @@ struct VSOutput
     float3 normal : NORMAL;   // world-space normal
     float3 tangent : TANGENT; // world-space tangent
     float3 worldPos : TEXCOORD1;
+    float4 nprPerMesh : TEXCOORD2;
 };
 
 // --- [Textures and sampler] --- (space0: VS instance buffer uses space1)
@@ -15,9 +16,10 @@ Texture2D _AlbedoMap : register(t0, space0);
 Texture2D _NormalMap : register(t1, space0);
 Texture2D _MetallicMap : register(t2, space0);
 Texture2D _RoughnessMap : register(t3, space0);
-TextureCube _PrefilterEnv  : register(t4, space0);
-TextureCube _IrradianceMap : register(t5, space0);
-Texture2D _BrdfLut         : register(t6, space0);
+Texture2D _RampTex : register(t4, space0);
+TextureCube _PrefilterEnv  : register(t5, space0);
+TextureCube _IrradianceMap : register(t6, space0);
+Texture2D _BrdfLut         : register(t7, space0);
 
 // --- [Material params (b1)] ---
 // RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
@@ -25,6 +27,8 @@ cbuffer MaterialParams : register(b1, space0)
 {
     float4 RimParams;
     float4 CameraPos;
+    float4 NprTuning;
+    float4 NprTuning2;
 };
 
 // --- [Pixel shader main] ---
@@ -86,6 +90,9 @@ float4 main(VSOutput input) : SV_TARGET
 
     // 7. Composite
     float3 finalColor = directLight + ambientLight + specularPart;
+    // t4 / NPR インスタンス拡張: 未使用警告回避
+    finalColor += _RampTex.Sample(smp, float2(0.5f, 0.5f)).rgb * 0.0f;
+    finalColor += (input.nprPerMesh.x + NprTuning2.x) * 0.0;
 
     return float4(finalColor, albedo.a);
 }

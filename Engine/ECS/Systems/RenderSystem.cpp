@@ -486,6 +486,7 @@ void RenderSystem::DrawMain(
 		}
 
 		DirectX::XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
+		pbrInstanceMapped[writeCursor].NprPerMesh = DirectX::XMFLOAT4(-1.f, 0.f, 0.f, 0.f);
 		++writeCursor;
 		++pbrBatchCount;
 
@@ -655,6 +656,13 @@ void RenderSystem::DrawNprPasses(
 		const auto& transform = registry.get<TransformComponent>(entity);
 		const auto& mesh = registry.get<MeshRendererComponent>(entity);
 		XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
+		{
+			const float useO = mesh.NprCelVertexBlendOverride;
+			if (useO >= 0.f)
+				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(useO, 0.f, 0.f, 1.f);
+			else
+				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(-1.f, 0.f, 0.f, 0.f);
+		}
 		const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
 		cmdList->SetPipelineState(pso->Get());
 		cmdList->SetGraphicsRootDescriptorTable(3, mesh.MaterialHandle->HandleGPU);

@@ -10,6 +10,7 @@ cbuffer SceneCB : register(b0)
 struct InstanceData
 {
     matrix World;
+    float4 NprPerMesh;
 };
 
 StructuredBuffer<InstanceData> gInstanceData : register(t0, space1);
@@ -31,6 +32,7 @@ struct VSOutput
     float3 normal : NORMAL;
     float3 tangent : TANGENT;
     float3 worldPos : TEXCOORD1;
+    float4 nprPerMesh : TEXCOORD2;
 };
 
 VSOutput vert(VSInput input, uint instanceID : SV_InstanceID)
@@ -38,6 +40,7 @@ VSOutput vert(VSInput input, uint instanceID : SV_InstanceID)
     VSOutput output;
 
     matrix worldM = gInstanceData[instanceID].World;
+    output.nprPerMesh = gInstanceData[instanceID].NprPerMesh;
 
     float4 worldPos = mul(float4(input.pos, 1.0f), worldM);
     float4 viewPos = mul(worldPos, View);

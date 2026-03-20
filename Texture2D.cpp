@@ -13,6 +13,7 @@ namespace {
 	Texture2D* g_black = nullptr;
 	Texture2D* g_metal = nullptr;
 	Texture2D* g_rough = nullptr;
+	Texture2D* g_nprRamp = nullptr;
 }
 
 using namespace DirectX;
@@ -233,6 +234,39 @@ Texture2D* Texture2D::GetDefaultRoughness()
 	return g_rough;
 }
 
+Texture2D* Texture2D::GetDefaultNprRamp()
+{
+	if (!g_Engine || !g_Engine->Device())
+		return nullptr;
+	std::lock_guard<std::mutex> lock(g_texMutex);
+	if (g_nprRamp)
+		return g_nprRamp;
+	const UINT w = 256;
+	const UINT h = 1;
+	ID3D12Resource* buff = GetDefaultResource(w, h);
+	if (!buff)
+		return nullptr;
+	std::vector<unsigned char> data(static_cast<size_t>(w) * h * 4);
+	const UINT denom = (w > 1) ? (w - 1) : 1u;
+	for (UINT x = 0; x < w; ++x)
+	{
+		const unsigned char v = static_cast<unsigned char>((x * 255u) / denom);
+		const size_t i = static_cast<size_t>(x) * 4;
+		data[i + 0] = v;
+		data[i + 1] = v;
+		data[i + 2] = v;
+		data[i + 3] = 0xff;
+	}
+	const UINT rowPitch = w * 4;
+	if (FAILED(buff->WriteToSubresource(0, nullptr, data.data(), rowPitch, rowPitch * h)))
+	{
+		buff->Release();
+		return nullptr;
+	}
+	g_nprRamp = new Texture2D(buff);
+	return g_nprRamp;
+}
+
 Texture2D* Texture2D::GetBlack()
 {
 	if (!g_Engine || !g_Engine->Device())
@@ -267,6 +301,8 @@ void Texture2D::ReleaseAllDeviceResources()
 	g_metal = nullptr;
 	delete g_rough;
 	g_rough = nullptr;
+	delete g_nprRamp;
+	g_nprRamp = nullptr;
 }
 
 ID3D12Resource* Texture2D::GetDefaultResource(size_t width, size_t height)

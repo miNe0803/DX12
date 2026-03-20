@@ -33,6 +33,7 @@
 #include "Graphics/HiZSystem.h"
 #include "ModelBounds.h"
 #include "Engine/Core/AsyncModelLoader.h"
+#include "NprTuning.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -122,9 +123,22 @@ namespace {
 		if (!roughnessTex) roughnessTex = Texture2D::GetDefaultRoughness();
 		DescriptorHandle* roughnessHandle = heap->Register(roughnessTex);
 
-		// t0..t3 を「先頭ハンドルから連番で期待」しているため、
-		// normal/metallic/roughness の Register が失敗した場合は不整合を避ける。
-		if (!firstHandle || !normalHandle || !metallicHandle || !roughnessHandle)
+		Texture2D* rampTex = nullptr;
+		if (!mesh.RampMap.empty() && fs::exists(mesh.RampMap))
+			rampTex = Texture2D::Get(mesh.RampMap);
+		if (!rampTex)
+		{
+			static const wchar_t kDefaultRampAsset[] = L"assets\\npr\\default_ramp.png";
+			if (fs::exists(kDefaultRampAsset))
+				rampTex = Texture2D::Get(kDefaultRampAsset);
+		}
+		if (!rampTex)
+			rampTex = Texture2D::GetDefaultNprRamp();
+		DescriptorHandle* rampHandle = heap->Register(rampTex);
+
+		// t0..t4 を「先頭ハンドルから連番で期待」しているため、
+		// Register が失敗した場合は不整合を避ける。
+		if (!firstHandle || !normalHandle || !metallicHandle || !roughnessHandle || !rampHandle)
 			return nullptr;
 
 		return firstHandle;
@@ -339,6 +353,7 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		// スキンメッシュは頂点がバインド空間に近く、CPU AABB+親 World では枝先の花が視錐外扱いで消える
 		mrc.SkipCpuFrustumCull = !m.Bones.empty();
 		mrc.NprTransparent = opt.addNprTag && m.NprTransparentByRule;
+		mrc.NprCelVertexBlendOverride = m.NprCelVertexBlendOverride;
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 		m_registry.emplace<EditorHierarchyLabelComponent>(entity,
@@ -450,9 +465,13 @@ bool Scene::InitCameraAndFrameBuffers()
 		if (!pbrPropertyBuffer[i]->IsValid())
 			return false;
 		auto pbr = pbrPropertyBuffer[i]->GetPtr<PBRConstants>();
-		// x:予備 y:法線スケール z:リムべき指数（NPR） w:予備
-		pbr->RimParams = XMFLOAT4(1.0f, 1.5f, 3.0f, 0.0f);
+		pbr->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
+			g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
 		pbr->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+		pbr->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
+			g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
+		pbr->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
+			g_NprGpuTuning.rimVertexNormalBlend, 0.0f);
 	}
 	return InitPbrInstanceRingBuffer();
 }
@@ -853,6 +872,12 @@ void Scene::Update()
 	{
 		XMVECTOR camPos = g_Camera->GetPosition();
 		XMStoreFloat4(&pbrConst->CameraPos, camPos);
+		pbrConst->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
+			g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
+		pbrConst->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
+			g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
+		pbrConst->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
+			g_NprGpuTuning.rimVertexNormalBlend, 0.0f);
 	}
 	if (terrainConstantBuffer[currentIndex])
 	{
