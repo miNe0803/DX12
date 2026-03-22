@@ -575,10 +575,6 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 
 	ImGui::Separator();
 	ImGui::TextUnformatted("NPR ramp debug (toon3 / t4, opaque NPR_PS)");
-	ImGui::DragFloat("NPR HDR view boost", &g_NprGpuTuning.nprHdrViewBoost, 0.05f, 0.25f, 16.0f);
-	ImGui::TextDisabled("RenderDoc: raise if body is black on HDR RT; use 1.0 normally.");
-	ImGui::DragFloat("NPR HDR linear clamp", &g_NprGpuTuning.nprHdrLinearClampMax, 0.1f, 0.0f, 32.0f);
-	ImGui::TextDisabled("0=off. Caps NPR before Bloom/ACES.");
 	if (g_Scene)
 	{
 		size_t nt = 0;

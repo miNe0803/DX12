@@ -1,4 +1,4 @@
-﻿// NPR toon shading pixel shader（ルートテーブルは PBR と同じ t0-t5 を連番バインド）
+// NPR toon shading pixel shader（ルートテーブルは PBR と同じ t0-t5 を連番バインド）
 // t0 Albedo, t1 Normal, t2 Metallic, t3 Roughness, t4 Ramp, t5 Sphere（未使用スロットは白テクスチャ）
 
 struct VSOutput
@@ -26,13 +26,11 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // x=倍率 y=線形RGB上限(0=無制限) — Bloom/ACES 白飛び抑制
+    float4 NprDebugHdr; // 予約（定数バッファサイズ合わせ、未使用）
 };
 
 float4 main(VSOutput input) : SV_TARGET
 {
-    float nprHdrBoost = max(NprDebugHdr.x, 1e-3f);
-
     // 4: テクスチャ・clip より前に出す = NPR_PS が動いていれば必ず真緑（PBR では出ない）
     float dbgRamp = NprTuning2.w;
     if (dbgRamp > 3.5f && dbgRamp < 4.5f)
@@ -43,33 +41,18 @@ float4 main(VSOutput input) : SV_TARGET
     // 7=リニア化後×頂点まで（スフィア前。シェーディングに入るベースに近い）
     float4 albedoTex = _AlbedoMap.Sample(smp, input.uv);
     if (dbgRamp > 4.5f && dbgRamp < 5.5f)
-    {
-        float3 c = albedoTex.rgb * nprHdrBoost;
-        if (NprDebugHdr.y > 0.001f)
-            c = min(c, NprDebugHdr.y);
-        return float4(c, 1.0f);
-    }
+        return float4(albedoTex.rgb, 1.0f);
 
     float4 albedo = albedoTex;
     // PMX マテリアル Diffuse は頂点カラーに焼き込み。不透明パスでは AssimpLoader が Color.a=1 を保証（Early-Z のため clip は使わない）
     albedo *= input.color;
     if (dbgRamp > 5.5f && dbgRamp < 6.5f)
-    {
-        float3 c = albedo.rgb * nprHdrBoost;
-        if (NprDebugHdr.y > 0.001f)
-            c = min(c, NprDebugHdr.y);
-        return float4(c, 1.0f);
-    }
+        return float4(albedo.rgb, 1.0f);
 
     // 1. sRGB -> Linear デコード（既存PBRと整合）
     albedo.rgb = pow(max(albedo.rgb, 1e-5), 2.2f);
     if (dbgRamp > 6.5f && dbgRamp < 7.5f)
-    {
-        float3 c = albedo.rgb * nprHdrBoost;
-        if (NprDebugHdr.y > 0.001f)
-            c = min(c, NprDebugHdr.y);
-        return float4(c, 1.0f);
-    }
+        return float4(albedo.rgb, 1.0f);
 
     // PMX スフィア（InstanceData.NprPerMesh.y）
     int sphMode = (int)floor(input.nprPerMesh.y + 0.5f);
@@ -150,13 +133,9 @@ float4 main(VSOutput input) : SV_TARGET
     baseColor += rim * albedo.rgb * 0.4f;
 
     // ==========================================
-    // 9. 最終出力 (HDR白飛び防止)
+    // 9. 最終出力（線形 HDR）
     // ==========================================
-    // ポスト（Bloom/ACES）で肌が白飛びしやすいため既定をやや抑える（HDR クランプと併用）
-    float nprExposure = 1.0f;
-    float3 finalColor = baseColor * nprExposure * nprHdrBoost;
-    if (NprDebugHdr.y > 0.001f)
-        finalColor = min(finalColor, NprDebugHdr.y);
+    float3 finalColor = baseColor;
 
     // premultiplied RGB（Composite と Transparent と整合）
     return float4(finalColor * albedo.a, albedo.a);

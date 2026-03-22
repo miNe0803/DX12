@@ -74,13 +74,15 @@ static void WriteNprTuningToPbrConstants(PBRConstants* pbrConst)
 		return;
 	XMVECTOR camPos = g_Camera->GetPosition();
 	XMStoreFloat4(&pbrConst->CameraPos, camPos);
-	pbrConst->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
+	// RimParams.x は未使用（PBR/NPR 不透明は y=法線スケール z=リムべき w=リム強度のみ参照）
+	pbrConst->RimParams = XMFLOAT4(1.0f, g_NprGpuTuning.normalScale,
 		g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
-	pbrConst->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
+	// NprTuning.y は未使用（旧 transparent exposure）
+	pbrConst->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, 0.0f,
 		g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
 	pbrConst->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
 		g_NprGpuTuning.rimVertexNormalBlend, static_cast<float>(g_NprGpuTuning.nprDebugRampView));
-	pbrConst->NprDebugHdr = XMFLOAT4(g_NprGpuTuning.nprHdrViewBoost, g_NprGpuTuning.nprHdrLinearClampMax, 0.f, 0.f);
+	pbrConst->NprDebugHdr = XMFLOAT4(0.f, 0.f, 0.f, 0.f);
 }
 
 namespace {
@@ -508,14 +510,14 @@ bool Scene::InitCameraAndFrameBuffers()
 		if (!pbrPropertyBuffer[i]->IsValid())
 			return false;
 		auto pbr = pbrPropertyBuffer[i]->GetPtr<PBRConstants>();
-		pbr->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
+		pbr->RimParams = XMFLOAT4(1.0f, g_NprGpuTuning.normalScale,
 			g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
 		pbr->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
-		pbr->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
+		pbr->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, 0.0f,
 			g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
 		pbr->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
 			g_NprGpuTuning.rimVertexNormalBlend, static_cast<float>(g_NprGpuTuning.nprDebugRampView));
-		pbr->NprDebugHdr = XMFLOAT4(g_NprGpuTuning.nprHdrViewBoost, 0.f, 0.f, 0.f);
+		pbr->NprDebugHdr = XMFLOAT4(0.f, 0.f, 0.f, 0.f);
 	}
 	return InitPbrInstanceRingBuffer();
 }

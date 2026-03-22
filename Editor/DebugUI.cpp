@@ -29,18 +29,12 @@ void DebugUI::Draw()
 	ImGui::TextDisabled("PlayerComponent is on parent; mesh draws are children. 0 => no DrawIndexed for that model.");
 	ImGui::Separator();
 	ImGui::TextUnformatted("--- NPR (PBR hybrid) ---");
-	ImGui::DragFloat("Opaque exposure", &g_NprGpuTuning.opaqueExposure, 0.02f, 0.1f, 2.0f);
-	ImGui::DragFloat("NPR HDR view boost", &g_NprGpuTuning.nprHdrViewBoost, 0.05f, 0.25f, 16.0f);
-	ImGui::TextDisabled("RenderDoc: NPR on R16F HDR looks black - try 2..8 (pre-tonemap). Reset to 1.0 for play.");
-	ImGui::DragFloat("NPR linear HDR clamp (per ch)", &g_NprGpuTuning.nprHdrLinearClampMax, 0.1f, 0.0f, 32.0f);
-	ImGui::TextDisabled("0=no clamp. Else caps NPR opaque before Bloom/ACES (reduces white blowout).");
+	ImGui::DragFloat("Normal scale", &g_NprGpuTuning.normalScale, 0.05f, 0.0f, 4.0f);
 	if (ImGui::IsItemDeactivatedAfterEdit() && g_Scene)
 		g_Scene->SyncNprGpuTuningToMaterialCB();
-	ImGui::DragFloat("Normal scale", &g_NprGpuTuning.normalScale, 0.05f, 0.0f, 4.0f);
 	ImGui::DragFloat("Rim power", &g_NprGpuTuning.rimPower, 0.1f, 0.5f, 16.0f);
 	ImGui::DragFloat("Rim strength", &g_NprGpuTuning.rimStrength, 0.02f, 0.0f, 2.0f);
 	ImGui::DragFloat("Transparent virtual light", &g_NprGpuTuning.virtualLight, 0.02f, 0.0f, 2.0f);
-	ImGui::DragFloat("Transparent exposure", &g_NprGpuTuning.transExposure, 0.02f, 0.1f, 2.0f);
 	ImGui::DragFloat("Opaque alpha clip", &g_NprGpuTuning.opaqueAlphaClip, 0.01f, 0.0f, 0.99f);
 	ImGui::DragFloat("Ambient shadow strength", &g_NprGpuTuning.ambientShadowStrength, 0.02f, 0.0f, 3.0f);
 	ImGui::Separator();

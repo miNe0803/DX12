@@ -3,16 +3,10 @@
 /// ImGui 等から更新 → Scene::Update で PBRConstants に反映
 struct NprGpuTuning
 {
-	float opaqueExposure = 0.8f;
-	/// NPR 不透明の最終色に乗算（既定 1）。RenderDoc で HDR_SceneColor がシルエット級に暗く見えるとき 2～8 など。
-	float nprHdrViewBoost = 1.0f;
-	/// 線形 HDR の各チャンネル上限（Bloom/ACES 白飛び抑制）。0 でクランプ無効。
-	float nprHdrLinearClampMax = 5.0f;
-	float normalScale = 1.0f;
-	float rimPower = 3.0f;
+	float normalScale = 0.05f;
+	float rimPower = 5.0f;
 	float rimStrength = 0.3f;
 	float virtualLight = 0.85f;
-	float transExposure = 0.8f;
 	float opaqueAlphaClip = 0.5f;
 	float ambientShadowStrength = 1.0f;
 	/// セル影の主光: 0=法線マップ優先（細かい影） 1=頂点法線のみ（顔影が安定）

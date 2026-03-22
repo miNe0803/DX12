@@ -30,7 +30,7 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // PBR では未使用（定数バッファサイズ合わせ）
+    float4 NprDebugHdr; // 予約（定数バッファサイズ合わせ）
 };
 
 // --- [Pixel shader main] ---

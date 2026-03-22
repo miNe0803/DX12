@@ -27,7 +27,7 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // 透明パスでは未使用（CB サイズ合わせ）
+    float4 NprDebugHdr; // 予約（CB サイズ合わせ）
 };
 
 float4 main(VSOutput input) : SV_TARGET
@@ -49,14 +49,12 @@ float4 main(VSOutput input) : SV_TARGET
             albedo.rgb += sph.rgb;
     }
 
-    // NprTuning: x=virtualLight, y=transExposure, z=opaque clip (unused), w=ambient scale (unused)
+    // NprTuning: x=virtualLight, y=未使用, z/w=不透明パス用（透明では未使用）
     float vl = NprTuning.x;
-    float texp = NprTuning.y;
     albedo.rgb *= vl;
 
     float a = saturate(albedo.a);
     float3 premul = albedo.rgb * a;
-    premul *= texp;
     premul += 0.0 * (
         _NormalMap.Sample(smp, input.uv).r +
         _MetallicMap.Sample(smp, input.uv).r +

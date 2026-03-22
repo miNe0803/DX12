@@ -69,10 +69,10 @@ inline constexpr size_t kPerDrawTransformCBBytes = sizeof(Transform) * kPerDrawT
 static_assert(sizeof(Transform) == 256u, "Transform CB stride must be 256 for root CBV offsets");
 
 // PBR用: RimParams + CameraPos + NPR 調整（NPR シェーダで使用。PBR は主に RimParams.y のみ）
-// RimParams: x=不透明NPR露出 y=法線スケール z=リムべき w=リム加算強度
-// NprTuning: x=virtualLight(透明) y=透明露出 z=不透明clip閾値 w=影の環境色スケール
+// RimParams: x=未使用(1.0 固定) y=法線スケール z=リムべき w=リム加算強度
+// NprTuning: x=virtualLight(透明) y=未使用 z=不透明clip閾値 w=影の環境色スケール
 // NprTuning2: x=セル影の頂点法線ブレンド y=ランプ境界の急峻さ z=リムの頂点ブレンド w=NPRデバッグ(0–7: Editor 参照 5=t0生 6=t0×頂点 7=線形×頂点)
-// NprDebugHdr: x=NPR HDR 倍率 y=線形 RGB 上限(0=無制限) zw=予備
+// NprDebugHdr: 予備（0 クリア、シェーダ未使用）
 struct PBRConstants {
     DirectX::XMFLOAT4 RimParams;
     DirectX::XMFLOAT4 CameraPos;
