@@ -1,11 +1,14 @@
-#include "AssimpLoader.h"
+﻿#include "AssimpLoader.h"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <string>
+#include <system_error>
+#include <vector>
 #include <Windows.h> // WideCharToMultiByte
 #include <assimp/material.h>
 #include "SharedStruct.h"
@@ -89,6 +92,479 @@ static std::wstring UTF8ToWide(const std::string& s)
     return w;
 }
 
+/// UTF-8 部分文字列（PMX マテリアル名の漢字用）
+static bool Utf8Contains(const std::string& hay, const char* needleUtf8, size_t needleLen)
+{
+    if (hay.empty() || !needleUtf8 || needleLen == 0)
+        return false;
+    return hay.find(std::string(needleUtf8, needleLen)) != std::string::npos;
+}
+
+/// hibana 等: 肌・顔・目・口など（髪・衣は含めない）
+static bool PmxMaterialNameSuggestsFacePart(const std::string& matNameUtf8)
+{
+    static const struct {
+        const char* b;
+        size_t n;
+    } kParts[] = {
+        { "\xe8\x82\x8c", 3 }, // 肌
+        { "颜", 3 }, // 颜 (简)
+        { "\xe9\xa1\x8f", 3 }, // 顏 (繁)
+        { "\xe9\xa1\xb4", 3 }, // 顔 (JP 常用 U+9854)
+        { "\xe7\x9b\xae", 3 }, // 目
+        { "\xe5\x8f\xa3", 3 }, // 口
+        { "\xe8\x88\x8c", 3 }, // 舌
+        { "\xe9\xbd\x92", 3 }, // 齒
+        { "\xe7\x89\x99", 3 }, // 牙
+        { "\xe7\x99\xbd", 3 }, // 白
+        { "\xe7\x9c\x89", 3 }, // 眉
+        { "\xe7\x9d\xab", 3 }, // 睫
+        { "\xe9\x9d\xa2", 3 }, // 面 (面纹など)
+    };
+    for (const auto& p : kParts)
+    {
+        if (Utf8Contains(matNameUtf8, p.b, p.n))
+            return true;
+    }
+    return false;
+}
+
+static std::string MaterialPropertyKeyToLower(const char* k)
+{
+    if (!k)
+        return {};
+    std::string key(k);
+    for (char& c : key)
+    {
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    }
+    return key;
+}
+
+static int DiffusePropertyKeyScore(const std::string& keyLower)
+{
+    if (keyLower.find("$clr.diffuse") != std::string::npos)
+        return 100;
+    if (keyLower.find("diffuse") != std::string::npos)
+        return 80;
+    if (keyLower.find("clr") != std::string::npos && keyLower.find("color") != std::string::npos)
+        return 60;
+    if (keyLower.find("clr") != std::string::npos)
+        return 40;
+    if (keyLower.find("color") != std::string::npos)
+        return 30;
+    return 0;
+}
+
+static bool IsPlausibleDiffuseRgba(float r, float g, float b, float a)
+{
+    if (a < -0.02f || a > 1.02f)
+        return false;
+    if (r < -0.1f || r > 2.0f || g < -0.1f || g > 2.0f || b < -0.1f || b > 2.0f)
+        return false;
+    return true;
+}
+
+/// Assimp が Get(AI_MATKEY_COLOR_DIFFUSE) の A を 1 にしても、生プロパティに RGBA が残ることがある（PMX 目影など）
+static bool TryReadDiffuseAlphaFromMaterialProperties(const aiMaterial* mat, float& outA)
+{
+    if (!mat)
+        return false;
+    for (unsigned i = 0; i < mat->mNumProperties; ++i)
+    {
+        const aiMaterialProperty* p = mat->mProperties[i];
+        if (!p || p->mType != aiPTI_Float || p->mDataLength < 16)
+            continue;
+        const std::string key = MaterialPropertyKeyToLower(p->mKey.C_Str());
+        if (DiffusePropertyKeyScore(key) == 0)
+            continue;
+        const float* f = reinterpret_cast<const float*>(p->mData);
+        float a = f[3];
+        if (a >= 0.f && a <= 1.0001f)
+        {
+            outA = (std::min)(1.f, a);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// PMX 等: Get(DIFFUSE) が (1,1,1,1) のまま返るが、生プロパティに作者の Diffuse 色が残ることがある → 頂点カラー用に RGBA 全体を拾う
+static bool TryReadDiffuseRgbaFromMaterialProperties(const aiMaterial* mat, aiColor4D& out)
+{
+    if (!mat)
+        return false;
+    int bestScore = 0;
+    aiColor4D best(1.f, 1.f, 1.f, 1.f);
+    for (unsigned i = 0; i < mat->mNumProperties; ++i)
+    {
+        const aiMaterialProperty* p = mat->mProperties[i];
+        if (!p)
+            continue;
+        const std::string key = MaterialPropertyKeyToLower(p->mKey.C_Str());
+        const int ks = DiffusePropertyKeyScore(key);
+        if (ks < 40)
+            continue;
+
+        float r = 1.f, g = 1.f, b = 1.f, a = 1.f;
+        if (p->mType == aiPTI_Float && p->mDataLength >= 16)
+        {
+            const float* f = reinterpret_cast<const float*>(p->mData);
+            r = f[0];
+            g = f[1];
+            b = f[2];
+            a = f[3];
+        }
+        else if (p->mType == aiPTI_Float && p->mDataLength >= 12)
+        {
+            const float* f = reinterpret_cast<const float*>(p->mData);
+            r = f[0];
+            g = f[1];
+            b = f[2];
+            a = 1.f;
+        }
+        else if (p->mType == aiPTI_Double && p->mDataLength >= 32)
+        {
+            const double* d = reinterpret_cast<const double*>(p->mData);
+            r = static_cast<float>(d[0]);
+            g = static_cast<float>(d[1]);
+            b = static_cast<float>(d[2]);
+            a = static_cast<float>(d[3]);
+        }
+        else if (p->mType == aiPTI_Double && p->mDataLength >= 24)
+        {
+            const double* d = reinterpret_cast<const double*>(p->mData);
+            r = static_cast<float>(d[0]);
+            g = static_cast<float>(d[1]);
+            b = static_cast<float>(d[2]);
+            a = 1.f;
+        }
+        else
+            continue;
+
+        if (!IsPlausibleDiffuseRgba(r, g, b, a))
+            continue;
+        a = (std::min)(1.f, (std::max)(0.f, a));
+
+        if (ks >= bestScore)
+        {
+            bestScore = ks;
+            best.r = r;
+            best.g = g;
+            best.b = b;
+            best.a = a;
+        }
+    }
+    if (bestScore < 40)
+        return false;
+    out = best;
+    return true;
+}
+
+static std::string ToLowerAsciiCopy(std::string s)
+{
+    for (char& c : s)
+    {
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
+
+static bool PathWContainsInsensitive(const std::wstring& w, const wchar_t* tok)
+{
+    if (w.empty() || !tok)
+        return false;
+    std::wstring s = w;
+    for (wchar_t& c : s)
+        if (c >= L'A' && c <= L'Z')
+            c = wchar_t(c - L'A' + L'a');
+    std::wstring t = tok;
+    for (wchar_t& c : t)
+        if (c >= L'A' && c <= L'Z')
+            c = wchar_t(c - L'A' + L'a');
+    return s.find(t) != std::wstring::npos;
+}
+
+/// 齒・面纹は PMX 上 toon4 のことがある → toon3 強制から除外
+static bool PmxExcludeForceToon3Skin(const std::string& matNameUtf8)
+{
+    return Utf8Contains(matNameUtf8, "\xe9\xbd\x92", 3) // 齒
+        || Utf8Contains(matNameUtf8, "\xe9\x9d\xa2\xe7\xba\xb9", 6); // 面纹
+}
+
+/// 衣・髪・手套など toon4 優先（「手」より先に判定し、手套が肌扱いにならないようにする）
+static bool PmxMatNameClothHairAccessoryToon4(const std::string& matNameUtf8)
+{
+    if (Utf8Contains(matNameUtf8, "\xe8\xa1\xa3", 3)) // 衣
+        return true;
+    if (Utf8Contains(matNameUtf8, "\xe9\xab\xaa", 3)) // 髪
+        return true;
+    if (Utf8Contains(matNameUtf8, "\xe6\x89\x8b\xe5\xa5\x97", 6)) // 手套
+        return true;
+    std::string lower = matNameUtf8;
+    for (char& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lower.find("glove") != std::string::npos || lower.find("cloth") != std::string::npos || lower.find("dress") != std::string::npos
+        || lower.find("hair") != std::string::npos)
+        return true;
+    return false;
+}
+
+/// toon3 ランプ: 肌・手足・顔系（ASCII 名のフォールバック含む）
+static bool PmxMatNameSkinLikeToon3(const std::string& matNameUtf8)
+{
+    if (PmxExcludeForceToon3Skin(matNameUtf8))
+        return false;
+    if (Utf8Contains(matNameUtf8, "\xe8\x82\x8c", 3)) // 肌
+        return true;
+    if (Utf8Contains(matNameUtf8, "\xe6\x89\x8b", 3) && !Utf8Contains(matNameUtf8, "\xe5\xa5\x97", 3))
+        return true;
+    if (Utf8Contains(matNameUtf8, "\xe8\xb6\xb3", 3)) // 足
+        return true;
+    if (PmxMaterialNameSuggestsFacePart(matNameUtf8))
+        return true;
+    std::string lower = matNameUtf8;
+    for (char& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const char* kSkinAscii[] = { "skin", "body", "face", "hand", "foot", "leg", "lip", "mouth", "cheek", "hoho" };
+    for (const char* k : kSkinAscii)
+    {
+        if (lower.find(k) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+/// PMX マテリアル番号（Assimp の materialIndex ≒ PMX エディタのマテ # と同じ 0 始まり）で toon を決めるテーブル。
+/// 戻り値: 0=このファイル用テーブル無し, 1=toon3 系, 2=toon4 系（名前判定が失敗したときのフォールバック）
+static int PmxRampKindByMaterialIndexTable(const std::wstring& modelPathLower, unsigned materialIndex)
+{
+    constexpr wchar_t kHibana[] = L"hibana.pmx";
+    constexpr size_t kHibanaLen = sizeof(kHibana) / sizeof(kHibana[0]) - 1u;
+    if (modelPathLower.size() < kHibanaLen
+        || modelPathLower.compare(modelPathLower.size() - kHibanaLen, kHibanaLen, kHibana) != 0)
+        return 0;
+    // docs/hibana_pmx_materials.md: #8 齒=toon4、#12〜=衣装 toon4、#0-7 と #9-11 = 顔・肌・手足 toon3
+    if (materialIndex == 8u)
+        return 2;
+    if (materialIndex >= 12u)
+        return 2;
+    return 1;
+}
+
+/// PMX: トゥーンが Emissive 等に載らない → パス名に "toon" を含むテクスチャを集め、マテ名で toon3/toon4 を優先
+static void TryPmxResolveRampByToonFilename(
+    const aiMaterial* mat,
+    const fs::path& modelDir,
+    const std::string& matNameUtf8,
+    std::wstring& rampOut,
+    const std::wstring& modelPathLower,
+    unsigned pmxMaterialIndex)
+{
+    if (!mat || !rampOut.empty())
+        return;
+    std::vector<std::wstring> paths;
+    for (int tt = 1; tt < 36; ++tt)
+    {
+        const aiTextureType t = static_cast<aiTextureType>(tt);
+        const unsigned ntex = mat->GetTextureCount(t);
+        for (unsigned ti = 0; ti < ntex; ++ti)
+        {
+            aiString aPath;
+            if (mat->GetTexture(t, ti, &aPath) != AI_SUCCESS)
+                continue;
+            std::string rel(aPath.C_Str());
+            if (ToLowerAsciiCopy(rel).find("toon") == std::string::npos)
+                continue;
+            paths.push_back((modelDir / UTF8ToWide(rel)).wstring());
+        }
+    }
+    if (paths.empty())
+        return;
+
+    auto wlow = [](std::wstring s) {
+        for (wchar_t& c : s)
+        {
+            if (c >= L'A' && c <= L'Z')
+                c = wchar_t(c - L'A' + L'a');
+        }
+        return s;
+    };
+    auto hasTok = [&](const std::wstring& p, const wchar_t* tok) {
+        return wlow(p).find(tok) != std::wstring::npos;
+    };
+
+    const int idxKindT = PmxRampKindByMaterialIndexTable(modelPathLower, pmxMaterialIndex);
+    const bool nameSk = PmxMatNameSkinLikeToon3(matNameUtf8);
+
+    if (PmxMatNameClothHairAccessoryToon4(matNameUtf8))
+    {
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon4"))
+            {
+                rampOut = p;
+                return;
+            }
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon3"))
+            {
+                rampOut = p;
+                return;
+            }
+        rampOut = paths[0];
+        return;
+    }
+    // 番号表 toon4（齒・衣装番号）: マテ名が肌扱いでないときだけ（名前優先）
+    if (idxKindT == 2 && !nameSk)
+    {
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon4"))
+            {
+                rampOut = p;
+                return;
+            }
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon3"))
+            {
+                rampOut = p;
+                return;
+            }
+        rampOut = paths[0];
+        return;
+    }
+    if (nameSk || idxKindT == 1)
+    {
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon3"))
+            {
+                rampOut = p;
+                return;
+            }
+        for (const auto& p : paths)
+            if (hasTok(p, L"toon4"))
+            {
+                rampOut = p;
+                return;
+            }
+        rampOut = paths[0];
+        return;
+    }
+    rampOut = paths[0];
+}
+
+/// PMX ランプ確定: マテ名優先。名前が化ける場合は materialIndex テーブル（hibana.pmx）で toon3/toon4 を決定。
+static void FinalizePmxRampMap(
+    const fs::path& modelDir,
+    const std::string& matNameUtf8,
+    std::wstring& rampOut,
+    const std::wstring& modelPathLower,
+    unsigned pmxMaterialIndex)
+{
+    auto absPathStr = [](const fs::path& p) -> std::wstring {
+        std::error_code ec;
+        fs::path a = fs::absolute(p, ec);
+        return (ec ? p : a).wstring();
+    };
+
+    auto pathHasToon = [](const std::wstring& w) -> bool {
+        if (w.empty())
+            return false;
+        std::wstring s = w;
+        for (wchar_t& c : s)
+            if (c >= L'A' && c <= L'Z')
+                c = wchar_t(c - L'A' + L'a');
+        return s.find(L"toon") != std::wstring::npos;
+    };
+
+    const fs::path t3png = modelDir / L"toon3.png";
+    const fs::path t3bmp = modelDir / L"toon3.bmp";
+    const fs::path t4png = modelDir / L"toon4.png";
+    const fs::path t4bmp = modelDir / L"toon4.bmp";
+
+    if (PmxMatNameClothHairAccessoryToon4(matNameUtf8))
+    {
+        if (fs::exists(t4png))
+            rampOut = absPathStr(t4png);
+        else if (fs::exists(t4bmp))
+            rampOut = absPathStr(t4bmp);
+        else if (fs::exists(t3png))
+            rampOut = absPathStr(t3png);
+        else if (fs::exists(t3bmp))
+            rampOut = absPathStr(t3bmp);
+        return;
+    }
+
+    const int idxKind = PmxRampKindByMaterialIndexTable(modelPathLower, pmxMaterialIndex);
+    const bool nameSkin = PmxMatNameSkinLikeToon3(matNameUtf8);
+
+    if (nameSkin)
+    {
+        if (fs::exists(t3png))
+        {
+            rampOut = absPathStr(t3png);
+            return;
+        }
+        if (fs::exists(t3bmp))
+        {
+            rampOut = absPathStr(t3bmp);
+            return;
+        }
+    }
+
+    if (idxKind == 2 && !nameSkin)
+    {
+        if (fs::exists(t4png))
+            rampOut = absPathStr(t4png);
+        else if (fs::exists(t4bmp))
+            rampOut = absPathStr(t4bmp);
+        else if (fs::exists(t3png))
+            rampOut = absPathStr(t3png);
+        else if (fs::exists(t3bmp))
+            rampOut = absPathStr(t3bmp);
+        return;
+    }
+
+    if (idxKind == 1 || nameSkin)
+    {
+        if (fs::exists(t3png))
+        {
+            rampOut = absPathStr(t3png);
+            return;
+        }
+        if (fs::exists(t3bmp))
+        {
+            rampOut = absPathStr(t3bmp);
+            return;
+        }
+        // toon3 が無い場合は下へ（肌マテなのに toon3 未同梱のとき Emissive の toon を残す）
+    }
+
+    if (!pathHasToon(rampOut))
+    {
+        if (fs::exists(t4png))
+            rampOut = absPathStr(t4png);
+        else if (fs::exists(t4bmp))
+            rampOut = absPathStr(t4bmp);
+        else if (fs::exists(t3png))
+            rampOut = absPathStr(t3png);
+        else if (fs::exists(t3bmp))
+            rampOut = absPathStr(t3bmp);
+        return;
+    }
+
+    // Assimp が肌系マテの Ramp に toon4 だけ載せた場合 → 同フォルダに toon3 があれば差し替え（番号表 toon3 も対象）
+    if ((nameSkin || idxKind == 1) && PathWContainsInsensitive(rampOut, L"toon4")
+        && !PathWContainsInsensitive(rampOut, L"toon3"))
+    {
+        if (fs::exists(t3png))
+            rampOut = absPathStr(t3png);
+        else if (fs::exists(t3bmp))
+            rampOut = absPathStr(t3bmp);
+    }
+}
+
 //
 // Load scene
 //
@@ -131,6 +607,12 @@ bool AssimpLoader::Load(ImportSettings& settings)
     settings.meshes.resize(scene->mNumMeshes);
 
     fs::path modelDir = fs::path(targetFilePath).parent_path();
+    {
+        std::error_code ec;
+        const fs::path absFile = fs::absolute(fs::path(targetFilePath), ec);
+        if (!ec)
+            modelDir = absFile.parent_path();
+    }
 
     // PMX (MMD): UV convention differs; V=0 at bottom -> flip V for DirectX. Avoid double-flip from settings.
     const std::wstring pathLower = [&]() {
@@ -146,6 +628,28 @@ bool AssimpLoader::Load(ImportSettings& settings)
         Mesh& dst = settings.meshes[i];
 
         dst.Vertices.resize(src->mNumVertices);
+
+        // PMX/MMD 等: 肌色はテクスチャではなくマテリアル Diffuse に乗ることが多い → 頂点カラーに焼き込む（シェーダで albedo *= input.color）
+        const aiMaterial* mat = scene->mMaterials[src->mMaterialIndex];
+        aiColor4D matDiffuse(1.0f, 1.0f, 1.0f, 1.0f);
+        (void)mat->Get(AI_MATKEY_COLOR_DIFFUSE, matDiffuse);
+        // PMX: Assimp の Get が常に白でも、生プロパティに PMX の Diffuse が残るモデルがある
+        if (isPmx)
+        {
+            aiColor4D propDiffuse;
+            if (TryReadDiffuseRgbaFromMaterialProperties(mat, propDiffuse))
+            {
+                const bool getIsWhiteRgb =
+                    (std::fabs(matDiffuse.r - 1.0f) < 0.004f && std::fabs(matDiffuse.g - 1.0f) < 0.004f
+                        && std::fabs(matDiffuse.b - 1.0f) < 0.004f);
+                const bool propDiffersRgb =
+                    (std::fabs(propDiffuse.r - matDiffuse.r) > 0.002f || std::fabs(propDiffuse.g - matDiffuse.g) > 0.002f
+                        || std::fabs(propDiffuse.b - matDiffuse.b) > 0.002f);
+                const bool propDiffersA = std::fabs(propDiffuse.a - matDiffuse.a) > 0.002f;
+                if (getIsWhiteRgb || propDiffersRgb || propDiffersA)
+                    matDiffuse = propDiffuse;
+            }
+        }
 
         for (unsigned int v = 0; v < src->mNumVertices; ++v)
         {
@@ -182,7 +686,7 @@ bool AssimpLoader::Load(ImportSettings& settings)
                 }
                 vOut.UV = { u, v_ };
             }
-            vOut.Color = { 1,1,1,1 };
+            vOut.Color = { matDiffuse.r, matDiffuse.g, matDiffuse.b, matDiffuse.a };
         }
 
         // Faces: keep Assimp order (ConvertToLeftHanded already handles winding for LH)
@@ -204,7 +708,6 @@ bool AssimpLoader::Load(ImportSettings& settings)
         }
 
         // Texture paths: keep full relative path (e.g. sakura1.fbm/xxx.png) so .fbm folder is used
-        const aiMaterial* mat = scene->mMaterials[src->mMaterialIndex];
         auto Resolve = [&](aiTextureType type, std::wstring& outPath) {
             aiString aPath;
             if (mat->GetTexture(type, 0, &aPath) == AI_SUCCESS) {
@@ -213,23 +716,60 @@ bool AssimpLoader::Load(ImportSettings& settings)
             }
             };
 
+        dst.MaterialName.clear();
+        {
+            aiString matNameEarly;
+            if (mat->Get(AI_MATKEY_NAME, matNameEarly) == AI_SUCCESS)
+                dst.MaterialName = matNameEarly.C_Str();
+        }
+
         Resolve(aiTextureType_DIFFUSE, dst.DiffuseMap);
         Resolve(aiTextureType_NORMALS, dst.NormalMap);
         Resolve(aiTextureType_METALNESS, dst.MetallicMap);
         Resolve(aiTextureType_DIFFUSE_ROUGHNESS, dst.RoughnessMap);
-        // NPR ランプ用（DCC で Emissive にランプテクスチャを割り当てる想定。未設定なら Scene でデフォルト）
-        Resolve(aiTextureType_EMISSIVE, dst.RampMap);
 
-        aiString matNameAi;
-        if (mat->Get(AI_MATKEY_NAME, matNameAi) == AI_SUCCESS)
-            dst.MaterialName = matNameAi.C_Str();
+        if (isPmx)
+        {
+            // PMX: トゥーンは Emissive / Ambient / Lightmap に載ることがある（hibana_pmx_materials.md の toon3/toon4）
+            Resolve(aiTextureType_EMISSIVE, dst.RampMap);
+            if (dst.RampMap.empty())
+                Resolve(aiTextureType_AMBIENT, dst.RampMap);
+            if (dst.RampMap.empty())
+                Resolve(aiTextureType_LIGHTMAP, dst.RampMap);
+            if (dst.RampMap.empty())
+            {
+                aiString ap2;
+                if (mat->GetTexture(aiTextureType_DIFFUSE, 1, &ap2) == AI_SUCCESS)
+                    dst.RampMap = (modelDir / UTF8ToWide(std::string(ap2.C_Str()))).wstring();
+            }
+            if (dst.RampMap.empty())
+                TryPmxResolveRampByToonFilename(mat, modelDir, dst.MaterialName, dst.RampMap, pathLower, src->mMaterialIndex);
+            FinalizePmxRampMap(modelDir, dst.MaterialName, dst.RampMap, pathLower, src->mMaterialIndex);
+            // スフィア: Specular / Height / Reflection（Assimp PMX の割り当てに依存）
+            Resolve(aiTextureType_SPECULAR, dst.SphereMap);
+            if (dst.SphereMap.empty())
+                Resolve(aiTextureType_HEIGHT, dst.SphereMap);
+            if (dst.SphereMap.empty())
+                Resolve(aiTextureType_REFLECTION, dst.SphereMap);
+            if (!dst.SphereMap.empty() && dst.SphereMode == 0)
+                dst.SphereMode = 2; // MMD spa 加算が多い（1=乗算, 2=加算）
+        }
+        else
+        {
+            // NPR ランプ用（DCC で Emissive にランプテクスチャを割り当てる想定。未設定なら Scene でデフォルト）
+            Resolve(aiTextureType_EMISSIVE, dst.RampMap);
+        }
 
         float opacity = 1.0f;
         if (mat->Get(AI_MATKEY_OPACITY, opacity) != AI_SUCCESS)
+            opacity = matDiffuse.a;
+        // PMX: 透明度は Diffuse A や生プロパティにだけ入り、OPACITY が 1 のままのことが多い
+        if (isPmx)
         {
-            aiColor4D diffuse{};
-            if (mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS)
-                opacity = diffuse.a;
+            float propA = 1.f;
+            if (TryReadDiffuseAlphaFromMaterialProperties(mat, propA))
+                opacity = (std::min)(opacity, propA);
+            opacity = (std::min)(opacity, matDiffuse.a);
         }
         dst.Opacity = opacity;
 
@@ -237,7 +777,13 @@ bool AssimpLoader::Load(ImportSettings& settings)
         for (char& c : lower)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const bool nameSuggestsTransparent = (lower.find("_tr") != std::string::npos);
-        dst.NprTransparentByRule = (opacity < 0.99f) || nameSuggestsTransparent;
+        dst.NprTransparentByRule = (dst.Opacity < 0.99f) || nameSuggestsTransparent;
+        // hibana「目影」: Assimp が A を落とさない場合のフォールバック（PMX では Diffuse A=0.2）
+        if (isPmx && Utf8Contains(dst.MaterialName, "\xe7\x9b\xae\xe5\xbd\xb1", 6))
+        {
+            dst.NprTransparentByRule = true;
+            dst.Opacity = (std::min)(dst.Opacity, 0.2f);
+        }
 
         // NPR: 顔・肌パーツはセル影を頂点法線寄りに（法線マップの凹凸影を抑えて「顔影固定」に近づける）
         dst.NprCelVertexBlendOverride = -1.f;
@@ -247,6 +793,15 @@ bool AssimpLoader::Load(ImportSettings& settings)
                 || lower.find("hoho") != std::string::npos || lower.find("cheek") != std::string::npos
                 || lower.find("mouth") != std::string::npos || lower.find("lip") != std::string::npos)
                 dst.NprCelVertexBlendOverride = 0.88f;
+        }
+        if (dst.NprCelVertexBlendOverride < 0.f && isPmx && PmxMaterialNameSuggestsFacePart(dst.MaterialName))
+            dst.NprCelVertexBlendOverride = 0.88f;
+
+        // 不透明扱いメッシュ: PMX Diffuse の A=0 等が albedo *= vertexColor で全体を潰すのを防ぐ（NPR 不透明 / PBR 共通データ）
+        if (!dst.NprTransparentByRule)
+        {
+            for (auto& vtx : dst.Vertices)
+                vtx.Color.w = 1.0f;
         }
     }
 

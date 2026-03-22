@@ -69,7 +69,9 @@ namespace RenderSystem
 		ID3D12DescriptorHeap* sharedSrvHeapForPbr = nullptr,
 		D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu = {},
 		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu = {},
-		bool skipNprFamilyInPbr = false);
+		/// NPR 親の子を PBR から外すのは、対応する NPR パス（不透明／透明）が実際に描画できるときだけ。
+		bool nprOpaquePsoValid = false,
+		bool nprTransparentPsoValid = false);
 
 	/// DrawMain の後。PBR キューから NPR 親子は除外済み。不透明 NPR → 透明 NPR（距離ソート）。
 	void DrawNprPasses(

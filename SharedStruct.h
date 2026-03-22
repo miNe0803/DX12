@@ -1,6 +1,7 @@
 #pragma once
 #include <d3dx12.h>
 #include <DirectXMath.h>
+#include <cstdint>
 #include <vector>
 #include <string>
 
@@ -39,6 +40,7 @@ static_assert(sizeof(Vertex) == 84, "Vertex size must be 84 bytes.");
 
 /// PBR instancing: one row-major world matrix per instance (HLSL row_major + mul(pos, World)).
 /// NprPerMesh: x=セル影用頂点ブレンド上書き(>=0 で有効), w=1 で x を使用（未設定は -1）
+/// y=スフィアモード, z=マテリアル不透明度乗算（NPR 透明パス。PMX で頂点/定数が 1 のとき用）, w=予備
 struct InstanceData {
     DirectX::XMFLOAT4X4 World;
     DirectX::XMFLOAT4 NprPerMesh;
@@ -69,12 +71,14 @@ static_assert(sizeof(Transform) == 256u, "Transform CB stride must be 256 for ro
 // PBR用: RimParams + CameraPos + NPR 調整（NPR シェーダで使用。PBR は主に RimParams.y のみ）
 // RimParams: x=不透明NPR露出 y=法線スケール z=リムべき w=リム加算強度
 // NprTuning: x=virtualLight(透明) y=透明露出 z=不透明clip閾値 w=影の環境色スケール
-// NprTuning2: x=セル影の頂点法線ブレンド(0=法線マップ優先,1=頂点のみ) y=ランプ境界の急峻さ z=リムの頂点ブレンド w=予備
+// NprTuning2: x=セル影の頂点法線ブレンド y=ランプ境界の急峻さ z=リムの頂点ブレンド w=NPRデバッグ(0–7: Editor 参照 5=t0生 6=t0×頂点 7=線形×頂点)
+// NprDebugHdr: x=NPR HDR 倍率 y=線形 RGB 上限(0=無制限) zw=予備
 struct PBRConstants {
     DirectX::XMFLOAT4 RimParams;
     DirectX::XMFLOAT4 CameraPos;
     DirectX::XMFLOAT4 NprTuning;
     DirectX::XMFLOAT4 NprTuning2;
+    DirectX::XMFLOAT4 NprDebugHdr;
 };
 
 // 地形用: ベース地面 + 3種の木 + 雪 + 川 + カメラ位置
@@ -95,6 +99,10 @@ struct Mesh {
     std::wstring RoughnessMap;
     /// 任意: NPR ランプ（空なら既定グラデ or assets/npr/default_ramp.png）
     std::wstring RampMap;
+    /// PMX/MMD スフィアマップ（加算 spa 等）。空なら白テクスチャ。
+    std::wstring SphereMap;
+    /// PMX sphereMode: 0=無効, 1=乗算(sph), 2=加算(spa), 3+=加算扱い（サブテクスチャは未対応）
+    uint8_t SphereMode = 0;
     /// NPR: セル影を頂点法線寄りにする係数（0..1）。-1=グローバル既定のみ（顔マテは Assimp で自動設定）
     float NprCelVertexBlendOverride = -1.f;
     std::vector<Bone> Bones;

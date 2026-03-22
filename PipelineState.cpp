@@ -1,5 +1,6 @@
 #include "PipelineState.h"
 #include "Engine.h"
+#include "Core/GpuDebugLabels.h"
 #include <d3dx12.h>
 #include <d3dcompiler.h>
 #include <unordered_map>
@@ -68,6 +69,12 @@ namespace
 			<< "|DB=" << static_cast<int>(rt0.DestBlend)
 			<< "|BO=" << static_cast<int>(rt0.BlendOp);
 		return oss.str();
+	}
+
+	std::wstring ShaderFileBase(const std::wstring& path)
+	{
+		const size_t slash = path.find_last_of(L"/\\");
+		return (slash == std::wstring::npos) ? path : path.substr(slash + 1);
 	}
 }
 
@@ -171,6 +178,14 @@ void PipelineState::Create()
 	{
 		printf("PipelineState create failed\n");
 		return;
+	}
+
+	{
+		std::wstring label = L"PSO:";
+		label += ShaderFileBase(m_vsPath);
+		label += L'|';
+		label += ShaderFileBase(m_psPath);
+		GPU_SET_NAME(m_pPipelineState.Get(), label.c_str());
 	}
 
 	s_graphicsPsoCache[key] = m_pPipelineState;

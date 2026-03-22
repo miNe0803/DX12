@@ -8,6 +8,7 @@
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
 #include "DebugLog.h"
+#include "Core/GpuDebugLabels.h"
 #include <DirectXMath.h>
 #include <DirectXCollision.h>
 #include <d3d12.h>
@@ -63,6 +64,16 @@ namespace
 		UINT indexCount;
 	};
 
+	/// RenderDoc で検索しやすいよう「Player」PIX 用（親に PlayerComponent のモデルグループ子など）
+	bool EntityIsPlayerFamilyMesh(entt::registry& registry, entt::entity entity)
+	{
+		if (registry.all_of<PlayerComponent>(entity))
+			return true;
+		if (const auto* link = registry.try_get<ModelGroupChildComponent>(entity))
+			return registry.valid(link->parent) && registry.all_of<PlayerComponent>(link->parent);
+		return false;
+	}
+
 	bool DrawSortLess(const DrawSortItem& a, const DrawSortItem& b)
 	{
 		const uintptr_t pa = reinterpret_cast<uintptr_t>(a.pso);
@@ -93,6 +104,7 @@ namespace
 		IndexBuffer* ib = nullptr;
 		UINT indexCount = 0;
 		UINT instanceCount = 0;
+		bool hasPlayerInstance = false;
 	};
 
 	static void RecordPbrBatchesOnCmd(
@@ -119,11 +131,14 @@ namespace
 		ID3D12RootSignature* const rs = rootSignature ? rootSignature->Get() : nullptr;
 		if (!pso || !rs)
 			return;
+		GPU_CMD_BEGIN_EVENT(cmd, 100, 200, 255, L"PBR: DrawIndexedInstanced batches (parallel CL)");
 		for (size_t i = batchBegin; i < batchEnd; ++i)
 		{
 			const PbrDrawBatch& b = batches[i];
 			if (!b.vb || !b.ib || b.instanceCount == 0)
 				continue;
+			if (b.hasPlayerInstance)
+				GPU_CMD_BEGIN_EVENT(cmd, 96, 220, 112, L"Player: PBR batch (DrawIndexedInstanced)");
 			cmd->SetPipelineState(pso);
 			cmd->SetGraphicsRootSignature(rs);
 			cmd->SetGraphicsRootConstantBufferView(0, b.sceneConstantsGpu);
@@ -138,9 +153,12 @@ namespace
 			cmd->IASetVertexBuffers(0, 1, &vbView);
 			cmd->IASetIndexBuffer(&ibView);
 			cmd->DrawIndexedInstanced(b.indexCount, b.instanceCount, 0, 0, 0);
+			if (b.hasPlayerInstance)
+				GPU_CMD_END_EVENT(cmd);
 			++outDrawCalls;
 			outInstances += b.instanceCount;
 		}
+		GPU_CMD_END_EVENT(cmd);
 	}
 }
 
@@ -181,7 +199,8 @@ void RenderSystem::DrawMain(
 	ID3D12DescriptorHeap* sharedSrvHeapForPbr,
 	D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
 	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu,
-	bool skipNprFamilyInPbr)
+	bool nprOpaquePsoValid,
+	bool nprTransparentPsoValid)
 {
 	(void)descriptorHeap;
 	auto view = registry.view<TransformComponent, MeshRendererComponent, LODComponent>();
@@ -245,11 +264,16 @@ void RenderSystem::DrawMain(
 		}
 		else
 		{
-			if (skipNprFamilyInPbr)
+			// NPR 親の子: 不透明は不透明 NPR PSO、透明は透明 NPR PSO が無いと DrawNprPasses で描けない。
+			// 以前は「不透明 PSO だけ有効」でも全子を PBR から外しており、透明パーツが完全にドロップしていた。
+			if (const auto* link = registry.try_get<ModelGroupChildComponent>(entity))
 			{
-				if (const auto* link = registry.try_get<ModelGroupChildComponent>(entity))
+				if (registry.valid(link->parent) && registry.all_of<NPRTag>(link->parent))
 				{
-					if (registry.valid(link->parent) && registry.all_of<NPRTag>(link->parent))
+					const bool nprWillDrawThisMesh =
+						(!mesh.NprTransparent && nprOpaquePsoValid)
+						|| (mesh.NprTransparent && nprTransparentPsoValid);
+					if (nprWillDrawThisMesh)
 						continue;
 				}
 			}
@@ -341,6 +365,7 @@ void RenderSystem::DrawMain(
 	UINT pbrBatchIndexCount = 0;
 	UINT pbrBatchRingStart = sliceBase;
 	D3D12_GPU_DESCRIPTOR_HANDLE pbrBatchMaterialGpu{};
+	bool pbrBatchContainsPlayer = false;
 
 	std::vector<PbrDrawBatch> pbrBatches;
 	if (parallelPbrRecord)
@@ -354,11 +379,16 @@ void RenderSystem::DrawMain(
 		if (pbrBatchCount == 0 || !pbrBatchVB || !pbrBatchIB)
 			return;
 		// Root SRV is already rebased to batch start; instanceID starts from 0 in VS.
+		if (pbrBatchContainsPlayer)
+			GPU_CMD_BEGIN_EVENT(cmdList, 96, 220, 112, L"Player: PBR batch (DrawIndexedInstanced)");
 		cmdList->DrawIndexedInstanced(pbrBatchIndexCount, pbrBatchCount, 0, 0, 0);
+		if (pbrBatchContainsPlayer)
+			GPU_CMD_END_EVENT(cmdList);
 		++statTotal;
 		++statPbrBatches;
 		statPbrInstances += pbrBatchCount;
 		pbrBatchCount = 0;
+		pbrBatchContainsPlayer = false;
 	};
 
 	auto flushPbrBatchToVector = [&]()
@@ -376,8 +406,10 @@ void RenderSystem::DrawMain(
 		b.ib = pbrBatchIB;
 		b.indexCount = pbrBatchIndexCount;
 		b.instanceCount = pbrBatchCount;
+		b.hasPlayerInstance = pbrBatchContainsPlayer;
 		pbrBatches.push_back(b);
 		pbrBatchCount = 0;
+		pbrBatchContainsPlayer = false;
 	};
 
 	for (const DrawSortItem& it : queue)
@@ -486,9 +518,12 @@ void RenderSystem::DrawMain(
 		}
 
 		DirectX::XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
-		pbrInstanceMapped[writeCursor].NprPerMesh = DirectX::XMFLOAT4(-1.f, 0.f, 0.f, 0.f);
+		pbrInstanceMapped[writeCursor].NprPerMesh = DirectX::XMFLOAT4(
+			-1.f, static_cast<float>(mesh.NprSphereMode), 0.f, 0.f);
 		++writeCursor;
 		++pbrBatchCount;
+		if (EntityIsPlayerFamilyMesh(registry, it.entity))
+			pbrBatchContainsPlayer = true;
 
 		if (const auto* link = registry.try_get<ModelGroupChildComponent>(it.entity))
 		{
@@ -514,13 +549,17 @@ void RenderSystem::DrawMain(
 		uint32_t d0 = 0, inst0 = 0, d1 = 0, inst1 = 0;
 		std::thread worker0([&]()
 		{
+			GPU_CMD_BEGIN_EVENT(cmdListPbrRecord0, 120, 200, 255, L"RenderSystem: PBR record [0]");
 			RecordPbrBatchesOnCmd(cmdListPbrRecord0, sharedSrvHeapForPbr, pbrBatches, 0, mid,
 				rootSignature, pipelineState, mainPassRtvCpu, mainPassDsvCpu, d0, inst0);
+			GPU_CMD_END_EVENT(cmdListPbrRecord0);
 		});
 		std::thread worker1([&]()
 		{
+			GPU_CMD_BEGIN_EVENT(cmdListPbrRecord1, 120, 200, 255, L"RenderSystem: PBR record [1]");
 			RecordPbrBatchesOnCmd(cmdListPbrRecord1, sharedSrvHeapForPbr, pbrBatches, mid, n,
 				rootSignature, pipelineState, mainPassRtvCpu, mainPassDsvCpu, d1, inst1);
+			GPU_CMD_END_EVENT(cmdListPbrRecord1);
 		});
 		worker0.join();
 		worker1.join();
@@ -645,6 +684,8 @@ void RenderSystem::DrawNprPasses(
 	cmdList->SetGraphicsRootConstantBufferView(0, sceneConstantsCB->GetAddress());
 	cmdList->SetGraphicsRootConstantBufferView(1, pbrPropertyBuffer->GetAddress());
 
+	// RenderDoc: コマンド名は「DrawIndexedInstanced」（D3D12 には非インスタンス版を使っていない）
+	GPU_CMD_BEGIN_EVENT(cmdList, 255, 140, 160, L"NPR draws: opaque (DrawIndexedInstanced)");
 	auto drawOne = [&](entt::entity entity, PipelineState* pso) -> bool {
 		if (!pso || !pso->IsValid())
 			return false;
@@ -653,15 +694,20 @@ void RenderSystem::DrawNprPasses(
 			DebugLog("[Render] NPR instance ring full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
 			return false;
 		}
+		const bool playerPix = EntityIsPlayerFamilyMesh(registry, entity);
+		if (playerPix)
+			GPU_CMD_BEGIN_EVENT(cmdList, 96, 220, 112, L"Player: NPR DrawIndexedInstanced");
 		const auto& transform = registry.get<TransformComponent>(entity);
 		const auto& mesh = registry.get<MeshRendererComponent>(entity);
 		XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
 		{
 			const float useO = mesh.NprCelVertexBlendOverride;
+			const float sph = static_cast<float>(mesh.NprSphereMode);
+			const float op = mesh.NprOpacity;
 			if (useO >= 0.f)
-				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(useO, 0.f, 0.f, 1.f);
+				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(useO, sph, op, 1.f);
 			else
-				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(-1.f, 0.f, 0.f, 0.f);
+				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(-1.f, sph, op, 0.f);
 		}
 		const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
 		cmdList->SetPipelineState(pso->Get());
@@ -676,6 +722,8 @@ void RenderSystem::DrawNprPasses(
 		cmdList->IASetIndexBuffer(&ibView);
 		cmdList->DrawIndexedInstanced(mesh.IndexCount, 1, 0, 0, 0);
 		++writeCursor;
+		if (playerPix)
+			GPU_CMD_END_EVENT(cmdList);
 		return true;
 	};
 
@@ -686,6 +734,9 @@ void RenderSystem::DrawNprPasses(
 		if (!drawOne(it.e, nprOpaquePso))
 			break;
 	}
+	GPU_CMD_END_EVENT(cmdList);
+
+	GPU_CMD_BEGIN_EVENT(cmdList, 255, 120, 220, L"NPR draws: transparent (DrawIndexedInstanced)");
 	for (const auto& pr : transSorted)
 	{
 		if (!haveTrans)
@@ -693,4 +744,5 @@ void RenderSystem::DrawNprPasses(
 		if (!drawOne(pr.second, nprTransparentPso))
 			break;
 	}
+	GPU_CMD_END_EVENT(cmdList);
 }

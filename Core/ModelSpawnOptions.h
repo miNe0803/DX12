@@ -15,6 +15,6 @@ struct ModelSpawnOptions
 	float rotationY = 0.0f;
 	FootPlacement foot = FootPlacement::None;
 	bool addPlayerComponent = false;
-	/// true のとき親に NPRTag を付与し、マテリアルルールに従い子 MeshRenderer に透明 NPR を割り当てる
-	bool addNprTag = false;
+	/// true のとき親に NPRTag を付与し、子メッシュは NPR_PS（ランプ/toon3）で描画。OFF のとき PBR のみでデバッグ表示も効かない。
+	bool addNprTag = true;
 };

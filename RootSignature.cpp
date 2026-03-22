@@ -60,12 +60,12 @@ RootSignature::RootSignature(bool forTerrain)
 	}
 
 	// PBR instanced: CBV0 scene (b0,s0), CBV1 material (b1,s0), Root SRV instances (t0,s1),
-	// table materials (t0-t4: albedo,normal,metallic,roughness,ramp), table IBL (t5-t7,s0)
+	// table materials (t0-t5: albedo,normal,metallic,roughness,ramp,sphere), table IBL (t6-t8,s0)
 	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[2].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX);
-	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
-	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 5);
+	tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0);
+	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6);
 	rootParam[3].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[4].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 

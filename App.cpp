@@ -4,6 +4,7 @@
 #include "keyboard.h"
 #include "Editor/ImGuiManager.h"
 #include "Editor/EditorUI.h"
+#include "Editor/DebugUI.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/Profiling/Profiler.h"
 #include "Texture2D.h"
@@ -145,7 +146,13 @@ void App::MainLoop() {
             if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
                 g_ImGuiManager->NewFrame();
                 if (g_Scene)
+                {
                     g_EditorUI.Draw(g_Scene->GetRegistry());
+                    // EditorUI とは別ウィンドウ（GPU 統計・NPR ramp デバッグ等）。未呼び出しだと UI が出ない。
+                    DebugUI::Draw();
+                    // Update() が ImGui より先なので、NPR デバッグ Combo を即反映
+                    g_Scene->SyncNprGpuTuningToMaterialCB();
+                }
             }
 
             // Update() 内の TransformSystem のあとに ImGui で Position 等を書き換えるため、

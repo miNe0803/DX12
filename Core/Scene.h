@@ -6,6 +6,7 @@
 #include <vector>
 #include "ModelSpawnOptions.h"
 #include "SharedStruct.h"
+#include "Graphics/PostProcessSettings.h"
 
 class VertexBuffer;
 class IndexBuffer;
@@ -18,6 +19,13 @@ public:
 	~Scene();
 	bool Init();
 	void Update();
+	/// ImGui で g_NprGpuTuning を変えた直後に呼ぶと、当フレームの Draw で反映（Update は ImGui より前のため）
+	void SyncNprGpuTuningToMaterialCB();
+	/// ポストプロセス（Bloom 閾値・露出・トーンマップ等）の編集用
+	PostProcessSettings& GetPostProcessSettings();
+	const PostProcessSettings& GetPostProcessSettings() const;
+	/// NPR トゥーン経路が実際に使われるか（NPRTag 数・NPR PSO 成否）
+	void GetNprPathDiagnostics(size_t& outNprTagEntityCount, bool& outNprOpaquePsoValid, bool& outWillUseNprDrawPass) const;
 	void Draw();
 	void SetAsyncSpawnBudgetPerFrame(size_t budget);
 	size_t GetAsyncSpawnBudgetPerFrame() const;

@@ -16,6 +16,7 @@
 #include "Engine/ECS/Components.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
 #include "Editor/Windows/ProfilerWindow.h"
+#include "NprTuning.h"
 
 namespace
 {
@@ -476,6 +477,9 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 	ImGui::Checkbox("Load with X +15m", &offsetPlus15X);
 	static bool addPlayerOnLoad = false;
 	ImGui::Checkbox("Add Player component on load (TPS / Movement panel)", &addPlayerOnLoad);
+	static bool addNprTagOnLoad = true;
+	ImGui::Checkbox("NPR / toon path (NPRTag) — toon3・ランプは必須", &addNprTagOnLoad);
+	ImGui::TextDisabled("OFF のとき PBR のみ描画。Ramp デバッグは NPR_PS にしか無いので真っ白に見えることがあります。");
 
 	int spawnBudget = 1;
 	if (g_Scene)
@@ -532,6 +536,7 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 			opt.foot = snapFeet ? ModelSpawnOptions::FootPlacement::SnapFeetToTerrain
 			                  : ModelSpawnOptions::FootPlacement::None;
 			opt.addPlayerComponent = addPlayerOnLoad;
+			opt.addNprTag = addNprTagOnLoad;
 
 			const int n = MultiByteToWideChar(CP_UTF8, 0, pathUtf8, -1, nullptr, 0);
 			std::wstring wpath;
@@ -567,6 +572,27 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 	}
 	else
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "AsyncModelLoader not initialized");
+
+	ImGui::Separator();
+	ImGui::TextUnformatted("NPR ramp debug (toon3 / t4, opaque NPR_PS)");
+	ImGui::DragFloat("NPR HDR view boost", &g_NprGpuTuning.nprHdrViewBoost, 0.05f, 0.25f, 16.0f);
+	ImGui::TextDisabled("RenderDoc: raise if body is black on HDR RT; use 1.0 normally.");
+	ImGui::DragFloat("NPR HDR linear clamp", &g_NprGpuTuning.nprHdrLinearClampMax, 0.1f, 0.0f, 32.0f);
+	ImGui::TextDisabled("0=off. Caps NPR before Bloom/ACES.");
+	if (g_Scene)
+	{
+		size_t nt = 0;
+		bool pso = false, wn = false;
+		g_Scene->GetNprPathDiagnostics(nt, pso, wn);
+		ImGui::Text("NPR draw path active: %s (NPRTag=%zu PSO=%s)", wn ? "YES" : "NO", nt, pso ? "ok" : "FAIL");
+	}
+	const char* nprDbgItems[] = {
+		"0: Off", "1: Ramp RGB", "2: u", "3: halfLambert", "4: GREEN=NPR_PS",
+		"5: t0 raw", "6: t0 x vtx", "7: linear x vtx"
+	};
+	ImGui::Combo("##npr_ramp_dbg_async", &g_NprGpuTuning.nprDebugRampView, nprDbgItems, IM_ARRAYSIZE(nprDbgItems));
+	ImGui::Checkbox("Log RampMap on register (VS Output)", &g_NprGpuTuning.logNprRampPathsOnRegister);
+	ImGui::TextDisabled("Also: window \"Debug / Async load\" (same controls + GPU stats).");
 
 	ImGui::End();
 }

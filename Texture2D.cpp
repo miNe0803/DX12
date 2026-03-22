@@ -1,8 +1,10 @@
 #include "Texture2D.h"
 #include <DirectXTex.h>
 #include "Engine.h"
+#include "Core/GpuDebugLabels.h"
 #include <mutex>
 #include <unordered_map>
+#include <string>
 
 #pragma comment(lib, "DirectXTex.lib")
 
@@ -67,15 +69,21 @@ bool Texture2D::Load(std::wstring& path)
 	TexMetadata meta = {};
 	ScratchImage scratch = {};
 	auto ext = FileExtension(path);
-
-	HRESULT hr = S_FALSE;
-	if (ext == L"png")
+	for (auto& c : ext)
 	{
-		hr = LoadFromWICFile(path.c_str(), WIC_FLAGS_NONE, &meta, scratch);
+		if (c >= L'A' && c <= L'Z')
+			c += (L'a' - L'A');
 	}
-	else if (ext == L"tga")
+
+	HRESULT hr = E_FAIL;
+	if (ext == L"tga")
 	{
 		hr = LoadFromTGAFile(path.c_str(), &meta, scratch);
+	}
+	else
+	{
+		// PNG / BMP / JPEG / GIF / TIFF など WIC 対応形式（PMX 付属の .bmp / .jpg 用）
+		hr = LoadFromWICFile(path.c_str(), WIC_FLAGS_NONE, &meta, scratch);
 	}
 
 	if (FAILED(hr))
@@ -125,6 +133,13 @@ bool Texture2D::Load(std::wstring& path)
 	if (FAILED(hr))
 	{
 		return false;
+	}
+
+	{
+		std::wstring label = L"Tex2D:";
+		const size_t slash = path.find_last_of(L"/\\");
+		label += (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+		GPU_SET_NAME(m_pResource.Get(), label.c_str());
 	}
 
 	return true;

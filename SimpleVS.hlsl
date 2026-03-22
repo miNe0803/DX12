@@ -1,5 +1,5 @@
 // PBR instanced path: b0 = View/Proj (space0), StructuredBuffer World at t0 space1.
-// Root: CBV0 scene, CBV1 material, Root SRV instance (t0,s1), tables t0-t3 / t4-t6 (space0) on PS.
+// Root: CBV0 scene, CBV1 material, Root SRV instance (t0,s1), tables t0-t5 材質 / t6-t8 IBL (space0) on PS.
 // View/Proj: C++ は XMMATRIX をそのまま書く（列メジャー格納）→ HLSL 既定 column_major と一致
 cbuffer SceneCB : register(b0)
 {

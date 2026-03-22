@@ -34,6 +34,7 @@
 #include "ModelBounds.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "NprTuning.h"
+#include "GpuDebugLabels.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -66,6 +67,21 @@ RootSignature* terrainRootSignature = nullptr;
 PipelineState* terrainPipelineState = nullptr;
 ConstantBuffer* terrainConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 Camera* g_Camera = nullptr;
+
+static void WriteNprTuningToPbrConstants(PBRConstants* pbrConst)
+{
+	if (!pbrConst || !g_Camera)
+		return;
+	XMVECTOR camPos = g_Camera->GetPosition();
+	XMStoreFloat4(&pbrConst->CameraPos, camPos);
+	pbrConst->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
+		g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
+	pbrConst->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
+		g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
+	pbrConst->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
+		g_NprGpuTuning.rimVertexNormalBlend, static_cast<float>(g_NprGpuTuning.nprDebugRampView));
+	pbrConst->NprDebugHdr = XMFLOAT4(g_NprGpuTuning.nprHdrViewBoost, g_NprGpuTuning.nprHdrLinearClampMax, 0.f, 0.f);
+}
 
 namespace {
 	struct TreeSpeciesConfig
@@ -124,7 +140,8 @@ namespace {
 		DescriptorHandle* roughnessHandle = heap->Register(roughnessTex);
 
 		Texture2D* rampTex = nullptr;
-		if (!mesh.RampMap.empty() && fs::exists(mesh.RampMap))
+		// exists のみだと相対パス・正規化差で弾かれ、白ランプに落ちることがある → Get に任せる
+		if (!mesh.RampMap.empty())
 			rampTex = Texture2D::Get(mesh.RampMap);
 		if (!rampTex)
 		{
@@ -134,11 +151,35 @@ namespace {
 		}
 		if (!rampTex)
 			rampTex = Texture2D::GetDefaultNprRamp();
+
+		if (g_NprGpuTuning.logNprRampPathsOnRegister)
+		{
+			Texture2D* const white = Texture2D::GetWhite();
+			const bool pathSet = !mesh.RampMap.empty();
+			const bool ptrIsWhite = (rampTex == white);
+			const bool existsFs = pathSet && fs::exists(fs::path(mesh.RampMap));
+			DebugLog("[NPR][Ramp] mat=\"%s\" pathSet=%d fsExists=%d texPtr==GetWhite=%d\n",
+				mesh.MaterialName.c_str(), pathSet ? 1 : 0, (pathSet && existsFs) ? 1 : 0, ptrIsWhite ? 1 : 0);
+			if (pathSet)
+			{
+				OutputDebugStringW(L"  path: ");
+				OutputDebugStringW(mesh.RampMap.c_str());
+				OutputDebugStringA("\n");
+			}
+		}
+
 		DescriptorHandle* rampHandle = heap->Register(rampTex);
 
-		// t0..t4 を「先頭ハンドルから連番で期待」しているため、
+		Texture2D* sphereTex = Texture2D::Get(mesh.SphereMap);
+		if (!sphereTex && !mesh.SphereMap.empty())
+			sphereTex = Texture2D::Get(ReplaceExtension(mesh.SphereMap, "tga"));
+		if (!sphereTex)
+			sphereTex = Texture2D::GetWhite();
+		DescriptorHandle* sphereHandle = heap->Register(sphereTex);
+
+		// t0..t5 を「先頭ハンドルから連番で期待」しているため、
 		// Register が失敗した場合は不整合を避ける。
-		if (!firstHandle || !normalHandle || !metallicHandle || !roughnessHandle || !rampHandle)
+		if (!firstHandle || !normalHandle || !metallicHandle || !roughnessHandle || !rampHandle || !sphereHandle)
 			return nullptr;
 
 		return firstHandle;
@@ -354,6 +395,8 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		mrc.SkipCpuFrustumCull = !m.Bones.empty();
 		mrc.NprTransparent = opt.addNprTag && m.NprTransparentByRule;
 		mrc.NprCelVertexBlendOverride = m.NprCelVertexBlendOverride;
+		mrc.NprSphereMode = m.SphereMode;
+		mrc.NprOpacity = m.Opacity;
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 		m_registry.emplace<EditorHierarchyLabelComponent>(entity,
@@ -471,7 +514,8 @@ bool Scene::InitCameraAndFrameBuffers()
 		pbr->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
 			g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
 		pbr->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
-			g_NprGpuTuning.rimVertexNormalBlend, 0.0f);
+			g_NprGpuTuning.rimVertexNormalBlend, static_cast<float>(g_NprGpuTuning.nprDebugRampView));
+		pbr->NprDebugHdr = XMFLOAT4(g_NprGpuTuning.nprHdrViewBoost, 0.f, 0.f, 0.f);
 	}
 	return InitPbrInstanceRingBuffer();
 }
@@ -614,6 +658,8 @@ bool Scene::InitMainPipeline()
 	nprPipelineState->SetPS(L"NPR_PS.cso");
 	nprPipelineState->SetCullMode(D3D12_CULL_MODE_BACK);
 	nprPipelineState->Create();
+	if (!nprPipelineState->IsValid())
+		DebugLog("[Scene] NPR opaque PSO invalid (NPR_PS.cso?). Toon path disabled; model falls back to PBR.\n");
 
 	nprTransparentPipelineState = new PipelineState();
 	nprTransparentPipelineState->SetInputLayout(Vertex::InputLayout);
@@ -747,11 +793,15 @@ bool Scene::InitSkyboxAndIBL()
 
 bool Scene::InitPostProcess()
 {
-	s_postProcessSettings.exposure = 1.0f;
 	s_postProcessSettings.gamma = 2.2f;
-	s_postProcessSettings.bloomIntensity = 0.6f;
-	s_postProcessSettings.threshold = 0.8f;
+	// NPR+PBR 同一 HDR: Bloom は「閾値超え差分」のみ＋ソフトニー。露出はやや抑え気味。
+	s_postProcessSettings.bloomIntensity = 0.38f;
+	s_postProcessSettings.threshold = 1.15f;
+	s_postProcessSettings.bloomKnee = 0.55f;
+	s_postProcessSettings.exposure = 0.88f;
 	s_postProcessSettings.blurSize = 2.0f;
+	s_postProcessSettings.nprPostExposure = 1.0f;
+	s_postProcessSettings.nprPostGamma = 2.2f;
 	ID3D12Resource* hdrRes = g_Engine->GetHdrColorResource();
 	if (hdrRes)
 	{
@@ -765,7 +815,7 @@ bool Scene::InitPostProcess()
 	s_postProcess = new PostProcessSystem();
 	UINT w = g_Engine->GetFrameBufferWidth();
 	UINT h = g_Engine->GetFrameBufferHeight();
-	if (s_postProcess && !s_postProcess->Init(g_Engine->Device(), descriptorHeap, w, h))
+	if (s_postProcess && !s_postProcess->Init(g_Engine->Device(), descriptorHeap, w, h, g_Engine->GetNprHdrColorResource()))
 	{
 		delete s_postProcess;
 		s_postProcess = nullptr;
@@ -867,18 +917,7 @@ void Scene::Update()
 		currentTransform->Proj = sc->Proj;
 	}
 
-	auto pbrConst = pbrPropertyBuffer[currentIndex]->GetPtr<PBRConstants>();
-	if (pbrConst)
-	{
-		XMVECTOR camPos = g_Camera->GetPosition();
-		XMStoreFloat4(&pbrConst->CameraPos, camPos);
-		pbrConst->RimParams = XMFLOAT4(g_NprGpuTuning.opaqueExposure, g_NprGpuTuning.normalScale,
-			g_NprGpuTuning.rimPower, g_NprGpuTuning.rimStrength);
-		pbrConst->NprTuning = XMFLOAT4(g_NprGpuTuning.virtualLight, g_NprGpuTuning.transExposure,
-			g_NprGpuTuning.opaqueAlphaClip, g_NprGpuTuning.ambientShadowStrength);
-		pbrConst->NprTuning2 = XMFLOAT4(g_NprGpuTuning.celVertexNormalBlend, g_NprGpuTuning.celShadeSharpness,
-			g_NprGpuTuning.rimVertexNormalBlend, 0.0f);
-	}
+	WriteNprTuningToPbrConstants(pbrPropertyBuffer[currentIndex]->GetPtr<PBRConstants>());
 	if (terrainConstantBuffer[currentIndex])
 	{
 		auto* terrConst = terrainConstantBuffer[currentIndex]->GetPtr<TerrainConstants>();
@@ -896,22 +935,72 @@ void Scene::Update()
 	LODSystem::Update(m_registry, cameraPos);
 }
 
+void Scene::SyncNprGpuTuningToMaterialCB()
+{
+	if (!g_Engine)
+		return;
+	const UINT currentIndex = g_Engine->CurrentBackBufferIndex();
+	if (currentIndex >= Engine::FRAME_BUFFER_COUNT || !pbrPropertyBuffer[currentIndex])
+		return;
+	WriteNprTuningToPbrConstants(pbrPropertyBuffer[currentIndex]->GetPtr<PBRConstants>());
+}
+
+PostProcessSettings& Scene::GetPostProcessSettings()
+{
+	return s_postProcessSettings;
+}
+
+const PostProcessSettings& Scene::GetPostProcessSettings() const
+{
+	return s_postProcessSettings;
+}
+
+void Scene::GetNprPathDiagnostics(size_t& outNprTagEntityCount, bool& outNprOpaquePsoValid, bool& outWillUseNprDrawPass) const
+{
+	outNprTagEntityCount = 0;
+	for ([[maybe_unused]] entt::entity e : m_registry.view<NPRTag>())
+		++outNprTagEntityCount;
+	outNprOpaquePsoValid = (nprPipelineState != nullptr && nprPipelineState->IsValid());
+	const bool nprTransOk = (nprTransparentPipelineState != nullptr && nprTransparentPipelineState->IsValid());
+	outWillUseNprDrawPass = (outNprTagEntityCount > 0) && (outNprOpaquePsoValid || nprTransOk);
+}
+
 void Scene::Draw()
 {
 	auto commandList = g_Engine->MainGraphicsCmdList();
 	auto postCommandList = g_Engine->PostGraphicsCmdList();
 
+	bool hasNprTag = false;
+	for ([[maybe_unused]] entt::entity e : m_registry.view<NPRTag>())
+	{
+		(void)e;
+		hasNprTag = true;
+		break;
+	}
+	const bool nprOpaquePsoOk = nprPipelineState && nprPipelineState->IsValid();
+	const bool nprTransPsoOk = nprTransparentPipelineState && nprTransparentPipelineState->IsValid();
+	const bool useNprDrawPath = hasNprTag && (nprOpaquePsoOk || nprTransPsoOk);
+
 	EngineDoTransition(commandList, g_Engine->GetHdrColorResource(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
 		D3D12_RESOURCE_STATE_RENDER_TARGET);
+	if (useNprDrawPath)
+	{
+		EngineDoTransition(commandList, g_Engine->GetNprHdrColorResource(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_RENDER_TARGET);
+	}
 
 	D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = g_Engine->GetHdrRtvCpuHandle();
+	D3D12_CPU_DESCRIPTOR_HANDLE nprHdrRtvHandle = g_Engine->GetNprHdrRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_Engine->GetDsvCpuHandle();
 	commandList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
 
 	const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 	commandList->ClearRenderTargetView(hdrRtvHandle, clearColor, 0, nullptr);
 	commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	GPU_CMD_BEGIN_EVENT(commandList, 40, 40, 40, L"After HDR+DSV clear (inspect here = this frame, not previous)");
+	GPU_CMD_END_EVENT(commandList);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
 	auto materialHeap = descriptorHeap->GetHeap();
@@ -921,16 +1010,8 @@ void Scene::Draw()
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
-	bool hasNprTag = false;
-	for ([[maybe_unused]] entt::entity e : m_registry.view<NPRTag>())
-	{
-		(void)e;
-		hasNprTag = true;
-		break;
-	}
-	const bool nprOpaquePsoOk = nprPipelineState && nprPipelineState->IsValid();
-	const bool useNprDrawPath = hasNprTag && nprOpaquePsoOk;
 	const bool disableParallelPbr = useNprDrawPath;
+	GPU_CMD_BEGIN_EVENT(commandList, 80, 180, 255, L"Scene: DrawMain (terrain + PBR)");
 	RenderSystem::DrawMain(m_registry, commandList,
 		constantBuffer[currentIndex],
 		sceneConstantBuffer[currentIndex],
@@ -945,10 +1026,17 @@ void Scene::Draw()
 		materialHeap,
 		hdrRtvHandle,
 		dsvHandle,
-		useNprDrawPath);
+		nprOpaquePsoOk,
+		nprTransPsoOk);
+	GPU_CMD_END_EVENT(commandList);
 
 	if (useNprDrawPath)
 	{
+		const float clearNpr[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		commandList->OMSetRenderTargets(1, &nprHdrRtvHandle, FALSE, &dsvHandle);
+		commandList->ClearRenderTargetView(nprHdrRtvHandle, clearNpr, 0, nullptr);
+
+		GPU_CMD_BEGIN_EVENT(commandList, 255, 120, 200, L"Scene: NPR (opaque + transparent)");
 		XMFLOAT3 camPos{};
 		XMStoreFloat3(&camPos, g_Camera->GetPosition());
 		RenderSystem::DrawNprPasses(m_registry, commandList,
@@ -963,9 +1051,10 @@ void Scene::Draw()
 			descriptorHeap,
 			envHandle,
 			materialHeap,
-			hdrRtvHandle,
+			nprHdrRtvHandle,
 			dsvHandle,
 			camPos);
+		GPU_CMD_END_EVENT(commandList);
 	}
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
@@ -983,15 +1072,24 @@ void Scene::Draw()
 	if (s_postProcess && s_postProcess->IsValid() && s_hdrSrvHandle)
 	{
 		ID3D12Resource* hdrRes = g_Engine->GetHdrColorResource();
+		ID3D12Resource* nprHdrRes = g_Engine->GetNprHdrColorResource();
 		ID3D12Resource* backBufferRes = g_Engine->GetBackBufferResource();
-		D3D12_RESOURCE_BARRIER barriers[2] = {};
-		barriers[0] = CD3DX12_RESOURCE_BARRIER::Transition(hdrRes, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		const bool splitNprPost = useNprDrawPath && s_postProcess->HasRegisteredNprHdrSrv();
+		D3D12_RESOURCE_BARRIER barriers[3] = {};
+		UINT bi = 0;
+		barriers[bi++] = CD3DX12_RESOURCE_BARRIER::Transition(hdrRes, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		if (splitNprPost && nprHdrRes)
+			barriers[bi++] = CD3DX12_RESOURCE_BARRIER::Transition(nprHdrRes, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 		if (backBufferRes)
-			barriers[1] = CD3DX12_RESOURCE_BARRIER::Transition(backBufferRes, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-		UINT barrierCount = backBufferRes ? 2 : 1;
-		postCommandList->ResourceBarrier(barrierCount, barriers);
+			barriers[bi++] = CD3DX12_RESOURCE_BARRIER::Transition(backBufferRes, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		GPU_CMD_BEGIN_EVENT(postCommandList, 180, 200, 100, L"Scene: PostProcess prep (HDR/NPR RT→SRV, backbuffer RTV)");
+		postCommandList->ResourceBarrier(bi, barriers);
+		GPU_CMD_END_EVENT(postCommandList);
 
 		postCommandList->SetDescriptorHeaps(1, &materialHeap);
-		s_postProcess->Execute(postCommandList, materialHeap, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings);
+		GPU_CMD_BEGIN_EVENT(postCommandList, 200, 255, 120, L"Scene: PostProcess (bloom + tonemap + composite)");
+		s_postProcess->Execute(postCommandList, materialHeap, s_hdrSrvHandle->HandleGPU, g_Engine->GetBackBufferRtvCpuHandle(), s_postProcessSettings,
+			splitNprPost);
+		GPU_CMD_END_EVENT(postCommandList);
 	}
 }

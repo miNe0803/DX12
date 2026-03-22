@@ -36,7 +36,7 @@ struct MeshRendererComponent
 	class VertexBuffer*  pVB;
 	class IndexBuffer*   pIB;
 	UINT                 IndexCount;
-	DescriptorHandle*    MaterialHandle; // t0～t3 の先頭（albedo, normal, metallic, roughness）
+	DescriptorHandle*    MaterialHandle; // t0 先頭（albedo, normal, metallic, roughness, ramp, sphere）
 	bool                 CastShadow = true;
 	/// ローカル空間 AABB（スポーン時に設定）。視錐台カリング用。地形など未設定なら false。
 	bool                 HasLocalBounds = false;
@@ -47,6 +47,10 @@ struct MeshRendererComponent
 	bool                 NprTransparent = false;
 	/// NPR セル影: 頂点法線ブレンド上書き（>=0 でインスタンスごと）。顔パーツはロード時に設定
 	float                NprCelVertexBlendOverride = -1.f;
+	/// PMX スフィアモード（InstanceData.NprPerMesh.y へ渡す）
+	uint8_t              NprSphereMode = 0;
+	/// PMX 等のマテリアル Opacity（NPR 透明パスで NprPerMesh.z に乗算）
+	float                NprOpacity = 1.f;
 };
 
 /// NPR（トゥーン）描画対象のモデルルートに付与

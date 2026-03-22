@@ -39,10 +39,14 @@ public:
 	void ExecuteAndWait();
 	void WaitForGpuIdle();
 
+	/// PBR・地形・スカイ用 HDR（NPR 分離時はここに NPR を描かない）
 	ID3D12Resource* GetHdrColorResource();
+	/// NPR キャラ専用 HDR（RGBA、透明クリア。同じ MainDepth を併用）
+	ID3D12Resource* GetNprHdrColorResource();
 	ID3D12Resource* GetBackBufferResource();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetHdrRtvCpuHandle();
+	D3D12_CPU_DESCRIPTOR_HANDLE GetNprHdrRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle();
 	// Depth buffer as R32_FLOAT SRV (Hi-Z, etc.)
 	ID3D12Resource* GetDepthStencilResource() const { return m_pDepthStencilBuffer.Get(); }
@@ -89,6 +93,7 @@ private:
 	ComPtr<ID3D12DescriptorHeap> m_pRtvHeap = nullptr;
 	ComPtr<ID3D12Resource> m_pRenderTargets[FRAME_BUFFER_COUNT] = { nullptr };
 	ComPtr<ID3D12Resource> m_pHdrColor = nullptr;
+	ComPtr<ID3D12Resource> m_pNprHdrColor = nullptr;
 
 	UINT m_DsvDescriptorSize = 0;
 	ComPtr<ID3D12DescriptorHeap> m_pDsvHeap = nullptr;

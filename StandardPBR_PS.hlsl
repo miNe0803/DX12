@@ -17,9 +17,10 @@ Texture2D _NormalMap : register(t1, space0);
 Texture2D _MetallicMap : register(t2, space0);
 Texture2D _RoughnessMap : register(t3, space0);
 Texture2D _RampTex : register(t4, space0);
-TextureCube _PrefilterEnv  : register(t5, space0);
-TextureCube _IrradianceMap : register(t6, space0);
-Texture2D _BrdfLut         : register(t7, space0);
+Texture2D _SphereMap : register(t5, space0);
+TextureCube _PrefilterEnv  : register(t6, space0);
+TextureCube _IrradianceMap : register(t7, space0);
+Texture2D _BrdfLut         : register(t8, space0);
 
 // --- [Material params (b1)] ---
 // RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
@@ -29,6 +30,7 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
+    float4 NprDebugHdr; // PBR では未使用（定数バッファサイズ合わせ）
 };
 
 // --- [Pixel shader main] ---
@@ -36,9 +38,22 @@ float4 main(VSOutput input) : SV_TARGET
 {
     // 1. Sample textures（質感はピクセル単位でマップから自動判別）
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
-    clip(albedo.a - 0.5f);
+    // Assimp 焼き込み: PMX 等のマテリアル Diffuse（頂点カラー）× テクスチャ
+    albedo *= input.color;
+    // 不透明パスでは clip しない（Early-Z 阻害）。アルファテストは専用 Cutout PSO で行う想定。
     // sRGB → リニア（アルベドのみ。法線/メタル/ラフはデータなので変換しない）
     albedo.rgb = pow(albedo.rgb, 2.2);
+    // PMX スフィア（NprPerMesh.y = sphereMode: 1=乗算 2+=加算）
+    int sphMode = (int)floor(input.nprPerMesh.y + 0.5f);
+    if (sphMode > 0)
+    {
+        float4 sph = _SphereMap.Sample(smp, input.uv);
+        sph.rgb = pow(max(sph.rgb, 1e-5), 2.2);
+        if (sphMode == 1)
+            albedo.rgb *= sph.rgb;
+        else
+            albedo.rgb += sph.rgb;
+    }
     float4 nSample = _NormalMap.Sample(smp, input.uv);
     float metallic = _MetallicMap.Sample(smp, input.uv).r;
     float roughness =_RoughnessMap.Sample(smp, input.uv).r;

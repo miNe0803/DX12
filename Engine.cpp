@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "EngineBarrier.h"
+#include "Core/GpuDebugLabels.h"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <stdio.h>
@@ -171,6 +172,7 @@ bool Engine::InitGfxCommandLists()
 	}
 
 	m_pMainGfxCmdList->Close();
+	GPU_SET_NAME(m_pMainGfxCmdList.Get(), L"CmdList:Main (Scene terrain/NPR/legacy PBR)");
 
 	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
 	{
@@ -188,6 +190,10 @@ bool Engine::InitGfxCommandLists()
 		if (FAILED(hr))
 			return false;
 		m_pPbrRecordGfxCmdList[w]->Close();
+		// 「parallel DrawIndexedInstanced」込みで 48 wchar 超えるため余裕を持たせる
+		wchar_t pbrClName[96];
+		swprintf_s(pbrClName, L"CmdList:PBR_Record%u (parallel DrawIndexedInstanced)", static_cast<unsigned>(w));
+		GPU_SET_NAME(m_pPbrRecordGfxCmdList[w].Get(), pbrClName);
 	}
 
 	hr = m_pDevice->CreateCommandAllocator(
@@ -204,6 +210,7 @@ bool Engine::InitGfxCommandLists()
 	if (FAILED(hr))
 		return false;
 	m_pPostGfxCmdList->Close();
+	GPU_SET_NAME(m_pPostGfxCmdList.Get(), L"CmdList:Post (tonemap / ImGui)");
 
 	return true;
 }
@@ -266,9 +273,9 @@ void Engine::CreateScissorRect()
 
 bool Engine::CreateRenderTarget()
 {
-	// RTV heap: swap chain buffers + HDR
+	// RTV heap: swap chain buffers + HDR_PBR + HDR_NPR
 	D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-	desc.NumDescriptors = FRAME_BUFFER_COUNT + 1;
+	desc.NumDescriptors = FRAME_BUFFER_COUNT + 2;
 	desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	auto hr = m_pDevice->CreateDescriptorHeap(&desc, IID_PPV_ARGS(m_pRtvHeap.ReleaseAndGetAddressOf()));
@@ -283,6 +290,9 @@ bool Engine::CreateRenderTarget()
 	for (UINT i = 0; i < FRAME_BUFFER_COUNT; i++)
 	{
 		m_pSwapChain->GetBuffer(i, IID_PPV_ARGS(m_pRenderTargets[i].ReleaseAndGetAddressOf()));
+		wchar_t swapName[48];
+		swprintf_s(swapName, L"SwapChain:BackBuffer%u", i);
+		GPU_SET_NAME(m_pRenderTargets[i].Get(), swapName);
 		m_pDevice->CreateRenderTargetView(m_pRenderTargets[i].Get(), nullptr, rtvHandle);
 		rtvHandle.ptr += m_RtvDescriptorSize;
 	}
@@ -311,10 +321,25 @@ bool Engine::CreateRenderTarget()
 	{
 		return false;
 	}
+	GPU_SET_NAME(m_pHdrColor.Get(), L"RT:HDR_PBR_SceneColor");
 	D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
 	rtvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 	m_pDevice->CreateRenderTargetView(m_pHdrColor.Get(), &rtvDesc, rtvHandle);
+	rtvHandle.ptr += m_RtvDescriptorSize;
+
+	// NPR レイヤー（アルファ合成用。初期クリアは透明）
+	hr = m_pDevice->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&resDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		&clearValue,
+		IID_PPV_ARGS(m_pNprHdrColor.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+		return false;
+	GPU_SET_NAME(m_pNprHdrColor.Get(), L"RT:HDR_NPR_SceneColor");
+	m_pDevice->CreateRenderTargetView(m_pNprHdrColor.Get(), &rtvDesc, rtvHandle);
 
 	return true;
 }
@@ -373,6 +398,7 @@ bool Engine::CreateDepthStencil()
 	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
 	dsvDesc.Texture2D.MipSlice = 0;
 	m_pDevice->CreateDepthStencilView(m_pDepthStencilBuffer.Get(), &dsvDesc, dsvHandle);
+	GPU_SET_NAME(m_pDepthStencilBuffer.Get(), L"DSV:MainDepth");
 
 	return true;
 }
@@ -485,6 +511,11 @@ ID3D12Resource* Engine::GetHdrColorResource()
 	return m_pHdrColor.Get();
 }
 
+ID3D12Resource* Engine::GetNprHdrColorResource()
+{
+	return m_pNprHdrColor.Get();
+}
+
 ID3D12Resource* Engine::GetBackBufferResource()
 {
 	return m_pRenderTargets[m_CurrentBackBufferIndex].Get();
@@ -501,6 +532,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE Engine::GetHdrRtvCpuHandle()
 {
 	auto h = m_pRtvHeap->GetCPUDescriptorHandleForHeapStart();
 	h.ptr += FRAME_BUFFER_COUNT * m_RtvDescriptorSize;
+	return h;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Engine::GetNprHdrRtvCpuHandle()
+{
+	auto h = m_pRtvHeap->GetCPUDescriptorHandleForHeapStart();
+	h.ptr += (FRAME_BUFFER_COUNT + 1) * m_RtvDescriptorSize;
 	return h;
 }
 

@@ -4,7 +4,8 @@ SamplerState PointSampler : register(s0);
 cbuffer BloomParams : register(b0)
 {
     float threshold;
-    float3 padding;
+    float kneeWidth;
+    float2 padding;
 };
 
 struct PSInput
@@ -13,16 +14,20 @@ struct PSInput
     float2 uv : TEXCOORD0;
 };
 
-// Inf/NaN を 0 にし、上限でクランプ（Bloom 経路に極端な値が流れて黒点になるのを防ぐ）
-static const float kMaxBloomExtract = 65504.0; // half float 最大付近
+static const float kMaxBloomExtract = 65504.0;
 
+// 旧実装: 輝度が閾値を超えると「フルカラー」を Bloom に流していたため、肌が閾値付近で丸ごと発光していた。
+// 現在: 閾値を超えた分（エッジ）だけを色方向に乗算して抽出。kneeWidth>0 でニーを付けて閾値直近をさらに抑える。
 float4 main(PSInput input) : SV_TARGET
 {
     float3 color = HDRTexture.SampleLevel(PointSampler, input.uv, 0).rgb;
     color = select((isnan(color) | isinf(color)), float3(0, 0, 0), color);
     color = min(color, kMaxBloomExtract);
     float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
-    if (luminance <= threshold)
-        return float4(0.0, 0.0, 0.0, 1.0);
-    return float4(color, 1.0);
+    float excess = max(0.0, luminance - threshold);
+    float response = excess;
+    if (kneeWidth > 1e-6)
+        response = excess * excess / (excess + kneeWidth);
+    float3 bloom = color * (response / max(luminance, 1e-4));
+    return float4(bloom, 1.0);
 }

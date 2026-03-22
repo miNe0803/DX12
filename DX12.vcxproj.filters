@@ -106,6 +106,9 @@
     <ClInclude Include="Core\Scene.h">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="Core\GpuDebugLabels.h">
+      <Filter>Core</Filter>
+    </ClInclude>
     <ClInclude Include="Core\NprTuning.h">
       <Filter>Core</Filter>
     </ClInclude>
@@ -316,6 +319,12 @@
       <Filter>PostProcess</Filter>
     </FxCompile>
     <FxCompile Include="Shaders\PostProcess\ToneMap_PS.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\NprTonemap_PS.hlsl">
+      <Filter>PostProcess</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\Composite_PS.hlsl">
       <Filter>PostProcess</Filter>
     </FxCompile>
     <FxCompile Include="Shaders\PostProcess\bloom_extract_ps.hlsl">

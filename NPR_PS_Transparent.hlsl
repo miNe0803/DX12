@@ -16,9 +16,10 @@ Texture2D _NormalMap : register(t1, space0);
 Texture2D _MetallicMap : register(t2, space0);
 Texture2D _RoughnessMap : register(t3, space0);
 Texture2D _RampTex : register(t4, space0);
-TextureCube _PrefilterEnv  : register(t5, space0);
-TextureCube _IrradianceMap : register(t6, space0);
-Texture2D _BrdfLut         : register(t7, space0);
+Texture2D _SphereMap : register(t5, space0);
+TextureCube _PrefilterEnv  : register(t6, space0);
+TextureCube _IrradianceMap : register(t7, space0);
+Texture2D _BrdfLut         : register(t8, space0);
 
 cbuffer MaterialParams : register(b1, space0)
 {
@@ -26,12 +27,27 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
+    float4 NprDebugHdr; // 透明パスでは未使用（CB サイズ合わせ）
 };
 
 float4 main(VSOutput input) : SV_TARGET
 {
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
+    albedo *= input.color;
+    // PMX: Assimp が Diffuse A=1 のまま返すことがあり、目影などは Mesh.Opacity を z に載せて補正
+    albedo.a *= saturate(input.nprPerMesh.z);
     albedo.rgb = pow(max(albedo.rgb, 1e-5), 2.2f);
+
+    int sphMode = (int)floor(input.nprPerMesh.y + 0.5f);
+    if (sphMode > 0)
+    {
+        float4 sph = _SphereMap.Sample(smp, input.uv);
+        sph.rgb = pow(max(sph.rgb, 1e-5), 2.2f);
+        if (sphMode == 1)
+            albedo.rgb *= sph.rgb;
+        else
+            albedo.rgb += sph.rgb;
+    }
 
     // NprTuning: x=virtualLight, y=transExposure, z=opaque clip (unused), w=ambient scale (unused)
     float vl = NprTuning.x;
@@ -49,7 +65,7 @@ float4 main(VSOutput input) : SV_TARGET
         _PrefilterEnv.SampleLevel(smp, float3(0, 1, 0), 0).g +
         _IrradianceMap.Sample(smp, float3(0, 1, 0)).b +
         _BrdfLut.Sample(smp, float2(0.5f, 0.5f)).r +
-        input.nprPerMesh.x + NprTuning2.x);
+        input.nprPerMesh.x + NprTuning2.x + NprTuning.x);
 
     return float4(premul, a);
 }
