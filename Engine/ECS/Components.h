@@ -36,6 +36,10 @@ struct MeshRendererComponent
 	class VertexBuffer*  pVB;
 	class IndexBuffer*   pIB;
 	UINT                 IndexCount;
+	/// 共有 IB のときチャンク先頭（DrawIndexed の StartIndexLocation）。通常 0。
+	UINT                 StartIndexLocation = 0;
+	/// false のとき Scene が共有 VB/IB を破棄（地形チャンク等）
+	bool                 OwnsGpuBuffers = true;
 	DescriptorHandle*    MaterialHandle; // t0 先頭（albedo, normal, metallic, roughness, ramp, sphere）
 	bool                 CastShadow = true;
 	/// ローカル空間 AABB（スポーン時に設定）。視錐台カリング用。地形など未設定なら false。
@@ -63,7 +67,7 @@ struct LODComponent
 	float DistanceToCamera;
 };
 
-// 地形：CPU 側の高さデータを保持（GetHeight / Flatten 用）
+// 地形：CPU 側の高さデータを保持（GetHeight / Flatten 用）。描画メッシュは子の TerrainMeshTag 側。
 struct TerrainComponent
 {
 	std::vector<float> HeightData;
@@ -72,6 +76,9 @@ struct TerrainComponent
 	float CellSpacing = 1.0f;
 	float MaxHeight   = 100.0f;
 };
+
+/// 地形チャンク描画エンティティ（共有 VB/IB の範囲描画）
+struct TerrainMeshTag {};
 
 // Editor / Hierarchy 表示用（非同期ロード等でスポーンしたメッシュに自動付与）
 struct EditorHierarchyLabelComponent

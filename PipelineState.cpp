@@ -144,6 +144,21 @@ void PipelineState::SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask)
 	desc.DepthStencilState.DepthWriteMask = mask;
 }
 
+void PipelineState::SetDepthFunc(D3D12_COMPARISON_FUNC func)
+{
+	desc.DepthStencilState.DepthFunc = func;
+}
+
+void PipelineState::SetNumRenderTargets(UINT numRenderTargets)
+{
+	desc.NumRenderTargets = numRenderTargets;
+	if (numRenderTargets == 0)
+	{
+		for (UINT i = 0; i < _countof(desc.RTVFormats); ++i)
+			desc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
+	}
+}
+
 void PipelineState::SetAlphaBlendPremultiplied()
 {
 	D3D12_RENDER_TARGET_BLEND_DESC& rt = desc.BlendState.RenderTarget[0];
@@ -160,7 +175,8 @@ void PipelineState::SetAlphaBlendPremultiplied()
 
 void PipelineState::Create()
 {
-	if (m_pVsBlob.Get() == nullptr || m_pPSBlob.Get() == nullptr)
+	const bool needPs = (desc.NumRenderTargets > 0);
+	if (m_pVsBlob.Get() == nullptr || (needPs && m_pPSBlob.Get() == nullptr))
 	{
 		printf("PipelineState: shader not loaded\n");
 		return;

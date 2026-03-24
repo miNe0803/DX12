@@ -341,6 +341,8 @@ void EditorUI::DrawCharacterHierarchyAndInspector(entt::registry& registry)
 		std::vector<entt::entity> legacy;
 		for (const auto e : registry.view<TransformComponent, MeshRendererComponent, LODComponent>())
 		{
+			if (registry.all_of<TerrainMeshTag>(e))
+				continue;
 			if (registry.all_of<TerrainComponent>(e))
 				continue;
 			if (registry.all_of<ModelGroupChildComponent>(e))

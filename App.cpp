@@ -9,6 +9,7 @@
 #include "Engine/Profiling/Profiler.h"
 #include "Texture2D.h"
 #include "Engine/ECS/Systems/TransformSystem.h"
+#include <chrono>
 #include <tchar.h>
 #include <windows.h>
 #include <imgui.h>
@@ -138,6 +139,7 @@ void App::MainLoop() {
 
             // CPU中心のフレーム時間計測（メインループ1周）
             Profiler::BeginFrame();
+            const auto cpuFrameLoopStart = std::chrono::high_resolution_clock::now();
 
             if (g_Scene) {
                 g_Scene->Update();
@@ -160,10 +162,17 @@ void App::MainLoop() {
             if (g_Scene)
                 TransformSystem::Update(g_Scene->GetRegistry());
 
+            {
+                const auto tPreRenderEnd = std::chrono::high_resolution_clock::now();
+                Profiler::SetPreRenderCpuTimeMs(
+                    std::chrono::duration<float, std::milli>(tPreRenderEnd - cpuFrameLoopStart).count());
+            }
             if (g_Engine && g_Scene) {
-                Profiler::BeginRenderCpuSection();
+                const auto t0 = std::chrono::high_resolution_clock::now();
                 g_Engine->BeginRender();
+                const auto t1 = std::chrono::high_resolution_clock::now();
                 g_Scene->Draw();
+                const auto t2 = std::chrono::high_resolution_clock::now();
                 if (g_ImGuiManager && g_ImGuiManager->IsInitialized()) {
                     g_ImGuiManager->Render(
                         g_Engine->PostGraphicsCmdList(),
@@ -172,7 +181,11 @@ void App::MainLoop() {
                         g_Engine->GetFrameBufferHeight());
                 }
                 g_Engine->EndRender();
-                Profiler::EndRenderCpuSection();
+                const auto t3 = std::chrono::high_resolution_clock::now();
+                const float beginMs = std::chrono::duration<float, std::milli>(t1 - t0).count();
+                const float drawMs = std::chrono::duration<float, std::milli>(t2 - t1).count();
+                const float endMs = std::chrono::duration<float, std::milli>(t3 - t2).count();
+                Profiler::SetRenderCpuBreakdown(beginMs, drawMs, endMs);
             }
 
             Profiler::EndFrame();

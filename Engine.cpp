@@ -329,12 +329,14 @@ bool Engine::CreateRenderTarget()
 	rtvHandle.ptr += m_RtvDescriptorSize;
 
 	// NPR レイヤー（アルファ合成用。初期クリアは透明）
+	D3D12_CLEAR_VALUE nprClearValue = clearValue;
+	nprClearValue.Color[3] = 0.0f;
 	hr = m_pDevice->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
 		&resDesc,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-		&clearValue,
+		&nprClearValue,
 		IID_PPV_ARGS(m_pNprHdrColor.ReleaseAndGetAddressOf()));
 	if (FAILED(hr))
 		return false;
@@ -443,6 +445,9 @@ void Engine::BeginRender()
 
 void Engine::EndRender()
 {
+	// Present 後は CurrentBackBufferIndex が次フレーム用に進む。タイムスタンプ/読み戻しは「今提出した」バッファのスロットを見る。
+	m_lastSubmittedBackBufferIndex = m_CurrentBackBufferIndex;
+
 	ID3D12Resource* backBuffer = m_pRenderTargets[m_CurrentBackBufferIndex].Get();
 	// バックバッファ最終書き込みは Post（ポストプロセス・ImGui）のあと
 	EngineDoTransition(m_pPostGfxCmdList.Get(), backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);

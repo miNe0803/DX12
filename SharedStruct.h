@@ -85,6 +85,8 @@ struct PBRConstants {
 struct TerrainConstants {
     DirectX::XMFLOAT4 LayerColor[6]; // 0=地面, 1..3=木3種, 4=雪, 5=川
     DirectX::XMFLOAT4 CameraPos;
+    /// x:Terrain PS debug stage 0..3 / y:cheap path on (1/0) / z:grazing threshold / w:near preserve dist (m, 0=off)
+    DirectX::XMFLOAT4 DebugParams;
 };
 
 struct Mesh {

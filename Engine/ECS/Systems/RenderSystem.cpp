@@ -1,5 +1,6 @@
 #include "RenderSystem.h"
 #include "../Components.h"
+#include "Graphics/TerrainGpuCullSystem.h"
 #include "SharedStruct.h"
 #include "ConstantBuffer.h"
 #include "RootSignature.h"
@@ -9,6 +10,7 @@
 #include "IndexBuffer.h"
 #include "DebugLog.h"
 #include "Core/GpuDebugLabels.h"
+#include "Engine/Profiling/Profiler.h"
 #include <DirectXMath.h>
 #include <DirectXCollision.h>
 #include <d3d12.h>
@@ -191,6 +193,7 @@ void RenderSystem::DrawMain(
 	DescriptorHeap* descriptorHeap,
 	D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
 	RootSignature* terrainRootSignature,
+	PipelineState* terrainDepthPrepassPipelineState,
 	PipelineState* terrainPipelineState,
 	ConstantBuffer* terrainCB,
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU,
@@ -200,13 +203,19 @@ void RenderSystem::DrawMain(
 	D3D12_CPU_DESCRIPTOR_HANDLE mainPassRtvCpu,
 	D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu,
 	bool nprOpaquePsoValid,
-	bool nprTransparentPsoValid)
+	bool nprTransparentPsoValid,
+	TerrainGpuCullSystem* terrainGpuCull,
+	VertexBuffer* terrainSharedVB,
+	IndexBuffer* terrainSharedIB)
 {
 	(void)descriptorHeap;
 	auto view = registry.view<TransformComponent, MeshRendererComponent, LODComponent>();
 	const bool useTerrain = terrainRootSignature && terrainRootSignature->IsValid()
 		&& terrainPipelineState && terrainPipelineState->IsValid()
 		&& terrainCB && terrainCB->GetAddress() && terrainMaskHandleGPU.ptr != 0;
+	const bool useTerrainDepthPrepass = useTerrain
+		&& terrainDepthPrepassPipelineState && terrainDepthPrepassPipelineState->IsValid();
+	const bool gpuTerrainCull = terrainGpuCull && terrainGpuCull->IsValid() && useTerrain;
 
 	ID3D12PipelineState* const psoPbr = pipelineState ? pipelineState->Get() : nullptr;
 	ID3D12PipelineState* const psoTerrain = terrainPipelineState ? terrainPipelineState->Get() : nullptr;
@@ -226,6 +235,9 @@ void RenderSystem::DrawMain(
 	const DirectX::XMMATRIX viewM = sceneC ? sceneC->View : DirectX::XMMatrixIdentity();
 	const DirectX::XMMATRIX projM = sceneC ? sceneC->Proj : DirectX::XMMatrixIdentity();
 	uint32_t statPbrFrustumCulled = 0;
+
+	if (gpuTerrainCull && sceneC)
+		terrainGpuCull->DispatchFrustumCull(cmdList, sceneC);
 
 	for (auto entity : view)
 	{
@@ -252,7 +264,9 @@ void RenderSystem::DrawMain(
 			continue;
 		}
 
-		const bool isTerrain = useTerrain && registry.all_of<TerrainComponent>(entity);
+		const bool isTerrain = useTerrain && registry.all_of<TerrainMeshTag>(entity);
+		if (isTerrain && gpuTerrainCull)
+			continue;
 		if (isTerrain)
 		{
 			if (!perDrawTransformCB || !perDrawTransformCB->GetPtr())
@@ -293,6 +307,10 @@ void RenderSystem::DrawMain(
 			continue;
 
 		const auto& transform = view.get<TransformComponent>(entity);
+		if (isTerrain && sceneC && mesh.HasLocalBounds
+			&& !IsWorldAabbInFrustum(transform.WorldMatrix, mesh.LocalBounds, sceneC->View, sceneC->Proj))
+			continue;
+
 		if (!isTerrain && s_frustumCullPbrEnabled && sceneC)
 		{
 			bool isPlayerFamily = isPlayer;
@@ -353,6 +371,65 @@ void RenderSystem::DrawMain(
 	std::uint8_t* const cbBase = perDrawTransformCB ? reinterpret_cast<std::uint8_t*>(perDrawTransformCB->GetPtr()) : nullptr;
 	const D3D12_GPU_VIRTUAL_ADDRESS cbGpuBase = perDrawTransformCB ? perDrawTransformCB->GetAddress() : 0;
 
+	size_t terrainDrawSlot = 0;
+	uint32_t statTotal = 0, statTerr = 0, statPbrBatches = 0, statPbrInstances = 0, statPlayerSub = 0;
+
+	const bool gpuTerrainDraw = gpuTerrainCull && terrainSharedVB && terrainSharedIB
+		&& terrainRootSignature && terrainRootSignature->IsValid()
+		&& terrainPipelineState && terrainPipelineState->IsValid()
+		&& terrainCB && terrainMaskHandleGPU.ptr != 0;
+	if (gpuTerrainDraw)
+	{
+		if (perDrawTransformCB && perDrawTransformCB->GetPtr())
+		{
+			DirectX::XMMATRIX terrainWorld = DirectX::XMMatrixIdentity();
+			for (auto e : registry.view<TerrainMeshTag, TransformComponent>())
+			{
+				terrainWorld = registry.get<TransformComponent>(e).WorldMatrix;
+				break;
+			}
+			Transform* pTransform = reinterpret_cast<Transform*>(cbBase + 0 * sizeof(Transform));
+			pTransform->View = viewM;
+			pTransform->Proj = projM;
+			pTransform->World = terrainWorld;
+			const D3D12_GPU_VIRTUAL_ADDRESS cbTerrainDraw = cbGpuBase;
+			if (useTerrainDepthPrepass && mainPassDsvCpu.ptr != 0)
+			{
+				cmdList->OMSetRenderTargets(0, nullptr, FALSE, &mainPassDsvCpu);
+				Profiler::GpuMarkTerrainDepthPrepassBegin(cmdList);
+				terrainGpuCull->DrawIndirect(
+					cmdList,
+					terrainRootSignature,
+					terrainDepthPrepassPipelineState,
+					cbTerrainDraw,
+					terrainCB->GetAddress(),
+					terrainMaskHandleGPU,
+					envCubemapHandleGPU,
+					terrainSharedVB,
+					terrainSharedIB);
+				Profiler::GpuMarkTerrainDepthPrepassEnd(cmdList);
+				if (mainPassRtvCpu.ptr != 0)
+					cmdList->OMSetRenderTargets(1, &mainPassRtvCpu, FALSE, &mainPassDsvCpu);
+				++statTotal;
+				++statTerr;
+			}
+			Profiler::GpuMarkTerrainColorBegin(cmdList);
+			terrainGpuCull->DrawIndirect(
+				cmdList,
+				terrainRootSignature,
+				terrainPipelineState,
+				cbTerrainDraw,
+				terrainCB->GetAddress(),
+				terrainMaskHandleGPU,
+				envCubemapHandleGPU,
+				terrainSharedVB,
+				terrainSharedIB);
+			Profiler::GpuMarkTerrainColorEnd(cmdList);
+			++statTotal;
+			++statTerr;
+		}
+	}
+
 	const UINT sliceBase = static_cast<UINT>(instanceRingFrameIndex * kMaxPbrInstancesPerFrame);
 	const UINT sliceEnd = sliceBase + static_cast<UINT>(kMaxPbrInstancesPerFrame);
 
@@ -370,9 +447,6 @@ void RenderSystem::DrawMain(
 	std::vector<PbrDrawBatch> pbrBatches;
 	if (parallelPbrRecord)
 		pbrBatches.reserve(128);
-
-	size_t terrainDrawSlot = 0;
-	uint32_t statTotal = 0, statTerr = 0, statPbrBatches = 0, statPbrInstances = 0, statPlayerSub = 0;
 
 	auto flushPbrBatchLegacy = [&]()
 	{
@@ -445,13 +519,19 @@ void RenderSystem::DrawMain(
 			cmdList->SetGraphicsRootDescriptorTable(2, terrainMaskHandleGPU);
 			if (envCubemapHandleGPU.ptr != 0)
 				cmdList->SetGraphicsRootDescriptorTable(3, envCubemapHandleGPU);
+			if (terrainGpuCull && terrainGpuCull->IsValid())
+			{
+				const D3D12_GPU_VIRTUAL_ADDRESS payloadSrv = terrainGpuCull->DrawPayloadBufferGpuAddress();
+				if (payloadSrv != 0)
+					cmdList->SetGraphicsRootShaderResourceView(4, payloadSrv);
+			}
 
 			D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
 			D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();
 			cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			cmdList->IASetVertexBuffers(0, 1, &vbView);
 			cmdList->IASetIndexBuffer(&ibView);
-			cmdList->DrawIndexedInstanced(mesh.IndexCount, 1, 0, 0, 0);
+			cmdList->DrawIndexedInstanced(mesh.IndexCount, 1, mesh.StartIndexLocation, 0, 0);
 			++statTotal;
 			++statTerr;
 

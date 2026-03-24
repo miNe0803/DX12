@@ -19,7 +19,18 @@ void ProfilerWindow::Draw(bool* pOpen)
 		// --- 1) 総合テキスト（全情報網羅） ---
 		ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "[ Engine Status ]");
 		ImGui::Text("FPS: %.1f (%.2f ms)", latest.fps, latest.frameTimeMs);
-		ImGui::Text("Render CPU: %.2f ms", latest.renderCpuTimeMs);
+		ImGui::Text("CPU Update/ImGui/Transform (pre-render): %.2f ms", latest.preRenderCpuTimeMs);
+		ImGui::Text("Render path CPU (sum): %.2f ms", latest.renderCpuTimeMs);
+		ImGui::Text("  - BeginRender: %.2f ms", latest.renderCpuBeginMs);
+		ImGui::TextDisabled("    (前フレーム GPU フェンス待ちを含むことがあります)");
+		ImGui::Text("  - Scene::Draw: %.2f ms", latest.renderCpuSceneDrawMs);
+		ImGui::Text("  - EndRender (+ImGui overlay): %.2f ms", latest.renderCpuEndMs);
+		ImGui::TextDisabled("    (Present 待ちを含むことがあります → FPS ジッターの主要因になり得ます)");
+		ImGui::Text("GPU DrawMain: %.2f ms", latest.gpuDrawMainMs);
+		ImGui::Text("  - GPU Terrain depth prepass: %.2f ms", latest.gpuTerrainDepthPrepassMs);
+		ImGui::Text("  - GPU Terrain color pass: %.2f ms", latest.gpuTerrainColorMs);
+		ImGui::Text("GPU Hi-Z Build: %.2f ms", latest.gpuHiZBuildMs);
+		ImGui::Text("GPU PostProcess: %.2f ms", latest.gpuPostProcessMs);
 		ImGui::Text("Total Draw Calls: %u", latest.render.totalDrawCalls);
 		ImGui::Text("PBR Instances: %u", latest.render.pbrInstancesDrawn);
 		ImGui::Separator();

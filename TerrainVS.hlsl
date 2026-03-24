@@ -7,6 +7,15 @@ cbuffer Transform : register(b0)
     matrix Proj;
 };
 
+struct ChunkDrawPayload
+{
+    uint chunkId;
+    uint lod;
+    float morph;
+    float pad;
+};
+StructuredBuffer<ChunkDrawPayload> gDrawPayload : register(t0, space1);
+
 struct VSInput
 {
     float3 pos : POSITION;
@@ -26,9 +35,10 @@ struct VSOutput
     float3 worldPos : TEXCOORD1;
 };
 
-VSOutput vert(VSInput input)
+VSOutput vert(VSInput input, uint instanceId : SV_InstanceID)
 {
     VSOutput output;
+    (void)instanceId;
 
     float4 worldPos = mul(float4(input.pos, 1.0f), World);
     float4 viewPos = mul(worldPos, View);

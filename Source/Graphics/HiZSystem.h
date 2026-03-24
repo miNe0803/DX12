@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-/// メインパス深度から R32F ミップピラミッドを構築（各ミップは 2x2 の min 深度＝保守的・Forward-Z 向け）
+/// メインパス深度から R32F ミップピラミッドを構築（各ミップは 2x2 の max 深度＝保守的・Forward-Z 向け）
 /// GPU オクルージョン / 将来の Hi-Z カリング用の土台。
 class HiZSystem
 {

@@ -16,6 +16,8 @@ public:
 	void SetPS(std::wstring filePath); // ?s?N?Z???V?F?[?_?[????
 	void SetCullMode(D3D12_CULL_MODE mode);
 	void SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask);
+	void SetDepthFunc(D3D12_COMPARISON_FUNC func);
+	void SetNumRenderTargets(UINT numRenderTargets);
 	void SetAlphaBlendPremultiplied();
 	void Create(); // ?p?C?v???C???X?e?[?g???
 	static void WarmupShaderBytecode(const std::vector<std::wstring>& shaderPaths);

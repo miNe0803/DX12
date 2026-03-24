@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <algorithm>
 #include <imgui.h>
+#include "DebugLog.h"
 
 using namespace DirectX;
 
@@ -11,13 +12,15 @@ Camera::Camera() :
     m_targetPos(XMVectorSet(0, 200, 0, 0)),
     m_up(XMVectorSet(0, 1, 0, 0)),
     m_yaw(0.0f), m_pitch(0.0f),
-    m_moveSpeed(500.0f),
+    m_moveSpeed(2.0f),
     m_keyRotationSpeed(2.2f),      // ラジアン/秒
     m_mouseSensitivity(0.0035f)    // ラジアン/ピクセル
 {
 }
 
 void Camera::Update(float dt) {
+    const XMVECTOR prevPos = m_position;
+
     // ImGui が入力を使用している場合はカメラ操作を無効化
     if (ImGui::GetCurrentContext() != nullptr)
     {
@@ -81,6 +84,30 @@ void Camera::Update(float dt) {
 
     // 4) 注視点の更新
     m_targetPos = m_position + forward;
+
+    static float logAccumSec = 0.0f;
+    logAccumSec += dt;
+    if (logAccumSec >= 0.5f)
+    {
+        XMFLOAT3 p{};
+        XMFLOAT3 pPrev{};
+        XMStoreFloat3(&p, m_position);
+        XMStoreFloat3(&pPrev, prevPos);
+
+        const float dx = p.x - pPrev.x;
+        const float dy = p.y - pPrev.y;
+        const float dz = p.z - pPrev.z;
+        const float distPerFrame = sqrtf(dx * dx + dy * dy + dz * dz);
+        const float distXZPerFrame = sqrtf(dx * dx + dz * dz);
+        const float speedMps = (dt > 1e-6f) ? (distPerFrame / dt) : 0.0f;
+
+        DebugLog(
+            "[Camera] Pos=(%.2f, %.2f, %.2f) Move/frame=%.3fm (XZ=%.3fm) Speed=%.2fm/s dt=%.4f\n",
+            p.x, p.y, p.z,
+            distPerFrame, distXZPerFrame,
+            speedMps, dt);
+        logAccumSec = 0.0f;
+    }
 }
 
 void Camera::LookAt(const XMVECTOR& worldTarget)

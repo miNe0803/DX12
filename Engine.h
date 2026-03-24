@@ -35,6 +35,8 @@ public:
 	ID3D12CommandAllocator* Allocator(UINT index);
 	ID3D12CommandQueue* Queue();
 	UINT CurrentBackBufferIndex();
+	/// 直前の EndRender で提出したフレームが描画したスワップチェーンインデックス（Present 直前の値）。GPU プロファイラの readback スロットに使用。
+	UINT LastSubmittedBackBufferIndex() const { return m_lastSubmittedBackBufferIndex; }
 
 	void ExecuteAndWait();
 	void WaitForGpuIdle();
@@ -70,6 +72,7 @@ private:
 	UINT m_FrameBufferWidth = 0;
 	UINT m_FrameBufferHeight = 0;
 	UINT m_CurrentBackBufferIndex = 0;
+	UINT m_lastSubmittedBackBufferIndex = 0;
 
 	ComPtr<ID3D12Device6> m_pDevice = nullptr;
 	ComPtr<ID3D12CommandQueue> m_pQueue = nullptr;

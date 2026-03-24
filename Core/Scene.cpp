@@ -1,4 +1,4 @@
-#include "Scene.h"
+﻿#include "Scene.h"
 #include "Engine.h"
 #include "App.h"
 #include <d3dx12.h>
@@ -30,11 +30,13 @@
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
 #include "Graphics/TerrainGenerator.h"
+#include "Graphics/TerrainGpuCullSystem.h"
 #include "Graphics/HiZSystem.h"
 #include "ModelBounds.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "NprTuning.h"
 #include "GpuDebugLabels.h"
+#include "Engine/Profiling/Profiler.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -45,6 +47,7 @@ using namespace DirectX;
 namespace fs = std::filesystem;
 
 static HiZSystem* s_hiz = nullptr;
+static TerrainGpuCullSystem* s_terrainGpuCull = nullptr;
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -64,6 +67,7 @@ PipelineState* pipelineState = nullptr;
 PipelineState* nprPipelineState = nullptr;
 PipelineState* nprTransparentPipelineState = nullptr;
 RootSignature* terrainRootSignature = nullptr;
+PipelineState* terrainDepthPrepassPipelineState = nullptr;
 PipelineState* terrainPipelineState = nullptr;
 ConstantBuffer* terrainConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 Camera* g_Camera = nullptr;
@@ -99,6 +103,8 @@ namespace {
 
 	constexpr float kTerrainCellSpacing = 8.0f;
 	constexpr float kTerrainMaxHeight = 250.0f;
+	// PIX デバッグ用: true で Terrain GPU カリング（ExecuteIndirect 経路）を無効化。
+	constexpr bool kDisableTerrainGpuCullForDebug = false;
 
 	SkyboxRenderer* s_skyboxRenderer = nullptr;
 	ComPtr<ID3D12Resource> skyboxCubemap;
@@ -110,6 +116,7 @@ namespace {
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
 	DescriptorHandle* s_envCubemapHandle = nullptr;
 	DescriptorHandle* s_terrainMaskHandle = nullptr;
+	DescriptorHandle* s_hizPyramidSrvHandle = nullptr;
 	PostProcessSettings s_postProcessSettings;
 
 	ComPtr<ID3D12Resource> s_pbrInstanceRingBuffer;
@@ -196,13 +203,20 @@ Scene::~Scene()
 	for (auto e : m_registry.view<MeshRendererComponent>())
 	{
 		auto& mr = m_registry.get<MeshRendererComponent>(e);
-		delete mr.pVB;
+		if (mr.OwnsGpuBuffers)
+		{
+			delete mr.pVB;
+			delete mr.pIB;
+		}
 		mr.pVB = nullptr;
-		delete mr.pIB;
 		mr.pIB = nullptr;
 	}
 	m_ownedVertexBuffers.clear();
 	m_ownedIndexBuffers.clear();
+	delete m_terrainSharedVB;
+	delete m_terrainSharedIB;
+	m_terrainSharedVB = nullptr;
+	m_terrainSharedIB = nullptr;
 	m_registry.clear();
 
 	if (s_pbrInstanceRingBuffer && s_pbrInstanceRingMapped)
@@ -230,10 +244,13 @@ Scene::~Scene()
 	s_postProcess = nullptr;
 	delete s_hiz;
 	s_hiz = nullptr;
+	delete s_terrainGpuCull;
+	s_terrainGpuCull = nullptr;
 
 	s_hdrSrvHandle = nullptr;
 	s_envCubemapHandle = nullptr;
 	s_terrainMaskHandle = nullptr;
+	s_hizPyramidSrvHandle = nullptr;
 
 	skyboxCubemap.Reset();
 	skyboxEquirect.Reset();
@@ -251,6 +268,8 @@ Scene::~Scene()
 	nprTransparentPipelineState = nullptr;
 	delete terrainRootSignature;
 	terrainRootSignature = nullptr;
+	delete terrainDepthPrepassPipelineState;
+	terrainDepthPrepassPipelineState = nullptr;
 	delete terrainPipelineState;
 	terrainPipelineState = nullptr;
 
@@ -565,33 +584,72 @@ bool Scene::InitTerrain()
 	if (!terrainResult.pVB || !terrainResult.pIB)
 		return true;
 
-	auto loadMask = [](const wchar_t* path) -> Texture2D*
+	auto resolvePath = [](const wchar_t* path) -> std::wstring
 	{
-		if (fs::exists(path))
-			return Texture2D::Get(std::wstring(path));
-		return Texture2D::GetBlack();
+		const fs::path p(path);
+		if (fs::exists(p))
+			return p.wstring();
+		const fs::path p2 = fs::path(L"..\\..") / p;
+		if (fs::exists(p2))
+			return p2.wstring();
+		const fs::path p3 = fs::path(L"..\\..\\..") / p;
+		if (fs::exists(p3))
+			return p3.wstring();
+		return p.wstring();
+	};
+	auto loadTextureOrFallback = [&resolvePath](const wchar_t* path, Texture2D* fallback) -> Texture2D*
+	{
+		const std::wstring resolved = resolvePath(path);
+		if (fs::exists(resolved))
+			return Texture2D::Get(resolved);
+		DebugLog("[TerrainTex] missing: %ls\n", path);
+		return fallback;
 	};
 
 	(void)kTreeSpecies;
-	static const wchar_t* terrainMaskPaths[] = {
+	static const wchar_t* terrainTexturePaths[] = {
 		L"assets\\terrain\\tree_mask.png",
 		L"assets\\terrain\\nature_mask.png",
+		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_diff_4k.jpg",
+		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_disp_4k.png",
+	};
+	// t0: tree_mask, t1: nature_mask, t2: ground_diff, t3: ground_disp
+	Texture2D* terrainTex[4] = {
+		loadTextureOrFallback(terrainTexturePaths[0], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainTexturePaths[1], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainTexturePaths[2], Texture2D::GetWhite()),
+		loadTextureOrFallback(terrainTexturePaths[3], Texture2D::GetBlack())
 	};
 	s_terrainMaskHandle = nullptr;
-	for (const wchar_t* path : terrainMaskPaths)
+	for (Texture2D* tex : terrainTex)
 	{
-		Texture2D* tex = loadMask(path);
 		DescriptorHandle* h = descriptorHeap->Register(tex);
 		if (!s_terrainMaskHandle)
 			s_terrainMaskHandle = h;
 	}
 
 	terrainRootSignature = new RootSignature(true);
+	terrainDepthPrepassPipelineState = new PipelineState();
+	terrainDepthPrepassPipelineState->SetInputLayout(Vertex::InputLayout);
+	terrainDepthPrepassPipelineState->SetRootSignature(terrainRootSignature->Get());
+	terrainDepthPrepassPipelineState->SetVS(L"TerrainVS.cso");
+	terrainDepthPrepassPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	terrainDepthPrepassPipelineState->SetNumRenderTargets(0);
+	terrainDepthPrepassPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ALL);
+	terrainDepthPrepassPipelineState->SetDepthFunc(D3D12_COMPARISON_FUNC_LESS_EQUAL);
+	terrainDepthPrepassPipelineState->Create();
+
 	terrainPipelineState = new PipelineState();
 	terrainPipelineState->SetInputLayout(Vertex::InputLayout);
 	terrainPipelineState->SetRootSignature(terrainRootSignature->Get());
 	terrainPipelineState->SetVS(L"TerrainVS.cso");
 	terrainPipelineState->SetPS(L"Terrain_PS.cso");
+	terrainPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	if (terrainDepthPrepassPipelineState && terrainDepthPrepassPipelineState->IsValid())
+	{
+		terrainPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO);
+		terrainPipelineState->SetDepthFunc(D3D12_COMPARISON_FUNC_EQUAL);
+	}
 	terrainPipelineState->Create();
 
 	for (size_t i = 0; i < Engine::FRAME_BUFFER_COUNT; i++)
@@ -607,27 +665,23 @@ bool Scene::InitTerrain()
 		tc->LayerColor[4] = XMFLOAT4(0.95f, 0.95f, 1.0f, 1.0f);
 		tc->LayerColor[5] = XMFLOAT4(0.20f, 0.40f, 0.70f, 1.0f);
 		tc->CameraPos = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+		tc->DebugParams = XMFLOAT4(static_cast<float>(m_terrainPsDebugMode), 0.0f, 0.0f, 0.0f);
 	}
 
 	if (!terrainPipelineState->IsValid())
 		return true;
 
-	auto terrainEntity = m_registry.create();
+	m_terrainSharedVB = terrainResult.pVB;
+	m_terrainSharedIB = terrainResult.pIB;
+
+	const auto terrainRoot = m_registry.create();
 	TransformComponent tcTerrain = {};
 	XMStoreFloat4x4(&tcTerrain.BaseMatrix, XMMatrixIdentity());
 	tcTerrain.Position = { 0.0f, 0.0f, 0.0f };
 	tcTerrain.UniformScale = 1.0f;
 	tcTerrain.RotationY = 0.0f;
 	tcTerrain.WorldMatrix = XMMatrixIdentity();
-	m_registry.emplace<TransformComponent>(terrainEntity, tcTerrain);
-
-	MeshRendererComponent mrcTerrain = {};
-	mrcTerrain.pVB = terrainResult.pVB;
-	mrcTerrain.pIB = terrainResult.pIB;
-	mrcTerrain.IndexCount = terrainResult.IndexCount;
-	mrcTerrain.MaterialHandle = s_terrainMaskHandle;
-	mrcTerrain.CastShadow = true;
-	m_registry.emplace<MeshRendererComponent>(terrainEntity, mrcTerrain);
+	m_registry.emplace<TransformComponent>(terrainRoot, tcTerrain);
 
 	TerrainComponent terrComp = {};
 	terrComp.HeightData = std::move(terrainResult.HeightData);
@@ -635,8 +689,37 @@ bool Scene::InitTerrain()
 	terrComp.GridDepth = terrainResult.GridDepth;
 	terrComp.CellSpacing = kTerrainCellSpacing;
 	terrComp.MaxHeight = kTerrainMaxHeight;
-	m_registry.emplace<TerrainComponent>(terrainEntity, terrComp);
-	m_registry.emplace<LODComponent>(terrainEntity, 0, 0.0f);
+	m_registry.emplace<TerrainComponent>(terrainRoot, terrComp);
+	m_registry.emplace<EditorHierarchyLabelComponent>(terrainRoot, EditorHierarchyLabelComponent{ L"Terrain (root)" });
+
+	for (const TerrainChunkDesc& chunk : terrainResult.Chunks)
+	{
+		const auto chunkEnt = m_registry.create();
+		m_registry.emplace<TransformComponent>(chunkEnt, tcTerrain);
+		MeshRendererComponent mrc = {};
+		mrc.pVB = m_terrainSharedVB;
+		mrc.pIB = m_terrainSharedIB;
+		mrc.IndexCount = chunk.IndexCount[0];
+		mrc.StartIndexLocation = chunk.StartIndex[0];
+		mrc.OwnsGpuBuffers = false;
+		mrc.MaterialHandle = s_terrainMaskHandle;
+		mrc.CastShadow = true;
+		mrc.HasLocalBounds = true;
+		mrc.LocalBounds = chunk.LocalBounds;
+		m_registry.emplace<MeshRendererComponent>(chunkEnt, mrc);
+		m_registry.emplace<TerrainMeshTag>(chunkEnt);
+		m_registry.emplace<LODComponent>(chunkEnt, 0, 0.0f);
+	}
+
+	if (!terrainResult.Chunks.empty() && g_Engine)
+	{
+		s_terrainGpuCull = new TerrainGpuCullSystem();
+		if (!s_terrainGpuCull->Init(g_Engine->Device(), descriptorHeap, terrainResult.Chunks))
+		{
+			delete s_terrainGpuCull;
+			s_terrainGpuCull = nullptr;
+		}
+	}
 
 	return true;
 }
@@ -855,6 +938,11 @@ bool Scene::Init()
 
 	if (!InitTerrain())
 		return false;
+	if (g_Camera)
+	{
+		const float groundY = TerrainSystem::GetHeight(m_registry, 0.0f, 0.0f);
+		g_Camera->SetPosition(XMVectorSet(0.0f, groundY + 2.0f, 0.0f, 0.0f));
+	}
 
 	constexpr float kPlayerScaleMultiplier = 1.0f;
 	{
@@ -885,6 +973,16 @@ bool Scene::Init()
 			delete s_hiz;
 			s_hiz = nullptr;
 		}
+		else if (descriptorHeap)
+		{
+			D3D12_SHADER_RESOURCE_VIEW_DESC hizSrvDesc = {};
+			hizSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			hizSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			hizSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			hizSrvDesc.Texture2D.MostDetailedMip = 0;
+			hizSrvDesc.Texture2D.MipLevels = s_hiz->GetMipCount();
+			s_hizPyramidSrvHandle = descriptorHeap->RegisterResource(s_hiz->GetPyramidResource(), hizSrvDesc);
+		}
 	}
 
 	return true;
@@ -895,11 +993,23 @@ HiZSystem* Scene::GetHiZSystem() const
 	return s_hiz;
 }
 
+TerrainGpuCullSystem* Scene::GetTerrainGpuCullSystem() const
+{
+	return s_terrainGpuCull;
+}
+
+void Scene::SetTerrainPsDebugMode(int mode)
+{
+	if (mode < 0) mode = 0;
+	if (mode > 3) mode = 3;
+	m_terrainPsDebugMode = mode;
+}
+
 void Scene::Update()
 {
 	ProcessAsyncModelLoads();
 
-	float dt = 0.0016f;
+	float dt = 0.016f;
 	CameraSystem::Update(g_Camera, dt, m_registry);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
@@ -927,6 +1037,11 @@ void Scene::Update()
 		{
 			XMVECTOR camPos = g_Camera->GetPosition();
 			XMStoreFloat4(&terrConst->CameraPos, camPos);
+			terrConst->DebugParams = XMFLOAT4(
+				static_cast<float>(m_terrainPsDebugMode),
+				m_terrainCheapPathEnabled ? 1.0f : 0.0f,
+				m_terrainCheapGrazingThresh,
+				m_terrainCheapNearPreserveMeters);
 		}
 	}
 
@@ -1012,7 +1127,17 @@ void Scene::Draw()
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+	TerrainGpuCullSystem* terrainCullForDraw = kDisableTerrainGpuCullForDebug ? nullptr : s_terrainGpuCull;
+	if (terrainCullForDraw)
+	{
+		const UINT w = g_Engine->GetFrameBufferWidth();
+		const UINT h = g_Engine->GetFrameBufferHeight();
+		const UINT mips = s_hiz ? s_hiz->GetMipCount() : 1u;
+		const bool hizReadyForTerrainCull = (s_hiz && s_hiz->IsValid() && s_hiz->GetEnabled());
+		terrainCullForDraw->SetHiZResources(s_hizPyramidSrvHandle, w, h, mips, hizReadyForTerrainCull);
+	}
 	const bool disableParallelPbr = useNprDrawPath;
+	Profiler::GpuMarkDrawMainBegin(commandList);
 	GPU_CMD_BEGIN_EVENT(commandList, 80, 180, 255, L"Scene: DrawMain (terrain + PBR)");
 	RenderSystem::DrawMain(m_registry, commandList,
 		constantBuffer[currentIndex],
@@ -1022,15 +1147,19 @@ void Scene::Draw()
 		s_pbrInstanceRingMapped,
 		currentIndex,
 		rootSignature, pipelineState, descriptorHeap, envHandle,
-		terrainRootSignature, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU,
+		terrainRootSignature, terrainDepthPrepassPipelineState, terrainPipelineState, terrainConstantBuffer[currentIndex], terrainMaskGPU,
 		disableParallelPbr ? nullptr : g_Engine->PbrRecordCmdList(0),
 		disableParallelPbr ? nullptr : g_Engine->PbrRecordCmdList(1),
 		materialHeap,
 		hdrRtvHandle,
 		dsvHandle,
 		nprOpaquePsoOk,
-		nprTransPsoOk);
+		nprTransPsoOk,
+		terrainCullForDraw,
+		m_terrainSharedVB,
+		m_terrainSharedIB);
 	GPU_CMD_END_EVENT(commandList);
+	Profiler::GpuMarkDrawMainEnd(commandList);
 
 	if (useNprDrawPath)
 	{
@@ -1069,8 +1198,13 @@ void Scene::Draw()
 	}
 
 	if (s_hiz && s_hiz->IsValid())
+	{
+		Profiler::GpuMarkHiZBuildBegin(postCommandList);
 		s_hiz->Build(postCommandList, g_Engine->GetDepthStencilResource());
+		Profiler::GpuMarkHiZBuildEnd(postCommandList);
+	}
 
+	Profiler::GpuMarkPostProcessBegin(postCommandList);
 	if (s_postProcess && s_postProcess->IsValid() && s_hdrSrvHandle)
 	{
 		ID3D12Resource* hdrRes = g_Engine->GetHdrColorResource();
@@ -1094,4 +1228,5 @@ void Scene::Draw()
 			splitNprPost);
 		GPU_CMD_END_EVENT(postCommandList);
 	}
+	Profiler::GpuMarkPostProcessEndAndResolve(postCommandList);
 }

@@ -11,6 +11,9 @@ class ConstantBuffer;
 class RootSignature;
 class PipelineState;
 class DescriptorHeap;
+class VertexBuffer;
+class IndexBuffer;
+class TerrainGpuCullSystem;
 
 namespace RenderSystem
 {
@@ -61,6 +64,7 @@ namespace RenderSystem
 		DescriptorHeap* descriptorHeap,
 		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
 		RootSignature* terrainRootSignature = nullptr,
+		PipelineState* terrainDepthPrepassPipelineState = nullptr,
 		PipelineState* terrainPipelineState = nullptr,
 		ConstantBuffer* terrainCB = nullptr,
 		D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskHandleGPU = { 0 },
@@ -71,7 +75,11 @@ namespace RenderSystem
 		D3D12_CPU_DESCRIPTOR_HANDLE mainPassDsvCpu = {},
 		/// NPR 親の子を PBR から外すのは、対応する NPR パス（不透明／透明）が実際に描画できるときだけ。
 		bool nprOpaquePsoValid = false,
-		bool nprTransparentPsoValid = false);
+		bool nprTransparentPsoValid = false,
+		/// Phase 3/5: nullptr ならチャンク毎 CPU 描画。有効時はキューから TerrainMeshTag を除外し ExecuteIndirect。
+		TerrainGpuCullSystem* terrainGpuCull = nullptr,
+		VertexBuffer* terrainSharedVB = nullptr,
+		IndexBuffer* terrainSharedIB = nullptr);
 
 	/// DrawMain の後。PBR キューから NPR 親子は除外済み。不透明 NPR → 透明 NPR（距離ソート）。
 	void DrawNprPasses(

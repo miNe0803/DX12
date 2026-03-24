@@ -12,6 +12,7 @@ class VertexBuffer;
 class IndexBuffer;
 struct ModelBounds;
 class HiZSystem;
+class TerrainGpuCullSystem;
 
 class Scene
 {
@@ -29,10 +30,20 @@ public:
 	void Draw();
 	void SetAsyncSpawnBudgetPerFrame(size_t budget);
 	size_t GetAsyncSpawnBudgetPerFrame() const;
+	void SetTerrainPsDebugMode(int mode);
+	int GetTerrainPsDebugMode() const { return m_terrainPsDebugMode; }
+	void SetTerrainCheapPathEnabled(bool enabled) { m_terrainCheapPathEnabled = enabled; }
+	bool GetTerrainCheapPathEnabled() const { return m_terrainCheapPathEnabled; }
+	void SetTerrainCheapGrazingThresh(float grazing01) { m_terrainCheapGrazingThresh = grazing01; }
+	float GetTerrainCheapGrazingThresh() const { return m_terrainCheapGrazingThresh; }
+	/// この距離より手前では、視線がそれほど浅くない限りチープ経路を使わない（0 で無効）
+	void SetTerrainCheapNearPreserveMeters(float meters) { m_terrainCheapNearPreserveMeters = meters; }
+	float GetTerrainCheapNearPreserveMeters() const { return m_terrainCheapNearPreserveMeters; }
 
 	entt::registry& GetRegistry() { return m_registry; }
 	// Debug UI (Hi-Z toggle, etc.)
 	HiZSystem* GetHiZSystem() const;
+	TerrainGpuCullSystem* GetTerrainGpuCullSystem() const;
 
 private:
 	bool InitDescriptorHeap();
@@ -56,7 +67,14 @@ private:
 	entt::registry m_registry;
 	std::vector<VertexBuffer*> m_ownedVertexBuffers;
 	std::vector<IndexBuffer*> m_ownedIndexBuffers;
+	/// InitTerrain の共有メッシュ（チャンクが OwnsGpuBuffers=false のためここで解放）
+	VertexBuffer* m_terrainSharedVB = nullptr;
+	IndexBuffer* m_terrainSharedIB = nullptr;
 	size_t m_asyncSpawnBudgetPerFrame = 1;
+	int m_terrainPsDebugMode = 3;
+	bool m_terrainCheapPathEnabled = true;
+	float m_terrainCheapGrazingThresh = 0.26f;
+	float m_terrainCheapNearPreserveMeters = 85.0f;
 };
 
 extern Scene* g_Scene;

@@ -10,16 +10,20 @@ struct VSOutput
 };
 
 SamplerState smp : register(s0);
-Texture2D _TreeMask   : register(t0); // R/G/B = 3種の木
+Texture2D _TreeMask : register(t0); // R/G/B = 3種の木
 Texture2D _NatureMask : register(t1); // R=雪, G=川, B=予備(インヒビタ等)
-TextureCube _PrefilterEnv  : register(t4);
+Texture2D _GroundDiff : register(t2); // 地面ディフューズ
+Texture2D _GroundDisp : register(t3); // 地面ディスプレイスメント(高さ)
+TextureCube _PrefilterEnv : register(t4);
 TextureCube _IrradianceMap : register(t5);
-Texture2D _BrdfLut         : register(t6);
+Texture2D _BrdfLut : register(t6);
 
 cbuffer TerrainParams : register(b1)
 {
     float4 LayerColor[6]; // 0=地面, 1..3=木3種, 4=雪, 5=川
     float4 CameraPos;
+    // x: stage 0..3, y: cheap path on, z: grazing threshold, w: near preserve (m, 0=no extra gate)
+    float4 DebugParams;
 };
 
 float3 BlendTreeLayers(float3 mask, float3 ground, float3 tree0, float3 tree1, float3 tree2)
@@ -34,53 +38,65 @@ float3 BlendTreeLayers(float3 mask, float3 ground, float3 tree0, float3 tree1, f
 float4 main(VSOutput input) : SV_TARGET
 {
     float2 uv = input.uv;
+    float2 groundUv = uv * 8.0f;
+    float3 groundDiff = _GroundDiff.Sample(smp, groundUv).rgb;
+
+    float3 N = input.normal;
+    if (length(N) < 0.001f) N = float3(0.0f, 1.0f, 0.0f);
+    else N = normalize(N);
+    float3 L = normalize(float3(0.5, 0.7, -1.0));
+    float ndotl = max(dot(N, L), 0.0f);
+
+    // 段階デバッグ:
+    // 0 = diff のみ
+    // 1 = diff + 簡易ライティング
+    // 2 = + tree mask 合成
+    // 3 = + river/snow 合成（最終）
+    int kTerrainDebugStage = clamp((int)round(DebugParams.x), 0, 3);
+
+    float3 albedo = groundDiff;
+    if (kTerrainDebugStage == 0)
+        return float4(albedo, 1.0f);
+
+    // 浅い視線（地平近い＝画面上に地形が広がる）で PS 負荷が跳ねる。
+    // 以前は「中距離から先」しかチープ経路に入らず、手前の大量ピクセルが常に高コストだった。
+    float3 V = normalize(CameraPos.xyz - input.worldPos);
+    float nDotV = abs(dot(N, V));
+    float grazing = 1.0f - nDotV; // 1 に近いほど接線方向（fill 重い）
+    float distToCam = distance(CameraPos.xyz, input.worldPos);
+
+    const float cheapOn = DebugParams.y;
+    const float gThresh = DebugParams.z;
+    const float nearPreserve = DebugParams.w;
+    bool useCheapPath = (cheapOn > 0.5f) && (kTerrainDebugStage >= 3) && (grazing >= gThresh);
+    if (useCheapPath && nearPreserve > 0.0f && distToCam < nearPreserve)
+        useCheapPath = (grazing >= (gThresh + 0.14f));
+
+    if (useCheapPath)
+    {
+        float3 cheapLit = albedo * (0.25f + 0.75f * ndotl);
+        return float4(cheapLit, 1.0f);
+    }
+
+    float disp = saturate(_GroundDisp.Sample(smp, groundUv).r);
     float3 treeMask = saturate(_TreeMask.Sample(smp, uv).rgb);
     float3 natureMask = saturate(_NatureMask.Sample(smp, uv).rgb);
 
-    float treeWeight = saturate(treeMask.r + treeMask.g + treeMask.b);
-    float snowWeight = natureMask.r;
-    float riverWeight = natureMask.g;
-    float inhibit = natureMask.b;
+    // disp はまず明るさ補正だけに使って影響を観察しやすくする
+    albedo *= lerp(0.90f, 1.15f, disp);
+    float3 lit = albedo * (0.20f + 0.80f * ndotl);
+    if (kTerrainDebugStage == 1)
+        return float4(lit, 1.0f);
 
-    float3 ground = LayerColor[0].rgb;
-    float3 treeBlend = BlendTreeLayers(treeMask, ground, LayerColor[1].rgb, LayerColor[2].rgb, LayerColor[3].rgb);
+    // tree mask の寄与（置換ではなく、地面テクスチャを残したまま色を軽く乗せる）
+    float treeWeight = saturate(max(treeMask.r, max(treeMask.g, treeMask.b)));
+    float3 treeTint = BlendTreeLayers(treeMask, lit, LayerColor[1].rgb, LayerColor[2].rgb, LayerColor[3].rgb);
+    float3 c = lerp(lit, lit * treeTint, treeWeight * 0.35f);
+    if (kTerrainDebugStage == 2)
+        return float4(c, 1.0f);
 
-    float3 albedo = ground;
-    albedo = lerp(albedo, treeBlend, treeWeight);
-    albedo = lerp(albedo, LayerColor[5].rgb, riverWeight);
-    albedo = lerp(albedo, LayerColor[4].rgb, snowWeight);
-    albedo *= (1.0 - saturate(inhibit));
-
-    float roughness = 0.92;
-    roughness = lerp(roughness, 0.80, treeWeight);
-    roughness = lerp(roughness, 0.18, riverWeight);
-    roughness = lerp(roughness, 0.45, snowWeight);
-    roughness = clamp(roughness, 0.04, 1.0);
-    float metallic = 0.0;
-
-    float3 N = normalize(input.normal);
-    float3 L = normalize(float3(0.5, 0.7, -1.0));
-    float3 LightColor = float3(1.2, 1.2, 1.2);
-    float diffuseFactor = max(dot(N, L), 0.0);
-    float3 directLight = albedo * diffuseFactor * LightColor;
-
-    float3 V = normalize(CameraPos.xyz - input.worldPos);
-    float NdotV = max(dot(N, V), 0.0001);
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 F = F0 + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
-
-    float3 irradiance = _IrradianceMap.Sample(smp, N).rgb;
-    float3 kD = 1.0 - F;
-    kD *= (1.0 - metallic);
-    float3 ambientLight = irradiance * albedo * kD;
-
-    float3 R = reflect(-V, N);
-    const float PREFILTER_MIP_COUNT = 5.0;
-    float mip = roughness * (PREFILTER_MIP_COUNT - 1.0);
-    float3 prefiltered = _PrefilterEnv.SampleLevel(smp, R, mip).rgb;
-    float2 brdf = _BrdfLut.Sample(smp, float2(NdotV, roughness)).rg;
-    float3 specularPart = prefiltered * (F0 * brdf.x + brdf.y);
-
-    float3 finalColor = directLight + ambientLight + specularPart;
-    return float4(finalColor, 1.0);
+    // nature mask の寄与も置換ではなく軽い乗算寄与にする
+    c = lerp(c, c * LayerColor[5].rgb, natureMask.g * 0.30f); // river
+    c = lerp(c, c * LayerColor[4].rgb, natureMask.r * 0.30f); // snow
+    return float4(c, 1.0f);
 }

@@ -145,6 +145,9 @@
     <ClInclude Include="Source\Graphics\HiZSystem.h">
       <Filter>Graphics</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
     <ClInclude Include="Engine\ECS\Components.h">
       <Filter>ECS</Filter>
     </ClInclude>
@@ -246,6 +249,9 @@
     <ClCompile Include="Source\Graphics\HiZSystem.cpp">
       <Filter>Graphics</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
     <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp">
       <Filter>Systems</Filter>
     </ClCompile>
@@ -313,6 +319,9 @@
       <Filter>HiZ</Filter>
     </FxCompile>
     <FxCompile Include="Shaders\HiZ_ReduceMin_CS.hlsl">
+      <Filter>HiZ</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\TerrainFrustumCull_CS.hlsl">
       <Filter>HiZ</Filter>
     </FxCompile>
     <FxCompile Include="Shaders\PostProcess\ToneMap_VS.hlsl">

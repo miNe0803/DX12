@@ -1,4 +1,5 @@
-// 細いミップから 2x2 の最小深度で粗いミップを構築（Forward-Z / far=1 向けの保守的ピラミッド）
+// 細いミップから 2x2 の最大深度で粗いミップを構築（Forward-Z / far=1 向け）。
+// max-depth は遠景側に倒れるため、遮蔽判定は保守的（誤カリングしにくい）。
 Texture2D<float> gFine : register(t0);
 RWTexture2D<float> gCoarse : register(u0);
 
@@ -21,5 +22,5 @@ void main(uint3 tid : SV_DispatchThreadID)
 	float z10 = gFine.Load(int3(int2(x1, y0), 0));
 	float z01 = gFine.Load(int3(int2(x0, y1), 0));
 	float z11 = gFine.Load(int3(int2(x1, y1), 0));
-	gCoarse[tid.xy] = min(min(z00, z10), min(z01, z11));
+	gCoarse[tid.xy] = max(max(z00, z10), max(z01, z11));
 }

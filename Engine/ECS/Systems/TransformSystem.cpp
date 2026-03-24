@@ -18,7 +18,8 @@ void TransformSystem::Update(entt::registry& registry)
 		XMMATRIX S = XMMatrixScaling(transform.UniformScale, transform.UniformScale, transform.UniformScale);
 		XMMATRIX base = XMLoadFloat4x4(&transform.BaseMatrix);
 		XMMATRIX R = XMMatrixRotationY(transform.RotationY);
-		XMMATRIX world = T * S * base * R;
+		// Row-vector (mul(pos, World)) 前提: 平行移動は最後に適用しないと Position まで scale される。
+		XMMATRIX world = S * base * R * T;
 		transform.WorldMatrix = XMMatrixTranspose(world);
 	}
 
