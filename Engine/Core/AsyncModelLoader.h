@@ -47,6 +47,9 @@ public:
 		return m_pending.size();
 	}
 
+	/// キューから取り出し済みで、ワーカーが Assimp 処理中（メインはまだ Drain していない）
+	bool IsWorkerBusy() const { return m_workerBusy.load(std::memory_order_acquire); }
+
 	struct LastResultStatus
 	{
 		bool hasValue = false;
@@ -96,6 +99,7 @@ private:
 
 	std::thread m_worker;
 	std::atomic<bool> m_stop{ false };
+	std::atomic<bool> m_workerBusy{ false };
 };
 
 extern AsyncModelLoader* g_AsyncModelLoader;

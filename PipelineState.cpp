@@ -62,8 +62,12 @@ namespace
 				<< ":" << e.InstanceDataStepRate;
 		}
 		const D3D12_RENDER_TARGET_BLEND_DESC& rt0 = d.BlendState.RenderTarget[0];
+		const D3D12_DEPTH_STENCIL_DESC& ds = d.DepthStencilState;
 		oss << "|Cull=" << static_cast<int>(d.RasterizerState.CullMode)
-			<< "|DWM=" << static_cast<int>(d.DepthStencilState.DepthWriteMask)
+			<< "|DE=" << static_cast<int>(ds.DepthEnable)
+			<< "|DF=" << static_cast<int>(ds.DepthFunc)
+			<< "|DWM=" << static_cast<int>(ds.DepthWriteMask)
+			<< "|SE=" << static_cast<int>(ds.StencilEnable)
 			<< "|BE=" << static_cast<int>(rt0.BlendEnable)
 			<< "|SB=" << static_cast<int>(rt0.SrcBlend)
 			<< "|DB=" << static_cast<int>(rt0.DestBlend)
@@ -157,6 +161,11 @@ void PipelineState::SetNumRenderTargets(UINT numRenderTargets)
 		for (UINT i = 0; i < _countof(desc.RTVFormats); ++i)
 			desc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
 	}
+}
+
+void PipelineState::SetRenderTargetFormat(DXGI_FORMAT fmt)
+{
+	desc.RTVFormats[0] = fmt;
 }
 
 void PipelineState::SetAlphaBlendPremultiplied()

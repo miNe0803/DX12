@@ -34,6 +34,12 @@ struct ProfilerFrameStats
 	float gpuTerrainColorMs = 0.0f;
 	float gpuHiZBuildMs = 0.0f;
 	float gpuPostProcessMs = 0.0f;
+	/// タイムスタンプで取っているパスの合計（地形〜Post＋木アップロード/カリング＋木描画）
+	float gpuTaggedPassesSumMs = 0.0f;
+	/// 木: アップロード + カリングCS（Scene で DispatchCull 前後）
+	float gpuTreeUploadCullMs = 0.0f;
+	/// 木: ExecuteIndirect（RenderSystem::DrawPostScenePbrTreesExecuteIndirect、Post CL）
+	float gpuTreeDrawMs = 0.0f;
 	float fps = 0.0f; // derived from frameTimeMs (text only)
 	RenderStats render{};
 };
@@ -55,6 +61,12 @@ public:
 	static void GpuMarkHiZBuildEnd(ID3D12GraphicsCommandList* cmd);
 	static void GpuMarkPostProcessBegin(ID3D12GraphicsCommandList* cmd);
 	static void GpuMarkPostProcessEndAndResolve(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkTreeUploadCullBegin(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkTreeUploadCullEnd(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkTreeDrawBegin(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkTreeDrawEnd(ID3D12GraphicsCommandList* cmd);
+	/// 木 GPU パスをスキップしたフレームでも、ResolveQueryData(0..13) 用に 10..13 の EndQuery を補う。
+	static void EnsureTreeGpuStampPlaceholders(ID3D12GraphicsCommandList* cmd);
 	static void SetRenderCpuBreakdown(float beginMs, float sceneDrawMs, float endMs);
 	static void SetPreRenderCpuTimeMs(float ms);
 
@@ -86,7 +98,7 @@ private:
 	static UINT s_gpuWriteFrameIndex;
 	static ComPtr<ID3D12QueryHeap> s_gpuTimestampHeap;
 	static ComPtr<ID3D12Resource> s_gpuTimestampReadback;
-	static constexpr UINT kGpuStampCountPerFrame = 10;
+	static constexpr UINT kGpuStampCountPerFrame = 14;
 	static bool EnsureGpuProfilerReady();
 	static void WriteGpuStamp(ID3D12GraphicsCommandList* cmd, UINT stampIndexInFrame);
 };

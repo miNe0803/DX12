@@ -79,6 +79,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -93,6 +94,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -107,6 +109,9 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <!-- /FS: 複数 CL が同一 vc143.pdb に書き込むときの C1041 対策。/MP や共有コンパイル併用時も必須 -->
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <UseSharedCompilation>false</UseSharedCompilation>
       <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -133,6 +138,7 @@ copy /Y "C:\vcpkg\installed\x64-windows\debug\bin\WinPixEventRuntime.dll" "$(Out
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <UseSharedCompilation>false</UseSharedCompilation>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Core;$(ProjectDir)ThirdParty\imgui;$(ProjectDir)ThirdParty\imgui\backends;$(ProjectDir)Editor;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\Users\siuts\source\repos\DX12\Engine\ECS;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -194,6 +200,9 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClInclude Include="Engine\ECS\Systems\RenderSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\TerrainSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGenerator.h" />
+    <ClInclude Include="Source\Graphics\TreeGpuCullSystem.h" />
+    <ClInclude Include="Source\Graphics\TreeMeshAsset.h" />
+    <ClInclude Include="Source\Graphics\TreeImposterBake.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="Texture2D.h" />
     <ClInclude Include="VertexBuffer.h" />
@@ -213,6 +222,10 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClCompile Include="Source\Graphics\IBLGenerator.cpp" />
     <ClCompile Include="Source\Graphics\HiZSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
+    <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />
+    <ClCompile Include="Source\Graphics\TreeImposterBake.cpp" />
+    <ClCompile Include="Source\Graphics\TreeVegetation.cpp" />
+    <ClCompile Include="Source\Graphics\TreeMeshAsset.cpp" />
     <ClCompile Include="IndexBuffer.cpp" />
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="PipelineState.cpp" />
@@ -235,6 +248,7 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClCompile Include="Source\Graphics\PostProcessSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\LODSystem.cpp" />
+    <ClCompile Include="Engine\ECS\Systems\TreeLodSystem.cpp" />
     <ClCompile Include="Editor\Windows\ProfilerWindow.cpp" />
     <ClCompile Include="Engine\Profiling\Profiler.cpp" />
     <ClCompile Include="Systems\PlayerSystem.cpp" />
@@ -308,6 +322,29 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
       <ObjectFileName>$(OutDir)TerrainFrustumCull_CS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeFrustumHiZCull_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeFrustumHiZCull_CS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeIndirectVS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeIndirectVS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeDebugFlat_PS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeDebugFlat_PS.cso</ObjectFileName>
     </FxCompile>
     <FxCompile Include="Prefilter_CS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
@@ -428,6 +465,48 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
       <ObjectFileName>$(OutDir)Terrain_PS.cso</ObjectFileName>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="TreeLOD1_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ObjectFileName>$(OutDir)TreeLOD1_PS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="TreeLOD2_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ObjectFileName>$(OutDir)TreeLOD2_PS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\BakeTreeLOD0_PS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)BakeTreeLOD0_PS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeImposterVS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeImposterVS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeImposterPS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeImposterPS.cso</ObjectFileName>
     </FxCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

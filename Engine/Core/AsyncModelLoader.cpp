@@ -2,6 +2,36 @@
 
 #include <assimpLoader.h>
 #include "DebugLog.h"
+#include <filesystem>
+#include <exception>
+
+namespace fs = std::filesystem;
+
+namespace
+{
+	/// TreeVegetation 等と同様: CWD が exe 直下でもプロジェクトルートでも解決できるようにする
+	std::wstring ResolveAssetPath(const std::wstring& path)
+	{
+		if (path.empty())
+			return path;
+		if (fs::exists(path))
+			return path;
+		const fs::path p2 = fs::path(L"..\\..") / path;
+		if (fs::exists(p2))
+			return p2.wstring();
+		const fs::path p3 = fs::path(L"..\\..\\..") / path;
+		if (fs::exists(p3))
+			return p3.wstring();
+		return path;
+	}
+
+	struct WorkerBusyGuard
+	{
+		std::atomic<bool>& flag;
+		explicit WorkerBusyGuard(std::atomic<bool>& f) : flag(f) { flag.store(true, std::memory_order_release); }
+		~WorkerBusyGuard() { flag.store(false, std::memory_order_release); }
+	};
+}
 
 AsyncModelLoader* g_AsyncModelLoader = nullptr;
 
@@ -101,34 +131,60 @@ void AsyncModelLoader::WorkerLoop()
 			m_pending.pop_front();
 		}
 
+		WorkerBusyGuard busy(m_workerBusy);
+
 		AsyncModelLoadResult out;
-		out.filePath = job.path;
+		const std::wstring resolved = ResolveAssetPath(job.path);
+		out.filePath = resolved;
 		out.options = job.opt;
 
-		std::vector<Mesh> meshes;
-		ImportSettings imp(job.path.c_str(), meshes, false, true, 1.0f);
-		imp.outClips = nullptr;
-		AssimpLoader loader;
-		out.success = loader.Load(imp);
-		out.baseTransform = imp.outBaseTransform;
-		if (out.success)
+		if (!fs::exists(resolved))
 		{
-			out.meshes = std::move(meshes);
-			out.bounds = ComputeModelBounds(out.meshes);
+			out.success = false;
+			DebugLog("[AsyncLoad] FAIL file not found (resolved): %ls (input was %ls)\n",
+				resolved.c_str(), job.path.c_str());
 		}
-	DebugLog("[AsyncLoad] %ls %s meshes=%zu\n",
-		out.filePath.c_str(),
-		out.success ? "OK" : "FAIL",
-		out.success ? out.meshes.size() : 0u);
+		else
+		{
+			std::vector<Mesh> meshes;
+			ImportSettings imp(resolved.c_str(), meshes, false, true, 1.0f);
+			imp.outClips = nullptr;
+			AssimpLoader loader;
+			try
+			{
+				out.success = loader.Load(imp);
+				out.baseTransform = imp.outBaseTransform;
+				if (out.success)
+				{
+					out.meshes = std::move(meshes);
+					out.bounds = ComputeModelBounds(out.meshes);
+				}
+			}
+			catch (const std::exception& e)
+			{
+				out.success = false;
+				DebugLog("[AsyncLoad] exception (std::exception): %s  path=%ls\n", e.what(), resolved.c_str());
+			}
+			catch (...)
+			{
+				out.success = false;
+				DebugLog("[AsyncLoad] exception (unknown) path=%ls\n", resolved.c_str());
+			}
+		}
+
+		DebugLog("[AsyncLoad] %ls %s meshes=%zu\n",
+			out.filePath.c_str(),
+			out.success ? "OK" : "FAIL",
+			out.success ? out.meshes.size() : 0u);
 
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_stop)
 				return;
-		m_lastStatus.hasValue = true;
-		m_lastStatus.success = out.success;
-		m_lastStatus.meshCount = out.success ? out.meshes.size() : 0u;
-		m_lastStatus.path = out.filePath;
+			m_lastStatus.hasValue = true;
+			m_lastStatus.success = out.success;
+			m_lastStatus.meshCount = out.success ? out.meshes.size() : 0u;
+			m_lastStatus.path = out.filePath;
 			m_completed.push_back(std::move(out));
 		}
 	}

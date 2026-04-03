@@ -4,13 +4,13 @@ struct VSOutput
     float4 svpos : SV_POSITION;
     float4 color : COLOR;
     float2 uv : TEXCOORD;
-    float3 normal : NORMAL;   // world-space normal
-    float3 tangent : TANGENT; // world-space tangent
+    float3 normal : NORMAL;
+    float3 tangent : TANGENT;
     float3 worldPos : TEXCOORD1;
     float4 nprPerMesh : TEXCOORD2;
 };
 
-// --- [Textures and sampler] --- (space0: VS instance buffer uses space1)
+
 SamplerState smp : register(s0);
 Texture2D _AlbedoMap : register(t0, space0);
 Texture2D _NormalMap : register(t1, space0);
@@ -22,15 +22,13 @@ TextureCube _PrefilterEnv  : register(t6, space0);
 TextureCube _IrradianceMap : register(t7, space0);
 Texture2D _BrdfLut         : register(t8, space0);
 
-// --- [Material params (b1)] ---
-// RimParams.y = NormalScale, CameraPos.xyz = カメラ位置（反射用）
 cbuffer MaterialParams : register(b1, space0)
 {
     float4 RimParams;
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // 予約（定数バッファサイズ合わせ）
+    float4 NprDebugHdr;
 };
 
 // --- [Pixel shader main] ---
@@ -40,8 +38,6 @@ float4 main(VSOutput input) : SV_TARGET
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
     // Assimp 焼き込み: PMX 等のマテリアル Diffuse（頂点カラー）× テクスチャ
     albedo *= input.color;
-    // 不透明パスでは clip しない（Early-Z 阻害）。アルファテストは専用 Cutout PSO で行う想定。
-    // sRGB → リニア（アルベドのみ。法線/メタル/ラフはデータなので変換しない）
     albedo.rgb = pow(albedo.rgb, 2.2);
     // PMX スフィア（NprPerMesh.y = sphereMode: 1=乗算 2+=加算）
     int sphMode = (int)floor(input.nprPerMesh.y + 0.5f);
@@ -55,9 +51,15 @@ float4 main(VSOutput input) : SV_TARGET
             albedo.rgb += sph.rgb;
     }
     float4 nSample = _NormalMap.Sample(smp, input.uv);
-    float metallic = _MetallicMap.Sample(smp, input.uv).r;
+    float metallicRaw = _MetallicMap.Sample(smp, input.uv).r;
     float roughness =_RoughnessMap.Sample(smp, input.uv).r;
-    // マップ未設定時（C++で黒/グレーにしているが、読み込み失敗で白が来た場合のフォールバック）
+    // nprPerMesh.w > 0.5: tree — MetallicMap slot holds alpha mask for leaves
+    float metallic = metallicRaw;
+    if (input.nprPerMesh.w > 0.5)
+    {
+        clip(metallicRaw - 0.3);
+        metallic = 0.0;
+    }
     if (metallic >= 0.98 && roughness >= 0.98)
     {
         metallic = 0.0;
@@ -71,19 +73,21 @@ float4 main(VSOutput input) : SV_TARGET
     float3 B = normalize(cross(N, T));
     float3x3 TBN = float3x3(T, B, N);
 
-    // 3. Normal map decode and NormalScale
+    // 3. Normal map decode; nprPerMesh.w > 0.5 → OpenGL normal map (flip Y)
     float3 decodedNormal = nSample.rgb * 2.0 - 1.0;
+    if (input.nprPerMesh.w > 0.5)
+        decodedNormal.y = -decodedNormal.y;
     float nScale = (RimParams.y > 0.001) ? RimParams.y : 1.0;
     float3 normalTS = normalize(float3(0, 0, 1) + (decodedNormal - float3(0, 0, 1)) * nScale);
     float3 worldNormal = normalize(mul(normalTS, TBN));
 
-    // 4. Direct lighting（補助的なディレクショナル）
+    // 4. Direct lighting
     float3 L = normalize(float3(0.5, 0.7, -1.0));
     float3 LightColor = float3(1.2, 1.2, 1.2);
     float diffuseFactor = max(dot(worldNormal, L), 0.0);
     float3 directLight = albedo.rgb * diffuseFactor * LightColor;
 
-    // 事前準備: 視線・F0・フレネル（5/6番で共有）
+    // 事前準備: 視線・F0・フレネル
     float3 V = normalize(CameraPos.xyz - input.worldPos);
     float NdotV = max(dot(worldNormal, V), 0.0001);
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo.rgb, metallic);
@@ -105,7 +109,7 @@ float4 main(VSOutput input) : SV_TARGET
 
     // 7. Composite
     float3 finalColor = directLight + ambientLight + specularPart;
-    // t4 / NPR インスタンス拡張: 未使用警告回避
+
     finalColor += _RampTex.Sample(smp, float2(0.5f, 0.5f)).rgb * 0.0f;
     finalColor += (input.nprPerMesh.x + NprTuning2.x) * 0.0;
 

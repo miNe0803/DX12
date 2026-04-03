@@ -148,6 +148,18 @@
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h">
       <Filter>Graphics</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Graphics\TreeVegetation.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\TreeMeshAsset.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Graphics\TreeImposterBake.h">
+      <Filter>Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="Engine\ECS\Systems\TreeLodSystem.h">
+      <Filter>Systems</Filter>
+    </ClInclude>
     <ClInclude Include="Engine\ECS\Components.h">
       <Filter>ECS</Filter>
     </ClInclude>
@@ -252,10 +264,22 @@
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp">
       <Filter>Graphics</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Graphics\TreeVegetation.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\TreeMeshAsset.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Graphics\TreeImposterBake.cpp">
+      <Filter>Graphics</Filter>
+    </ClCompile>
     <ClCompile Include="Engine\ECS\Systems\TransformSystem.cpp">
       <Filter>Systems</Filter>
     </ClCompile>
     <ClCompile Include="Engine\ECS\Systems\LODSystem.cpp">
+      <Filter>Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="Engine\ECS\Systems\TreeLodSystem.cpp">
       <Filter>Systems</Filter>
     </ClCompile>
     <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp">
@@ -353,6 +377,27 @@
     </FxCompile>
     <FxCompile Include="Terrain_PS.hlsl">
       <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="TreeLOD1_PS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="TreeLOD2_PS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeFrustumHiZCull_CS.hlsl">
+      <Filter>リソース ファイル</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeIndirectVS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\BakeTreeLOD0_PS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeImposterVS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="Shaders\TreeImposterPS.hlsl">
+      <Filter>Shaders</Filter>
     </FxCompile>
   </ItemGroup>
 </Project>

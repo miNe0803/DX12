@@ -1,5 +1,4 @@
-// --- [VS output] SimpleVS と同じ ---
-struct VSOutput
+﻿struct VSOutput
 {
     float4 svpos : SV_POSITION;
     float4 color : COLOR;
@@ -58,8 +57,7 @@ float4 main(VSOutput input) : SV_TARGET
     if (kTerrainDebugStage == 0)
         return float4(albedo, 1.0f);
 
-    // 浅い視線（地平近い＝画面上に地形が広がる）で PS 負荷が跳ねる。
-    // 以前は「中距離から先」しかチープ経路に入らず、手前の大量ピクセルが常に高コストだった。
+
     float3 V = normalize(CameraPos.xyz - input.worldPos);
     float nDotV = abs(dot(N, V));
     float grazing = 1.0f - nDotV; // 1 に近いほど接線方向（fill 重い）

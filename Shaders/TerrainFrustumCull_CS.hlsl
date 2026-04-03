@@ -1,14 +1,12 @@
-// GPU 視錐台カリング → 可視チャンクの DrawIndexed 引数を Append（カウンタ付き）
-// 6 平面は C++ で VP 行から抽出（mul(worldPos, ViewProj) と整合）
-
+﻿
 cbuffer FrustumCullCB : register(b0)
 {
 	float4 Planes[6];
 	float4 CameraPos;
-	float4 CullParams; // x:ChunkCount, y:Lod0Start, z:Lod1Start
+	float4 CullParams;
 	float4x4 ViewProj;
-	float4 HiZParams;  // x:enabled(0/1), y:width, z:height, w:mipCount
-	float4 HiZTuning;  // x:nearDisableDist, y:depthBias, z:maxPixelRadius, w:unused
+	float4 HiZParams;
+	float4 HiZTuning;
 	float4 _padTo256[2];
 };
 
@@ -53,7 +51,6 @@ float3 CornerFromAabb(float3 bmin, float3 bmax, int i)
 		(i & 4) ? bmax.z : bmin.z);
 }
 
-// C++ の ExtractFrustumPlanes（r3±r0 等）と対。ある平面について 8 コーナーすべてが d>0 なら箱はその平面の「外側」半空間に完全にありカリング。
 bool AabbOutsidePlane(float3 bmin, float3 bmax, float4 pl)
 {
 	bool allPositive = true;
@@ -103,7 +100,7 @@ bool IsHiZOccluded(float3 bmin, float3 bmax, float dist)
 {
 	if (HiZParams.x < 0.5)
 		return false;
-	if (dist < HiZTuning.x) // 近距離は保守的に Hi-Z 無効
+	if (dist < HiZTuning.x)
 		return false;
 
 	float2 uvMin = float2(1.0, 1.0);

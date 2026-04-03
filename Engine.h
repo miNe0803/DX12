@@ -79,9 +79,9 @@ private:
 	ComPtr<IDXGISwapChain3> m_pSwapChain = nullptr;
 	ComPtr<ID3D12CommandAllocator> m_pAllocator[FRAME_BUFFER_COUNT] = { nullptr };
 	ComPtr<ID3D12GraphicsCommandList> m_pMainGfxCmdList = nullptr;
-	ComPtr<ID3D12CommandAllocator> m_pPbrRecordAllocator[PBR_RECORD_WORKERS] = { nullptr };
+	ComPtr<ID3D12CommandAllocator> m_pPbrRecordAllocator[PBR_RECORD_WORKERS][FRAME_BUFFER_COUNT] = {};
 	ComPtr<ID3D12GraphicsCommandList> m_pPbrRecordGfxCmdList[PBR_RECORD_WORKERS] = { nullptr };
-	ComPtr<ID3D12CommandAllocator> m_pPostAllocator = nullptr;
+	ComPtr<ID3D12CommandAllocator> m_pPostAllocator[FRAME_BUFFER_COUNT] = {};
 	ComPtr<ID3D12GraphicsCommandList> m_pPostGfxCmdList = nullptr;
 
 	HANDLE m_fenceEvent = nullptr;

@@ -14,6 +14,7 @@ class DescriptorHeap;
 class VertexBuffer;
 class IndexBuffer;
 class TerrainGpuCullSystem;
+class TreeGpuCullSystem;
 
 namespace RenderSystem
 {
@@ -41,13 +42,49 @@ namespace RenderSystem
 		uint32_t playerModelSubmeshDraws = 0;
 		/// 直近フレームで視錐台外として PBR キューから省いたエンティティ数
 		uint32_t pbrFrustumCulledEntities = 0;
+		/// TreeInstanceTag 付きエンティティ数（レジストリ）
+		uint32_t treeTagEntityCount = 0;
+		/// 上記のうち DrawMain の描画キューに入った本数
+		uint32_t treeEntitiesInDrawQueue = 0;
+		/// 上記のうち CPU 視錐台で落とした本数
+		uint32_t treeFrustumCulled = 0;
+		/// 木: Post CL の `DrawPostScenePbrTreesExecuteIndirect`（ExecuteIndirect バッチ数。DrawMain 本体とは別 CL だが同一シーン統計に合算）
+		uint32_t treeGpuIndirectBatches = 0;
+		/// 木: GPU にアップロードしたインスタンス数（プール上限内の本フレーム本数）
+		uint32_t treeGpuUploadedInstanceCount = 0;
 	};
 	GpuDrawStats GetLastGpuDrawStats();
+
+	/// Post CL 上で HDR メインへマスク木を PBR（ExecuteIndirect）描画する。Scene 側で同一 Post CL に先立って
+	/// UpdateInstances と DispatchCull を記録してから呼ぶ（ExecuteIndirect とカリング結果を同一リストで繋ぐ）。
+	/// `drawIndexedTotal` へ木の EI 回数を合算する。
+	void DrawPostScenePbrTreesExecuteIndirect(
+		ID3D12GraphicsCommandList* postCmdList,
+		ID3D12DescriptorHeap* materialSrvHeap,
+		D3D12_CPU_DESCRIPTOR_HANDLE mainHdrRtvCpu,
+		D3D12_CPU_DESCRIPTOR_HANDLE mainDsvCpu,
+		TreeGpuCullSystem* treeCull,
+		RootSignature* rootSignature,
+		PipelineState* psoOpaque,
+		PipelineState* psoLeavesAlphaCut,
+		PipelineState* psoImposterLod1OrNull,
+		PipelineState* psoLod0DepthPrepass,
+		D3D12_GPU_VIRTUAL_ADDRESS sceneCbGpu,
+		D3D12_GPU_VIRTUAL_ADDRESS materialCbGpu,
+		const D3D12_GPU_DESCRIPTOR_HANDLE matBySpeciesByPartByLod[3][3][3],
+		const D3D12_GPU_DESCRIPTOR_HANDLE imposterMatTableBySpecies[3],
+		D3D12_GPU_DESCRIPTOR_HANDLE iblTable,
+		VertexBuffer* vbByPartByLod[3][3],
+		IndexBuffer* ibByPartByLod[3][3],
+		const uint32_t indexCountByPartByLod[3][3],
+		VertexBuffer* vbImposterQuad,
+		IndexBuffer* ibImposterQuad);
 
 	/// PBR 視錐台カリング（ロードマップ: Hi-Z 前段の CPU オクルージョン）。デフォルト ON。
 	bool GetFrustumCullPbrEnabled();
 	void SetFrustumCullPbrEnabled(bool enabled);
 
+	/// DrawMain: 森の木（TreeInstanceTag）はマスク GPU 経路と二重にならないようキューから除外（実装内 constexpr）。
 	// 地形: perDrawTransformCB（スロットごと World+View+Proj）。PBR: sceneConstantsCB + instance ring。
 	// cmdList: 地形のみ。cmdListPbrRecord0/1 と sharedSrvHeapForPbr が非 nullptr のとき PBR を2スレッドで記録（Engine とセットで使用）。
 	void DrawMain(
@@ -79,7 +116,9 @@ namespace RenderSystem
 		/// Phase 3/5: nullptr ならチャンク毎 CPU 描画。有効時はキューから TerrainMeshTag を除外し ExecuteIndirect。
 		TerrainGpuCullSystem* terrainGpuCull = nullptr,
 		VertexBuffer* terrainSharedVB = nullptr,
-		IndexBuffer* terrainSharedIB = nullptr);
+		IndexBuffer* terrainSharedIB = nullptr,
+		PipelineState* treeInstancingLod1Pso = nullptr,
+		PipelineState* treeInstancingLod2Pso = nullptr);
 
 	/// DrawMain の後。PBR キューから NPR 親子は除外済み。不透明 NPR → 透明 NPR（距離ソート）。
 	void DrawNprPasses(

@@ -34,8 +34,8 @@ namespace
 		return out;
 	}
 
-	// TransformSystem と同じ合成（T * S * base * R）を行い、
-	// TransformComponent::WorldMatrix が保持している「転置済み行列」前提の平行移動成分を返す。
+	// TransformSystem と同じ合成（S * base * R * T）→ mul(pos, World) と一致。
+	// 転置後は平行移動の (tx,ty,tz) が _14,_24,_34 に格納される。
 	static DirectX::XMFLOAT3 GetGPUWorldOriginFromTransformParams(const TransformComponent& tc)
 	{
 		const DirectX::XMVECTOR pos = DirectX::XMLoadFloat3(&tc.Position);
@@ -43,7 +43,7 @@ namespace
 		const DirectX::XMMATRIX S = DirectX::XMMatrixScaling(tc.UniformScale, tc.UniformScale, tc.UniformScale);
 		const DirectX::XMMATRIX base = DirectX::XMLoadFloat4x4(&tc.BaseMatrix);
 		const DirectX::XMMATRIX R = DirectX::XMMatrixRotationY(tc.RotationY);
-		const DirectX::XMMATRIX world = T * S * base * R;
+		const DirectX::XMMATRIX world = S * base * R * T;
 		const DirectX::XMMATRIX worldT = DirectX::XMMatrixTranspose(world); // CPUが保持している形
 
 		DirectX::XMFLOAT4X4 f;
@@ -419,7 +419,23 @@ void EditorUI::DrawCharacterHierarchyAndInspector(entt::registry& registry)
 				if (!std::isfinite(degY)) degY = 0.f;
 				if (ImGui::DragFloat("Rotation Y (deg)", &degY, 0.5f, -3600.f, 3600.f, "%.2f"))
 					tc.RotationY = degY * (kPi / 180.0f);
-				ImGui::DragFloat("Uniform scale", &tc.UniformScale, 0.02f, 0.01f, 100.0f, "%.3f");
+				if (ImGui::DragFloat("Uniform scale", &tc.UniformScale, 0.02f, 0.01f, 100.0f, "%.3f"))
+				{
+					// スポーン時は ground - footY*scale で足を合わせている。スケールだけ変えると
+					// Position.y が古いままなので足がずれる（大きいほど目立つ）。
+					if (registry.all_of<TreeInstanceTag>(transformEnt))
+					{
+						const MeshRendererComponent* mrBounds = registry.try_get<MeshRendererComponent>(transformEnt);
+						if (!mrBounds)
+							mrBounds = registry.try_get<MeshRendererComponent>(selected);
+						if (mrBounds && mrBounds->HasLocalBounds && std::isfinite(mrBounds->LocalBounds.Min.y))
+						{
+							const float footY = mrBounds->LocalBounds.Min.y;
+							const float ground = TerrainSystem::GetHeight(registry, tc.Position.x, tc.Position.z);
+							tc.Position.y = ground - footY * tc.UniformScale;
+						}
+					}
+				}
 				ImGui::PopItemWidth();
 
 				// 描画で使われる座標を確認するためのデバッグ表示
@@ -449,6 +465,28 @@ void EditorUI::DrawCharacterHierarchyAndInspector(entt::registry& registry)
 					ImGui::Text("Part indices: %u", mr->IndexCount);
 				else if (registry.all_of<ModelGroupRootComponent>(selected))
 					ImGui::Text("Submeshes: %zu", registry.get<ModelGroupRootComponent>(selected).children.size());
+
+				ImGui::Separator();
+				const entt::entity deleteTarget = registry.all_of<ModelGroupRootComponent>(selected)
+					? selected : (registry.all_of<ModelGroupChildComponent>(selected)
+						? registry.get<ModelGroupChildComponent>(selected).parent : selected);
+				if (ImGui::Button("Delete Entity"))
+					ImGui::OpenPopup("ConfirmDeleteEntity");
+				if (ImGui::BeginPopup("ConfirmDeleteEntity"))
+				{
+					ImGui::Text("Delete this entity?");
+					if (ImGui::Button("Yes, delete"))
+					{
+						if (g_Scene && registry.valid(deleteTarget))
+							g_Scene->RequestDestroyEntity(deleteTarget);
+						m_selectedSceneModel.reset();
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Cancel"))
+						ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
 			}
 		}
 		else
@@ -553,6 +591,8 @@ void EditorUI::DrawAsyncModelLoadPanel(entt::registry& registry)
 				g_AsyncModelLoader->RequestLoad(std::move(wpath), opt);
 		}
 		ImGui::Text("Async queue (pending): %zu", g_AsyncModelLoader->PendingLoadCount());
+		ImGui::Text("Worker (Assimp): %s",
+			g_AsyncModelLoader->IsWorkerBusy() ? "busy (parsing…)" : "idle");
 		const AsyncModelLoader::LastResultStatus st = g_AsyncModelLoader->GetLastResultStatus();
 		ImGui::Separator();
 		ImGui::Text("Assimp: %s", st.hasValue ? (st.success ? "OK" : "FAIL") : "n/a");

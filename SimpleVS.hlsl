@@ -5,6 +5,7 @@ cbuffer SceneCB : register(b0)
 {
     matrix View;
     matrix Proj;
+    float4 CameraWorld;
 };
 
 struct InstanceData
@@ -46,7 +47,12 @@ VSOutput vert(VSInput input, uint instanceID : SV_InstanceID)
     float4 viewPos = mul(worldPos, View);
     output.svpos = mul(viewPos, Proj);
 
-    output.color = input.color;
+    // 頂点カラーが未設定のメッシュでは COLOR が 0 になり、シェーダで albedo *= input.color の結果が黒になってしまう。
+    // その場合だけ RGB を白にフォールバックする（意図的に黒の場合は例外的に残る）。
+    float4 c = input.color;
+    if ((abs(c.r) + abs(c.g) + abs(c.b)) < 1e-4f)
+        c.rgb = float3(1.0f, 1.0f, 1.0f);
+    output.color = c;
     output.uv = input.uv;
 
     float3 n = (length(input.normal) > 0.1) ? input.normal : float3(0, 0, 1);

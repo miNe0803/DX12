@@ -51,10 +51,11 @@ static_assert(sizeof(InstanceData) == 80, "InstanceData must match HLSL Structur
 inline constexpr size_t kMaxPbrInstancesPerFrame = 16384u;
 inline constexpr size_t kPbrInstanceRingFrameCount = 2u;
 
-/// PBR path b0: camera only (View/Proj). 256-byte aligned for CBV.
+/// PBR path b0: View/Proj + world camera (VS でビルボード等に使用。b1 MaterialParams は PS のみ)。
 struct alignas(256) SceneConstants {
     DirectX::XMMATRIX View;
     DirectX::XMMATRIX Proj;
+    DirectX::XMFLOAT4 CameraWorld; // .xyz = world position, .w 未使用
 };
 
 struct alignas(256) Transform {
@@ -99,6 +100,8 @@ struct Mesh {
     std::wstring NormalMap;   
     std::wstring MetallicMap; 
     std::wstring RoughnessMap;
+    /// FBX 等: 不透明度マップ（葉カットアウト等）。ClassifyTreePart で葉判定に使う。
+    std::wstring OpacityMap;
     /// 任意: NPR ランプ（空なら既定グラデ or assets/npr/default_ramp.png）
     std::wstring RampMap;
     /// PMX/MMD スフィアマップ（加算 spa 等）。空なら白テクスチャ。

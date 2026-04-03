@@ -1,4 +1,4 @@
-#include "TerrainGpuCullSystem.h"
+﻿#include "TerrainGpuCullSystem.h"
 #include "DescriptorHeap.h"
 #include "Engine.h"
 #include "SharedStruct.h"
@@ -45,13 +45,12 @@ namespace
 		XMFLOAT4 CullParams{};
 		XMFLOAT4X4 ViewProj{};
 		XMFLOAT4 HiZParams{};
-		XMFLOAT4 HiZTuning{}; // x:nearDisableDist, y:depthBias, z:maxPixelRadius, w:unused
+		XMFLOAT4 HiZTuning{};
 		XMFLOAT4 _padTo256[2]{};
 	};
 	static_assert(sizeof(TerrainFrustumCullCB) == 256, "TerrainFrustumCull CB");
 
-	/// VP 行ベクトルから 6 平面（mul(worldPos, ViewProj) と同じ行ベースのクリップ空間と整合）。
-	/// BoundingFrustum::GetPlanes とは符号が異なるため、CS の AabbOutsidePlane とセットで使うこと。
+
 	void ExtractFrustumPlanes(FXMMATRIX vp, XMFLOAT4 planes[6])
 	{
 		const XMVECTOR r0 = vp.r[0];
@@ -347,7 +346,7 @@ bool TerrainGpuCullSystem::Init(ID3D12Device* device, DescriptorHeap* descriptor
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 	cmd->ResourceBarrier(1, &toSrv);
 
-	// ExecuteAndWait() が MainGraphicsCmdList を Close するので、ここでは Close しない（二重 Close で COMMAND_LIST_CLOSED）
+	// ExecuteAndWait() が MainGraphicsCmdList を Close するので、ここでは Close しない
 	g_Engine->ExecuteAndWait();
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -553,7 +552,7 @@ void TerrainGpuCullSystem::DrawIndirect(
 
 	if (g_Engine)
 	{
-		// 前フレームの Copy は lastSubmitted と同じスロット。Present 後に進んだ Index ではなく「直前に確定した」バッファを見る。
+		// 前フレームの Copy は lastSubmitted と同じスロット。Present 後に進んだ Index ではなく直前に確定したバッファを見る。
 		const UINT idxNow = g_Engine->CurrentBackBufferIndex();
 		const UINT prevIdx = (idxNow + Engine::FRAME_BUFFER_COUNT - 1u) % Engine::FRAME_BUFFER_COUNT;
 		if (prevIdx < m_counterReadback.size() && m_counterReadback[prevIdx])

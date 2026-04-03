@@ -9,7 +9,10 @@
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Graphics/HiZSystem.h"
 #include "Graphics/TerrainGpuCullSystem.h"
+#include "Graphics/TreeGpuCullSystem.h"
+#include "Graphics/TreeVegetation.h"
 #include "Graphics/PostProcessSettings.h"
+#include "Engine/ECS/Components.h"
 #include "NprTuning.h"
 #include "Camera.h"
 
@@ -30,8 +33,12 @@ void DebugUI::Draw()
 		if (ImGui::BeginTabItem("Overview"))
 		{
 			ImGui::TextUnformatted("--- GPU (prev frame DrawMain) ---");
-			ImGui::Text("DrawIndexed total: %u (terrain %u + PBR batches %u)", gpu.drawIndexedTotal, gpu.terrainDraws, gpu.pbrBatchDrawCalls);
+			ImGui::Text("DrawIndexed total: %u (terrain %u + ECS PBR %u + tree GPU EI %u)",
+				gpu.drawIndexedTotal, gpu.terrainDraws, gpu.pbrBatchDrawCalls, gpu.treeGpuIndirectBatches);
 			ImGui::Text("PBR instances drawn: %u", gpu.pbrInstancesDrawn);
+			ImGui::TextDisabled("Single tree path: mask + GPU ExecuteIndirect (post CL). ECS PBR here = props/characters only.");
+			ImGui::TextDisabled("PBR instances=0 does NOT mean 0 trees (forest is not in ECS PBR count).");
+			ImGui::Text("Tree GPU instance pool (uploaded): %u", gpu.treeGpuUploadedInstanceCount);
 			ImGui::Text("PBR entities frustum-culled (prev): %u", gpu.pbrFrustumCulledEntities);
 			ImGui::Text("Player-model submesh draws: %u", gpu.playerModelSubmeshDraws);
 			ImGui::Separator();
@@ -62,6 +69,98 @@ void DebugUI::Draw()
 						ImGui::Text("Terrain LOD visible: LOD0=%u  LOD1=%u", lod0Count, lod1Count);
 						ImGui::Text("Terrain indices (est): LOD0=%u  LOD1=%u  total=%u", lod0Indices, lod1Indices, lod0Indices + lod1Indices);
 						ImGui::Text("Terrain visible after Hi-Z: %u", gpuVisible);
+					}
+					ImGui::Separator();
+					ImGui::TextUnformatted("--- Trees (mask vegetation) ---");
+					{
+						const uint32_t spawnedInit = TreeVegetation::GetSpawnedTreeCount();
+						const uint32_t mergedIdx = TreeVegetation::GetMergedIndexCount();
+						ImGui::Text("LOD0 mesh ready: %s   merged IB indices: %u (~%u tris)",
+							TreeVegetation::IsLod0MeshReady() ? "yes" : "no",
+							mergedIdx, mergedIdx / 3u);
+						{
+							const wchar_t* lod0p = TreeVegetation::GetLod0SourcePath();
+							char lod0Utf8[512] = {};
+							if (lod0p && lod0p[0])
+							{
+								WideCharToMultiByte(CP_UTF8, 0, lod0p, -1, lod0Utf8, static_cast<int>(sizeof(lod0Utf8)), nullptr, nullptr);
+								ImGui::TextDisabled("LOD0 mesh source: %s", lod0Utf8);
+							}
+							else
+								ImGui::TextDisabled("LOD0 mesh source: (none)");
+						}
+						ImGui::Text("Mask instances (CPU, terrain mask): %zu", TreeVegetation::GetAllMaskInstancesCached().size());
+						ImGui::TextDisabled("Init spawned / TreeInstanceTag = ECS only; forest uses mask+GPU path.");
+						ImGui::Text("Init spawned: %u", spawnedInit);
+						ImGui::Text("Registry TreeInstanceTag: %u", gpu.treeTagEntityCount);
+						ImGui::Text("Draw queue (CPU pass): %u   CPU frustum culled: %u", gpu.treeEntitiesInDrawQueue, gpu.treeFrustumCulled);
+						TreeGpuCullSystem* treeCull = g_Scene->GetTreeGpuCullSystem();
+						if (treeCull && treeCull->IsValid())
+						{
+							ImGui::Text("GPU ExecuteIndirect batches (last frame): %u", gpu.treeGpuIndirectBatches);
+							ImGui::TextDisabled(
+								"LOD0 = full mesh (FBX); LOD1 = far (imposter etc). Raise Tree LOD1 start to widen LOD0 ring.");
+							float tLod1 = 0.f, tLod2 = 0.f;
+							treeCull->GetTreeLodDistanceTuning(tLod1, tLod2);
+							bool treeLodChg = false;
+							treeLodChg |= ImGui::DragFloat("Tree LOD1 start (m, XZ)", &tLod1, 0.25f, 0.01f, 5000.f);
+							// LOD2 メッシュ未実装: CS はこの値で「全滅」しない。将来 LOD2 分岐・デバッグ用。
+							treeLodChg |= ImGui::DragFloat("Tree LOD2 start (m, XZ, future/debug)", &tLod2, 10.f, 1.f, 2000000.f);
+							if (treeLodChg)
+								treeCull->SetTreeLodDistanceTuning(tLod1, tLod2);
+
+							float maxDraw = treeCull->GetMaxDrawDistance();
+							if (ImGui::DragFloat("Tree max draw dist (m, 0=unlimited)", &maxDraw, 5.0f, 0.0f, 5000.0f, "%.0f m"))
+								treeCull->SetMaxDrawDistance(maxDraw);
+
+							bool skipLod0 = treeCull->GetDebugSkipLod0();
+							if (ImGui::Checkbox("Skip LOD0 draw (isolate LOD1+2 cost)", &skipLod0))
+								treeCull->SetDebugSkipLod0(skipLod0);
+
+							uint32_t rbLod0 = 0, rbLod1 = 0, rbLod2 = 0;
+							treeCull->GetLastCounterReadback(rbLod0, rbLod1, rbLod2);
+							ImGui::Text("GPU counter (readback): LOD0=%u  LOD1=%u  LOD2=%u  (total=%u)",
+								rbLod0, rbLod1, rbLod2, rbLod0 + rbLod1 + rbLod2);
+
+							const auto& maskTrees = TreeVegetation::GetAllMaskInstancesCached();
+							if (!maskTrees.empty() && g_Camera)
+							{
+								DirectX::XMFLOAT3 camDbg{};
+								DirectX::XMStoreFloat3(&camDbg, g_Camera->GetPosition());
+								treeCull->GetTreeLodDistanceTuning(tLod1, tLod2);
+								uint32_t gpuLod0 = 0, gpuLod1 = 0, gpuLod2 = 0;
+								TreeGpuCullSystem::ComputeDebugDistanceLodCounts(
+									reinterpret_cast<const TreeGpuCullSystem::TreeInstanceCpu*>(maskTrees.data()),
+									static_cast<uint32_t>(maskTrees.size()),
+									camDbg,
+									tLod1,
+									tLod2,
+									gpuLod0,
+									gpuLod1,
+									gpuLod2);
+								ImGui::Text("Tree LOD (distance / pool): LOD0=%u  LOD1=%u  LOD2=%u  (total %zu)",
+									gpuLod0, gpuLod1, gpuLod2, maskTrees.size());
+								ImGui::TextDisabled("Distance rule only; frustum + Hi-Z not applied. GPU draws LOD0+LOD1 only (LOD2 band: no draw).");
+							}
+						}
+						{
+							uint32_t d0 = 0, d1 = 0, d2 = 0;
+							g_Scene->GetDebugTreeDirectLodCounts(d0, d1, d2);
+							ImGui::TextDisabled("CPU direct fallback LOD counts (0 when using GPU EI): %u / %u / %u", d0, d1, d2);
+						}
+						if (gpu.treeTagEntityCount > 0)
+						{
+							uint32_t lod0 = 0, lod1 = 0, lod2 = 0, lod3 = 0;
+							for (auto e : g_Scene->GetRegistry().view<TreeInstanceTag, LODComponent>())
+							{
+								const int L = g_Scene->GetRegistry().get<LODComponent>(e).CurrentLODLevel;
+								if (L == 0) ++lod0;
+								else if (L == 1) ++lod1;
+								else if (L == 2) ++lod2;
+								else ++lod3;
+							}
+							ImGui::Text("LOD distribution: 0=%u  1=%u  2=%u  3(cull)=%u", lod0, lod1, lod2, lod3);
+						}
 					}
 				}
 			}
@@ -273,6 +372,8 @@ void DebugUI::Draw()
 						g_AsyncModelLoader->RequestLoad(std::move(wpath), opt);
 				}
 				ImGui::Text("Async queue (pending): %zu", g_AsyncModelLoader->PendingLoadCount());
+				ImGui::Text("Worker (Assimp): %s",
+					g_AsyncModelLoader->IsWorkerBusy() ? "busy (parsing…)" : "idle");
 				AsyncModelLoader::LastResultStatus st = g_AsyncModelLoader->GetLastResultStatus();
 				ImGui::Separator();
 				ImGui::Text("Assimp: %s", st.hasValue ? (st.success ? "OK" : "FAIL") : "n/a");

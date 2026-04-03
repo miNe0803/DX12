@@ -5,6 +5,13 @@
 
 #include <algorithm>
 
+namespace
+{
+	bool s_profTreeCullStamped = false;
+	bool s_profTreeDrawStamped = false;
+	UINT s_gpuHeapStampSlotsPerFrame = 0;
+}
+
 std::chrono::high_resolution_clock::time_point Profiler::s_frameStartTime = {};
 std::array<ProfilerFrameStats, Profiler::kHistorySize> Profiler::s_history{};
 size_t Profiler::s_head = 0;
@@ -23,6 +30,8 @@ ComPtr<ID3D12Resource> Profiler::s_gpuTimestampReadback = nullptr;
 
 void Profiler::BeginFrame()
 {
+	s_profTreeCullStamped = false;
+	s_profTreeDrawStamped = false;
 	s_frameStartTime = std::chrono::high_resolution_clock::now();
 	s_currentMiscDrawCalls = 0;
 	s_currentRenderCpuTimeMs = 0.0f;
@@ -50,6 +59,8 @@ void Profiler::EndFrame()
 	stats.gpuTerrainColorMs = 0.0f;
 	stats.gpuHiZBuildMs = 0.0f;
 	stats.gpuPostProcessMs = 0.0f;
+	stats.gpuTreeUploadCullMs = 0.0f;
+	stats.gpuTreeDrawMs = 0.0f;
 
 	if (s_gpuProfilerReady && s_gpuTimestampReadback && s_gpuTimestampFrequency > 0 && g_Engine)
 		{
@@ -65,6 +76,8 @@ void Profiler::EndFrame()
 			const UINT64 terrColorBegin = t[4], terrColorEnd = t[5];
 			const UINT64 hizBegin = t[6], hizEnd = t[7];
 			const UINT64 postBegin = t[8], postEnd = t[9];
+			const UINT64 treeCullBegin = t[10], treeCullEnd = t[11];
+			const UINT64 treeDrawBegin = t[12], treeDrawEnd = t[13];
 			if (drawMainEnd >= drawMainBegin)
 				stats.gpuDrawMainMs = static_cast<float>(static_cast<double>(drawMainEnd - drawMainBegin) * toMs);
 			if (terrDepthEnd >= terrDepthBegin)
@@ -75,9 +88,17 @@ void Profiler::EndFrame()
 				stats.gpuHiZBuildMs = static_cast<float>(static_cast<double>(hizEnd - hizBegin) * toMs);
 			if (postEnd >= postBegin)
 				stats.gpuPostProcessMs = static_cast<float>(static_cast<double>(postEnd - postBegin) * toMs);
+			if (s_profTreeCullStamped && treeCullEnd >= treeCullBegin)
+				stats.gpuTreeUploadCullMs = static_cast<float>(static_cast<double>(treeCullEnd - treeCullBegin) * toMs);
+			if (s_profTreeDrawStamped && treeDrawEnd >= treeDrawBegin)
+				stats.gpuTreeDrawMs = static_cast<float>(static_cast<double>(treeDrawEnd - treeDrawBegin) * toMs);
 			s_gpuTimestampReadback->Unmap(0, nullptr);
 		}
 	}
+
+	stats.gpuTaggedPassesSumMs =
+		stats.gpuTerrainDepthPrepassMs + stats.gpuTerrainColorMs + stats.gpuDrawMainMs
+		+ stats.gpuHiZBuildMs + stats.gpuPostProcessMs + stats.gpuTreeUploadCullMs + stats.gpuTreeDrawMs;
 
 	// A案: RenderSystemからPull
 	const RenderSystem::GpuDrawStats gpu = RenderSystem::GetLastGpuDrawStats();
@@ -96,8 +117,15 @@ void Profiler::SetPreRenderCpuTimeMs(float ms)
 
 bool Profiler::EnsureGpuProfilerReady()
 {
-	if (s_gpuProfilerReady)
+	if (s_gpuProfilerReady && s_gpuHeapStampSlotsPerFrame == kGpuStampCountPerFrame && s_gpuTimestampHeap && s_gpuTimestampReadback)
 		return true;
+	// コマンドリストが EndQuery でヒープを参照したままのときに Release すると Close で落ちる。再作成前に GPU 完了を待つ。
+	if ((s_gpuTimestampHeap || s_gpuTimestampReadback) && g_Engine)
+		g_Engine->WaitForGpuIdle();
+	s_gpuProfilerReady = false;
+	s_gpuHeapStampSlotsPerFrame = 0;
+	s_gpuTimestampHeap.Reset();
+	s_gpuTimestampReadback.Reset();
 	if (!g_Engine || !g_Engine->Device() || !g_Engine->Queue())
 		return false;
 	D3D12_QUERY_HEAP_DESC qd = {};
@@ -114,6 +142,7 @@ bool Profiler::EnsureGpuProfilerReady()
 		return false;
 	if (FAILED(g_Engine->Queue()->GetTimestampFrequency(&s_gpuTimestampFrequency)))
 		return false;
+	s_gpuHeapStampSlotsPerFrame = kGpuStampCountPerFrame;
 	s_gpuProfilerReady = true;
 	return true;
 }
@@ -188,6 +217,48 @@ void Profiler::GpuMarkTerrainColorBegin(ID3D12GraphicsCommandList* cmd)
 void Profiler::GpuMarkTerrainColorEnd(ID3D12GraphicsCommandList* cmd)
 {
 	WriteGpuStamp(cmd, 5);
+}
+
+void Profiler::GpuMarkTreeUploadCullBegin(ID3D12GraphicsCommandList* cmd)
+{
+	if (!g_Engine)
+		return;
+	s_gpuWriteFrameIndex = g_Engine->CurrentBackBufferIndex();
+	s_profTreeCullStamped = true;
+	WriteGpuStamp(cmd, 10);
+}
+
+void Profiler::GpuMarkTreeUploadCullEnd(ID3D12GraphicsCommandList* cmd)
+{
+	WriteGpuStamp(cmd, 11);
+}
+
+void Profiler::GpuMarkTreeDrawBegin(ID3D12GraphicsCommandList* cmd)
+{
+	s_profTreeDrawStamped = true;
+	WriteGpuStamp(cmd, 12);
+}
+
+void Profiler::GpuMarkTreeDrawEnd(ID3D12GraphicsCommandList* cmd)
+{
+	WriteGpuStamp(cmd, 13);
+}
+
+void Profiler::EnsureTreeGpuStampPlaceholders(ID3D12GraphicsCommandList* cmd)
+{
+	if (!cmd || !EnsureGpuProfilerReady() || !s_gpuTimestampHeap || !g_Engine)
+		return;
+	s_gpuWriteFrameIndex = g_Engine->CurrentBackBufferIndex();
+	if (!s_profTreeCullStamped)
+	{
+		WriteGpuStamp(cmd, 10);
+		WriteGpuStamp(cmd, 11);
+	}
+	if (!s_profTreeDrawStamped)
+	{
+		WriteGpuStamp(cmd, 12);
+		WriteGpuStamp(cmd, 13);
+	}
 }
 
 void Profiler::SetRenderCpuBreakdown(float beginMs, float sceneDrawMs, float endMs)

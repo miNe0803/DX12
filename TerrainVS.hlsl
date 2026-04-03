@@ -1,6 +1,4 @@
-// Terrain path (non-instanced): full Transform in b0. Root signature has no instance SRV.
-
-cbuffer Transform : register(b0)
+﻿cbuffer Transform : register(b0)
 {
     matrix World;
     matrix View;

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <string>
 #include <system_error>
+#include <functional>
 #include <vector>
 #include <Windows.h> // WideCharToMultiByte
 #include <assimp/material.h>
@@ -575,8 +576,6 @@ bool AssimpLoader::Load(ImportSettings& settings)
 
     std::wstring targetFilePath = settings.filename;
 
-    bool isLargeModel = (targetFilePath.find(L"sakura") != std::wstring::npos);
-
     unsigned int flags =
         aiProcess_Triangulate |
         aiProcess_CalcTangentSpace |
@@ -606,6 +605,25 @@ bool AssimpLoader::Load(ImportSettings& settings)
     settings.meshes.clear();
     settings.meshes.resize(scene->mNumMeshes);
 
+    // Map mesh index -> node path (for LOD grouping etc.)
+    std::vector<std::string> meshNodePath(scene->mNumMeshes);
+    {
+        std::function<void(const aiNode*, const std::string&)> walk = [&](const aiNode* node, const std::string& parent) {
+            if (!node) return;
+            const std::string name = node->mName.C_Str();
+            const std::string here = parent.empty() ? name : (parent + "/" + name);
+            for (unsigned mi = 0; mi < node->mNumMeshes; ++mi)
+            {
+                const unsigned meshIndex = node->mMeshes[mi];
+                if (meshIndex < meshNodePath.size())
+                    meshNodePath[meshIndex] = here;
+            }
+            for (unsigned ci = 0; ci < node->mNumChildren; ++ci)
+                walk(node->mChildren[ci], here);
+            };
+        walk(scene->mRootNode, std::string{});
+    }
+
     fs::path modelDir = fs::path(targetFilePath).parent_path();
     {
         std::error_code ec;
@@ -621,11 +639,17 @@ bool AssimpLoader::Load(ImportSettings& settings)
         return s;
     }();
     const bool isPmx = (pathLower.size() >= 4 && pathLower.compare(pathLower.size() - 4, 4, L".pmx") == 0);
+    // sakura 樹木 FBX: AsyncModelLoader は inverseV=true だが TreeVegetation 同期読みは false。
+    // 非 PMX で V だけ反転すると UV がテクスチャとずれ PBR 表示が壊れるため、PMX 以外はパスで判定して無効化。
+    const bool isSakuraTreeFbx = !isPmx && pathLower.find(L"sakura") != std::wstring::npos;
 
     for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
     {
         const aiMesh* src = scene->mMeshes[i];
         Mesh& dst = settings.meshes[i];
+
+        // Use node path as mesh name so downstream can group by collection/node (e.g. *_LOD0 / *_LOD1).
+        dst.Name = (!meshNodePath[i].empty()) ? meshNodePath[i] : std::string(src->mName.C_Str());
 
         dst.Vertices.resize(src->mNumVertices);
 
@@ -682,7 +706,8 @@ bool AssimpLoader::Load(ImportSettings& settings)
                     (void)settings;
                 } else {
                     if (settings.inverseU) u = 1.0f - u;
-                    if ((upAxis == 2) || settings.inverseV) v_ = 1.0f - v_;
+                    const bool flipVFromSettings = settings.inverseV && !isSakuraTreeFbx;
+                    if ((upAxis == 2) || flipVFromSettings) v_ = 1.0f - v_;
                 }
                 vOut.UV = { u, v_ };
             }
@@ -727,6 +752,7 @@ bool AssimpLoader::Load(ImportSettings& settings)
         Resolve(aiTextureType_NORMALS, dst.NormalMap);
         Resolve(aiTextureType_METALNESS, dst.MetallicMap);
         Resolve(aiTextureType_DIFFUSE_ROUGHNESS, dst.RoughnessMap);
+        Resolve(aiTextureType_OPACITY, dst.OpacityMap);
 
         if (isPmx)
         {

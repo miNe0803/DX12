@@ -56,6 +56,8 @@ void App::Run(const TCHAR* appName) {
     Keyboard_Initialize();
 
     if (g_Engine) {
+        // TreeVegetation が Init 内で LOD0 FBX を非同期キューするため、Scene より先にワーカーを用意する
+        g_AsyncModelLoader = new AsyncModelLoader();
         g_Scene = new Scene();
         if (!g_Scene->Init()) {
             printf("Scene init failed. Window only.\n");
@@ -79,7 +81,6 @@ void App::Run(const TCHAR* appName) {
                 // After ImGui uploads on shared queue, advance engine fence.
                 g_Engine->WaitForGpuIdle();
             }
-            g_AsyncModelLoader = new AsyncModelLoader();
         }
     } else {
         g_Scene = nullptr;

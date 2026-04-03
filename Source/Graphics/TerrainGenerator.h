@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <cstdint>
@@ -39,7 +39,7 @@ bool TerrainGenerator_GenerateFromFile(
 	float              maxHeight,
 	TerrainGenerateResult& out);
 
-// EXR（float）から高さを読み地形メッシュを生成。pathUtf8 は UTF-8 パス。
+
 bool TerrainGenerator_GenerateFromExr(
 	const char*        pathUtf8,
 	float              cellSpacing,

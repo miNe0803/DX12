@@ -1,13 +1,10 @@
-// NPR toon shading pixel shader（ルートテーブルは PBR と同じ t0-t5 を連番バインド）
-// t0 Albedo, t1 Normal, t2 Metallic, t3 Roughness, t4 Ramp, t5 Sphere（未使用スロットは白テクスチャ）
-
-struct VSOutput
+﻿struct VSOutput
 {
     float4 svpos : SV_POSITION;
     float4 color : COLOR;
     float2 uv : TEXCOORD;
-    float3 normal : NORMAL; // world-space normal
-    float3 tangent : TANGENT; // world-space tangent
+    float3 normal : NORMAL;
+    float3 tangent : TANGENT;
     float3 worldPos : TEXCOORD1;
     float4 nprPerMesh : TEXCOORD2;
 };
@@ -26,7 +23,7 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // 予約（定数バッファサイズ合わせ、未使用）
+    float4 NprDebugHdr;
 };
 
 float4 main(VSOutput input) : SV_TARGET
@@ -36,25 +33,22 @@ float4 main(VSOutput input) : SV_TARGET
     if (dbgRamp > 3.5f && dbgRamp < 4.5f)
         return float4(0.0f, 1.0f, 0.0f, 1.0f);
 
-    // 5=t0 生サンプル（sRGB テクスチャの値そのまま。RenderDoc の t0 サムネと同系で全身を確認）
-    // 6=t0×頂点カラー（pow 前。PMX Diffuse 焼き込み後）
-    // 7=リニア化後×頂点まで（スフィア前。シェーディングに入るベースに近い）
     float4 albedoTex = _AlbedoMap.Sample(smp, input.uv);
     if (dbgRamp > 4.5f && dbgRamp < 5.5f)
         return float4(albedoTex.rgb, 1.0f);
 
     float4 albedo = albedoTex;
-    // PMX マテリアル Diffuse は頂点カラーに焼き込み。不透明パスでは AssimpLoader が Color.a=1 を保証（Early-Z のため clip は使わない）
+    // PMX マテリアル Diffuse は頂点カラーに焼き込み。不透明パスでは AssimpLoader が Color.a=1 を保証
     albedo *= input.color;
     if (dbgRamp > 5.5f && dbgRamp < 6.5f)
         return float4(albedo.rgb, 1.0f);
 
-    // 1. sRGB -> Linear デコード（既存PBRと整合）
+    // 1. sRGB -> Linear
     albedo.rgb = pow(max(albedo.rgb, 1e-5), 2.2f);
     if (dbgRamp > 6.5f && dbgRamp < 7.5f)
         return float4(albedo.rgb, 1.0f);
 
-    // PMX スフィア（InstanceData.NprPerMesh.y）
+    // PMX
     int sphMode = (int)floor(input.nprPerMesh.y + 0.5f);
     if (sphMode > 0)
     {
@@ -66,10 +60,10 @@ float4 main(VSOutput input) : SV_TARGET
             albedo.rgb += sph.rgb;
     }
 
-    // 未使用 SRV の最適化除去対策（メタル/ラフは NPR で未参照）
+    // 未使用 SRV の最適化除去対策（
     albedo.rgb += (_MetallicMap.Sample(smp, input.uv).r + _RoughnessMap.Sample(smp, input.uv).r) * 0.0;
 
-    // 2. NormalMapのデコードとTBNワールド法線化
+    // 2.TBNワールド法線化
     float4 nSample = _NormalMap.Sample(smp, input.uv);
     float3 N = normalize(input.normal);
     float3 T = normalize(input.tangent);
@@ -93,9 +87,9 @@ float4 main(VSOutput input) : SV_TARGET
     float q = clamp(floor(halfLambert * steps), 0.0f, steps - 1.0f);
     float u = (q + 0.5f) / steps;
 
-    // Rampからの階調サンプリング (Mip0強制)
+    // Rampからの階調サンプリング
     float3 rampColor = _RampTex.SampleLevel(smp, float2(u, 0.5f), 0).rgb;
-    // toon3 が「明るい帯」寄りだと R が高く、lerp が常に日向側に寄って平坦に見える → コントラストを付ける
+
     float rampR = saturate(rampColor.r);
     float rampGamma = lerp(1.0f, 1.9f, celSharp);
     rampR = pow(max(rampR, 1e-5f), rampGamma);
@@ -110,21 +104,7 @@ float4 main(VSOutput input) : SV_TARGET
 
     float3 baseColor = albedo.rgb;
 
-    // ==========================================
-    // 7. 全身用・疑似SSS（一旦オフ）
-    // ==========================================
-    /*
-    // ★ 全身用・疑似SSS（ターミネーター血色・強烈版）★
-    // halfLambert(0.0=影, 1.0=光) のうち、明暗の境界線(0.45付近)を広めに狙い撃ち
-    float sssMask = smoothstep(0.30f, 0.45f, halfLambert) - smoothstep(0.45f, 0.60f, halfLambert);
-    float3 sssTint = float3(1.0f, 0.15f, 0.3f);
-    float sssIntensity = 1.0f;
-    baseColor += sssTint * sssMask * albedo.rgb * sssIntensity;
-    */
 
-    // ==========================================
-    // 8. Rimライト 【プラスチック感の解消】
-    // ==========================================
     float3 V = normalize(CameraPos.xyz - input.worldPos);
     float rimPower = (RimParams.z > 0.001f) ? RimParams.z : 5.0f;
     float rim = pow(1.0f - saturate(dot(worldNormal, V)), rimPower);
@@ -132,9 +112,6 @@ float4 main(VSOutput input) : SV_TARGET
     // 純白(1.0)を足すのではなく、アルベドの色を残したまま明るくする
     baseColor += rim * albedo.rgb * 0.4f;
 
-    // ==========================================
-    // 9. 最終出力（線形 HDR）
-    // ==========================================
     float3 finalColor = baseColor;
 
     // premultiplied RGB（Composite と Transparent と整合）

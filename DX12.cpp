@@ -33,13 +33,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
 
     // --- [1] デバッグレイヤーの有効化 ---
-    // DX12開発において非常に重要です。リソースの状態遷移ミスや
-    // メモリリークなどのエラーを「出力」ウィンドウに詳しく報告してくれます。
+    // PIX は GPU キャプチャ時に独自のフックを入れるため、デバッグレイヤーと併用すると
+    // 二重検証・タイミング変化で ERROR が増えたり、PIX 単独では問題ない経路で落ちたりしやすい。
+    // RenderDoc はフック方式が異なり併用しやすい。PIX 用に環境変数 DX12_DISABLE_DEBUG_LAYER=1 で無効化可能。
 #if defined(_DEBUG)
-    ComPtr<ID3D12Debug> debug;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
     {
-        debug->EnableDebugLayer();
+        wchar_t ev[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"DX12_DISABLE_DEBUG_LAYER", ev, 8u);
+        const bool disableLayer = (n > 0 && ev[0] == L'1');
+        if (!disableLayer)
+        {
+            ComPtr<ID3D12Debug> debug;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+                debug->EnableDebugLayer();
+        }
     }
 #endif
 

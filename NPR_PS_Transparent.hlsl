@@ -1,5 +1,4 @@
-// NPR transparent: clip なし（アルファのボケ足を維持）。深度書き込みは PSO で OFF
-struct VSOutput
+﻿struct VSOutput
 {
     float4 svpos : SV_POSITION;
     float4 color : COLOR;
@@ -27,14 +26,13 @@ cbuffer MaterialParams : register(b1, space0)
     float4 CameraPos;
     float4 NprTuning;
     float4 NprTuning2;
-    float4 NprDebugHdr; // 予約（CB サイズ合わせ）
+    float4 NprDebugHdr;
 };
 
 float4 main(VSOutput input) : SV_TARGET
 {
     float4 albedo = _AlbedoMap.Sample(smp, input.uv);
     albedo *= input.color;
-    // PMX: Assimp が Diffuse A=1 のまま返すことがあり、目影などは Mesh.Opacity を z に載せて補正
     albedo.a *= saturate(input.nprPerMesh.z);
     albedo.rgb = pow(max(albedo.rgb, 1e-5), 2.2f);
 
@@ -49,7 +47,7 @@ float4 main(VSOutput input) : SV_TARGET
             albedo.rgb += sph.rgb;
     }
 
-    // NprTuning: x=virtualLight, y=未使用, z/w=不透明パス用（透明では未使用）
+    // NprTuning: x=virtualLight, y=未使用, z/w=不透明パス用
     float vl = NprTuning.x;
     albedo.rgb *= vl;
 

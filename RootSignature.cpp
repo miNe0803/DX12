@@ -9,7 +9,7 @@ RootSignature::RootSignature(bool forTerrain)
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
-	CD3DX12_ROOT_PARAMETER rootParam[5] = {};
+	CD3DX12_ROOT_PARAMETER rootParam[7] = {};
 	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
 
 	if (forTerrain)
@@ -69,11 +69,16 @@ RootSignature::RootSignature(bool forTerrain)
 	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6);
 	rootParam[3].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[4].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
+	// Trees (GPU-driven): additional inputs for TreeIndirectVS only.
+	// - Root SRV t1 space1: StructuredBuffer<uint> visibleIndex
+	// - Root constants b2 space1 (8x32-bit): VisibleBase + インポスター用 footLocal(xyz)+halfW+height（float を uint ビットで）
+	rootParam[5].InitAsShaderResourceView(1, 1, D3D12_SHADER_VISIBILITY_VERTEX);
+	rootParam[6].InitAsConstants(8, 2, 1, D3D12_SHADER_VISIBILITY_VERTEX);
 
 	auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 
 	D3D12_ROOT_SIGNATURE_DESC desc = {};
-	desc.NumParameters = 5;
+	desc.NumParameters = 7;
 	desc.NumStaticSamplers = 1;
 	desc.pParameters = rootParam;
 	desc.pStaticSamplers = &sampler;

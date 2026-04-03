@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ComPtr.h"
 #include <d3d12.h>
@@ -16,14 +16,14 @@ class IndexBuffer;
 
 struct SceneConstants;
 
-/// Phase 3/5: GPU 視錐台カリング + ExecuteIndirect（地形チャンク専用）
+//GPU 視錐台カリング + ExecuteIndirect（地形チャンク専用）
 class TerrainGpuCullSystem
 {
 public:
 	~TerrainGpuCullSystem();
 	void Shutdown();
 
-	/// descriptorHeap に SRV/UAV を登録（Init 時）。内部でアップロードコピー後 GPU 同期。失敗時 IsValid()==false
+
 	bool Init(
 		ID3D12Device* device,
 		DescriptorHeap* descriptorHeap,

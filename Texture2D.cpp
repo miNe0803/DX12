@@ -2,9 +2,13 @@
 #include <DirectXTex.h>
 #include "Engine.h"
 #include "Core/GpuDebugLabels.h"
+#include "EXRLoader.h"
 #include <mutex>
 #include <unordered_map>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <cstring>
 
 #pragma comment(lib, "DirectXTex.lib")
 
@@ -76,31 +80,85 @@ bool Texture2D::Load(std::wstring& path)
 	}
 
 	HRESULT hr = E_FAIL;
-	if (ext == L"tga")
+	if (ext == L"exr")
+	{
+		int ew = 0, eh = 0;
+		float* exrRgba = nullptr;
+		std::vector<char> utf8Buf;
+		{
+			const int n = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+			if (n <= 1)
+			{
+				if (exrRgba)
+					free(exrRgba);
+				return false;
+			}
+			utf8Buf.resize(static_cast<size_t>(n));
+			WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, utf8Buf.data(), n, nullptr, nullptr);
+		}
+		if (!LoadEXRToFloatRgba(utf8Buf.data(), &ew, &eh, &exrRgba) || !exrRgba || ew <= 0 || eh <= 0)
+		{
+			if (exrRgba)
+				free(exrRgba);
+			return false;
+		}
+		std::vector<unsigned char> rgba8(static_cast<size_t>(ew) * eh * 4);
+		for (int i = 0; i < ew * eh; ++i)
+		{
+			for (int c = 0; c < 4; ++c)
+			{
+				float v = exrRgba[i * 4 + c];
+				v = (std::max)(0.0f, (std::min)(1.0f, v));
+				rgba8[static_cast<size_t>(i) * 4 + c] = static_cast<unsigned char>(v * 255.0f + 0.5f);
+			}
+		}
+		free(exrRgba);
+		hr = scratch.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM, static_cast<size_t>(ew), static_cast<size_t>(eh), 1, 1);
+		if (FAILED(hr))
+			return false;
+		const Image* dstImg = scratch.GetImage(0, 0, 0);
+		if (!dstImg || !dstImg->pixels)
+			return false;
+		memcpy(dstImg->pixels, rgba8.data(), rgba8.size());
+		meta = scratch.GetMetadata();
+	}
+	else if (ext == L"tga")
 	{
 		hr = LoadFromTGAFile(path.c_str(), &meta, scratch);
+		if (FAILED(hr))
+			return false;
 	}
 	else
 	{
 		// PNG / BMP / JPEG / GIF / TIFF など WIC 対応形式（PMX 付属の .bmp / .jpg 用）
 		hr = LoadFromWICFile(path.c_str(), WIC_FLAGS_NONE, &meta, scratch);
+		if (FAILED(hr))
+			return false;
 	}
 
-	if (FAILED(hr))
-	{
-		return false;
-	}
-
-	// D3D12????E??????0????\?[?X??????????
 	if (meta.width == 0 || meta.height == 0)
 		return false;
 
 	const UINT16 arraySize = (meta.arraySize > 0) ? static_cast<UINT16>(meta.arraySize) : 1;
-	const UINT16 mipLevels = (meta.mipLevels > 0) ? static_cast<UINT16>(meta.mipLevels) : 1;
 
-	auto img = scratch.GetImage(0, 0, 0);
-	if (img == nullptr)
+	ScratchImage mipChain;
+	const Image* baseImg = scratch.GetImage(0, 0, 0);
+	if (!baseImg)
 		return false;
+
+	bool hasMips = false;
+	if (meta.mipLevels <= 1 && meta.width > 1 && meta.height > 1)
+	{
+		hr = GenerateMipMaps(*baseImg, TEX_FILTER_LINEAR, 0, mipChain);
+		if (SUCCEEDED(hr) && mipChain.GetImageCount() > 0)
+		{
+			hasMips = true;
+			meta = mipChain.GetMetadata();
+		}
+	}
+
+	const ScratchImage& srcData = hasMips ? mipChain : scratch;
+	const UINT16 mipLevels = static_cast<UINT16>(meta.mipLevels > 0 ? meta.mipLevels : 1);
 
 	auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_L0);
 	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(meta.format,
@@ -109,7 +167,6 @@ bool Texture2D::Load(std::wstring& path)
 		arraySize,
 		mipLevels);
 
-	// ???\?[?X????
 	hr = g_Engine->Device()->CreateCommittedResource(
 		&prop,
 		D3D12_HEAP_FLAG_NONE,
@@ -120,19 +177,20 @@ bool Texture2D::Load(std::wstring& path)
 	);
 
 	if (FAILED(hr))
-	{
 		return false;
-	}
 
-	hr = m_pResource->WriteToSubresource(0,
-		nullptr,   // ?S????R?s?[
-		img->pixels,
-		static_cast<UINT>(img->rowPitch),
-		static_cast<UINT>(img->slicePitch)
-	);
-	if (FAILED(hr))
+	for (UINT16 mip = 0; mip < mipLevels; ++mip)
 	{
-		return false;
+		const Image* img = srcData.GetImage(mip, 0, 0);
+		if (!img || !img->pixels)
+			break;
+		hr = m_pResource->WriteToSubresource(mip,
+			nullptr,
+			img->pixels,
+			static_cast<UINT>(img->rowPitch),
+			static_cast<UINT>(img->slicePitch));
+		if (FAILED(hr))
+			break;
 	}
 
 	{
@@ -354,9 +412,10 @@ ID3D12Resource* Texture2D::Resource()
 D3D12_SHADER_RESOURCE_VIEW_DESC Texture2D::ViewDesc()
 {
 	D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-	desc.Format = m_pResource->GetDesc().Format;
+	auto resDesc = m_pResource->GetDesc();
+	desc.Format = resDesc.Format;
 	desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	desc.Texture2D.MipLevels = 1;
+	desc.Texture2D.MipLevels = resDesc.MipLevels;
 	return desc;
 }

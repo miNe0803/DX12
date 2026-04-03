@@ -70,8 +70,16 @@ bool Engine::CreateDevice()
 	ComPtr<ID3D12InfoQueue> infoQueue;
 	if (SUCCEEDED(m_pDevice->QueryInterface(IID_PPV_ARGS(&infoQueue))))
 	{
-		infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-		infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+		// PIX 併用時、検証が厳しくなり ERROR が増え SetBreakOnSeverity でデバッガが止まる（クラッシュに見える）。
+		// DX12_DISABLE_BREAK_ON_ERROR=1 で無効化（DX12_DISABLE_DEBUG_LAYER=1 と併用推奨）。
+		wchar_t ev[8]{};
+		const DWORD n = GetEnvironmentVariableW(L"DX12_DISABLE_BREAK_ON_ERROR", ev, 8u);
+		const bool noBreak = (n > 0 && ev[0] == L'1');
+		if (!noBreak)
+		{
+			infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+			infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+		}
 	}
 #endif
 	return true;
@@ -154,10 +162,8 @@ bool Engine::InitGfxCommandLists()
 		return false;
 	}
 
-	// Always create the command list on allocator 0. If we used allocator
-	// m_CurrentBackBufferIndex here and that index is 1, allocator 1 would hold a
-	// closed-but-never-executed list; init (IBL) only uses allocator 0, so the first
-	// BeginRender for back buffer 1 would Reset allocator 1 -> COMMAND_ALLOCATOR_SYNC.
+	// Command list は allocator 0 で作成し、各フレームで Reset 時に allocator を差し替える（D3D12 的にOK）。
+	// Init フェーズの実行が allocator 0 に偏っていても、BeginRender 側でフレーム毎に安全に待ってから Reset する。
 	hr = m_pDevice->CreateCommandList(
 		0,
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -176,15 +182,18 @@ bool Engine::InitGfxCommandLists()
 
 	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
 	{
-		hr = m_pDevice->CreateCommandAllocator(
-			D3D12_COMMAND_LIST_TYPE_DIRECT,
-			IID_PPV_ARGS(m_pPbrRecordAllocator[w].ReleaseAndGetAddressOf()));
-		if (FAILED(hr))
-			return false;
+		for (size_t i = 0; i < FRAME_BUFFER_COUNT; ++i)
+		{
+			hr = m_pDevice->CreateCommandAllocator(
+				D3D12_COMMAND_LIST_TYPE_DIRECT,
+				IID_PPV_ARGS(m_pPbrRecordAllocator[w][i].ReleaseAndGetAddressOf()));
+			if (FAILED(hr))
+				return false;
+		}
 		hr = m_pDevice->CreateCommandList(
 			0,
 			D3D12_COMMAND_LIST_TYPE_DIRECT,
-			m_pPbrRecordAllocator[w].Get(),
+			m_pPbrRecordAllocator[w][0].Get(),
 			nullptr,
 			IID_PPV_ARGS(m_pPbrRecordGfxCmdList[w].ReleaseAndGetAddressOf()));
 		if (FAILED(hr))
@@ -196,15 +205,18 @@ bool Engine::InitGfxCommandLists()
 		GPU_SET_NAME(m_pPbrRecordGfxCmdList[w].Get(), pbrClName);
 	}
 
-	hr = m_pDevice->CreateCommandAllocator(
-		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		IID_PPV_ARGS(m_pPostAllocator.ReleaseAndGetAddressOf()));
-	if (FAILED(hr))
-		return false;
+	for (size_t i = 0; i < FRAME_BUFFER_COUNT; ++i)
+	{
+		hr = m_pDevice->CreateCommandAllocator(
+			D3D12_COMMAND_LIST_TYPE_DIRECT,
+			IID_PPV_ARGS(m_pPostAllocator[i].ReleaseAndGetAddressOf()));
+		if (FAILED(hr))
+			return false;
+	}
 	hr = m_pDevice->CreateCommandList(
 		0,
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		m_pPostAllocator.Get(),
+		m_pPostAllocator[0].Get(),
 		nullptr,
 		IID_PPV_ARGS(m_pPostGfxCmdList.ReleaseAndGetAddressOf()));
 	if (FAILED(hr))
@@ -407,38 +419,38 @@ bool Engine::CreateDepthStencil()
 
 void Engine::BeginRender()
 {
-	// Main pass always uses allocator 0. (Per-buffer allocators + m_fenceValue[i] diverged from
-	// real GPU use and caused Reset on buffer 1 before that allocator had ever completed.)
+	// フレーム（バックバッファ）ごとに fence を追跡し、再利用する分だけ待つ。
+	const UINT frameIndex = m_CurrentBackBufferIndex % FRAME_BUFFER_COUNT;
 	if (g_EngineFirstBeginRender)
 	{
 		g_EngineFirstBeginRender = 0;
 		this->WaitForGpuIdle();
 	}
-	else if (m_mainGraphicsFenceValue > 0 && m_pFence && m_fenceEvent)
+	else if (m_fenceValue[frameIndex] > 0 && m_pFence && m_fenceEvent)
 	{
-		if (m_pFence->GetCompletedValue() < m_mainGraphicsFenceValue)
+		if (m_pFence->GetCompletedValue() < m_fenceValue[frameIndex])
 		{
-			if (SUCCEEDED(m_pFence->SetEventOnCompletion(m_mainGraphicsFenceValue, m_fenceEvent)))
+			if (SUCCEEDED(m_pFence->SetEventOnCompletion(m_fenceValue[frameIndex], m_fenceEvent)))
 				WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 		}
 	}
 
 	m_currentRenderTarget = m_pHdrColor.Get();
-	m_pAllocator[0]->Reset();
-	m_pMainGfxCmdList->Reset(m_pAllocator[0].Get(), nullptr);
+	m_pAllocator[frameIndex]->Reset();
+	m_pMainGfxCmdList->Reset(m_pAllocator[frameIndex].Get(), nullptr);
 	m_pMainGfxCmdList->RSSetViewports(1, &m_Viewport);
 	m_pMainGfxCmdList->RSSetScissorRects(1, &m_Scissor);
 	// HDR clear: Scene::Draw (barrier, OMSetRTV, Clear)
 
 	for (int w = 0; w < PBR_RECORD_WORKERS; ++w)
 	{
-		m_pPbrRecordAllocator[w]->Reset();
-		m_pPbrRecordGfxCmdList[w]->Reset(m_pPbrRecordAllocator[w].Get(), nullptr);
+		m_pPbrRecordAllocator[w][frameIndex]->Reset();
+		m_pPbrRecordGfxCmdList[w]->Reset(m_pPbrRecordAllocator[w][frameIndex].Get(), nullptr);
 		m_pPbrRecordGfxCmdList[w]->RSSetViewports(1, &m_Viewport);
 		m_pPbrRecordGfxCmdList[w]->RSSetScissorRects(1, &m_Scissor);
 	}
-	m_pPostAllocator->Reset();
-	m_pPostGfxCmdList->Reset(m_pPostAllocator.Get(), nullptr);
+	m_pPostAllocator[frameIndex]->Reset();
+	m_pPostGfxCmdList->Reset(m_pPostAllocator[frameIndex].Get(), nullptr);
 	m_pPostGfxCmdList->RSSetViewports(1, &m_Viewport);
 	m_pPostGfxCmdList->RSSetScissorRects(1, &m_Scissor);
 }
@@ -466,8 +478,7 @@ void Engine::EndRender()
 
 	++m_mainGraphicsFenceValue;
 	m_pQueue->Signal(m_pFence.Get(), m_mainGraphicsFenceValue);
-	m_fenceValue[0] = m_mainGraphicsFenceValue;
-	m_fenceValue[1] = m_mainGraphicsFenceValue;
+	m_fenceValue[m_lastSubmittedBackBufferIndex % FRAME_BUFFER_COUNT] = m_mainGraphicsFenceValue;
 
 	m_pSwapChain->Present(1, 0);
 	m_CurrentBackBufferIndex = m_pSwapChain->GetCurrentBackBufferIndex();

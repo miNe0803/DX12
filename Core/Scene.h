@@ -13,6 +13,7 @@ class IndexBuffer;
 struct ModelBounds;
 class HiZSystem;
 class TerrainGpuCullSystem;
+class TreeGpuCullSystem;
 
 class Scene
 {
@@ -40,10 +41,16 @@ public:
 	void SetTerrainCheapNearPreserveMeters(float meters) { m_terrainCheapNearPreserveMeters = meters; }
 	float GetTerrainCheapNearPreserveMeters() const { return m_terrainCheapNearPreserveMeters; }
 
+	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
+	void RequestDestroyEntity(entt::entity root);
+
 	entt::registry& GetRegistry() { return m_registry; }
 	// Debug UI (Hi-Z toggle, etc.)
 	HiZSystem* GetHiZSystem() const;
 	TerrainGpuCullSystem* GetTerrainGpuCullSystem() const;
+	TreeGpuCullSystem* GetTreeGpuCullSystem() const;
+	// Direct-instancing tree debug: actual per-frame LOD split counts (not ECS LODComponent).
+	void GetDebugTreeDirectLodCounts(uint32_t& outLod0, uint32_t& outLod1, uint32_t& outLod2) const;
 
 private:
 	bool InitDescriptorHeap();
@@ -63,8 +70,13 @@ private:
 	bool InitMainPipeline();
 	bool InitSkyboxAndIBL();
 	bool InitPostProcess();
+	/// LOD0 が非同期で後から揃う場合に、初回だけインポスターアトラスをベイクする。
+	void TryEnsureTreeImposterBake();
+	/// LOD0 メッシュが揃った後に TreeGpuCullSystem を一度だけ確保する。
+	void TryEnsureTreeGpuCullInit();
 
 	entt::registry m_registry;
+	std::vector<entt::entity> m_pendingDestroy;
 	std::vector<VertexBuffer*> m_ownedVertexBuffers;
 	std::vector<IndexBuffer*> m_ownedIndexBuffers;
 	/// InitTerrain の共有メッシュ（チャンクが OwnsGpuBuffers=false のためここで解放）
@@ -75,6 +87,9 @@ private:
 	bool m_terrainCheapPathEnabled = true;
 	float m_terrainCheapGrazingThresh = 0.26f;
 	float m_terrainCheapNearPreserveMeters = 85.0f;
+
+	// Debug: updated in Draw() when using direct-instancing tree fallback.
+	uint32_t m_debugTreeDirectLodCount[3] = { 0u, 0u, 0u };
 };
 
 extern Scene* g_Scene;

@@ -67,6 +67,12 @@ struct LODComponent
 	float DistanceToCamera;
 };
 
+/// 地形ツリーマスクから配置されたインスタンス（種ごとに Mat LOD を差し替え）
+struct TreeInstanceTag
+{
+	uint8_t SpeciesIndex = 0; // 0=R tree1, 1=G moss, 2=B sakura
+};
+
 // 地形：CPU 側の高さデータを保持（GetHeight / Flatten 用）。描画メッシュは子の TerrainMeshTag 側。
 struct TerrainComponent
 {
@@ -98,4 +104,6 @@ struct ModelGroupRootComponent
 struct ModelGroupChildComponent
 {
 	entt::entity parent{};
+	/// 同一親の子メッシュの描画順（小さいほど先）。木は幹→枝→葉で重なり部の Z 競合を抑える
+	uint8_t siblingDrawOrder = 0;
 };

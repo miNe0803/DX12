@@ -1,4 +1,4 @@
-﻿#include "Scene.h"
+#include "Scene.h"
 #include "Engine.h"
 #include "App.h"
 #include <d3dx12.h>
@@ -32,6 +32,11 @@
 #include "Graphics/TerrainGenerator.h"
 #include "Graphics/TerrainGpuCullSystem.h"
 #include "Graphics/HiZSystem.h"
+#include "Graphics/TreeGpuCullSystem.h"
+#include "Graphics/TreeVegetation.h"
+#include "Graphics/TreeImposterBake.h"
+#include "ComPtr.h"
+#include "Engine/ECS/Systems/TreeLodSystem.h"
 #include "ModelBounds.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "NprTuning.h"
@@ -40,6 +45,7 @@
 
 #include <filesystem>
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 #include <cstdio>
 
@@ -48,6 +54,7 @@ namespace fs = std::filesystem;
 
 static HiZSystem* s_hiz = nullptr;
 static TerrainGpuCullSystem* s_terrainGpuCull = nullptr;
+static TreeGpuCullSystem* s_treeGpuCull = nullptr;
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -69,6 +76,10 @@ PipelineState* nprTransparentPipelineState = nullptr;
 RootSignature* terrainRootSignature = nullptr;
 PipelineState* terrainDepthPrepassPipelineState = nullptr;
 PipelineState* terrainPipelineState = nullptr;
+PipelineState* treeOpaquePipelineState = nullptr;
+PipelineState* treeLod1PipelineState = nullptr;
+PipelineState* treeLod2PipelineState = nullptr;
+PipelineState* treeImposterPipelineState = nullptr;
 ConstantBuffer* terrainConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 Camera* g_Camera = nullptr;
 
@@ -90,21 +101,17 @@ static void WriteNprTuningToPbrConstants(PBRConstants* pbrConst)
 }
 
 namespace {
-	struct TreeSpeciesConfig
-	{
-		const wchar_t* ModelPath;
-	};
-
-	const TreeSpeciesConfig kTreeSpecies[3] = {
-		{ L"assets\\sakura1\\sakura1.fbx" },
-		{ L"assets\\sakura1\\sakura1.fbx" },
-		{ L"assets\\sakura1\\sakura1.fbx" },
-	};
-
 	constexpr float kTerrainCellSpacing = 8.0f;
 	constexpr float kTerrainMaxHeight = 250.0f;
 	// PIX デバッグ用: true で Terrain GPU カリング（ExecuteIndirect 経路）を無効化。
 	constexpr bool kDisableTerrainGpuCullForDebug = false;
+	// 木: GPU ExecuteIndirect をメインにする
+	constexpr bool kDisableTreeGpuCullWork = false;
+	// true: Hi-Z オクルージョンを木 CS で使用。誤遮蔽で全滅する環境があるため既定はオフ（視錐のみ）。
+	constexpr bool kTreeCullUseHiZ = false;
+
+	static_assert(sizeof(TreeVegetation::StreamedTreeInstance) == sizeof(TreeGpuCullSystem::TreeInstanceCpu));
+	static_assert(alignof(TreeVegetation::StreamedTreeInstance) == alignof(TreeGpuCullSystem::TreeInstanceCpu));
 
 	SkyboxRenderer* s_skyboxRenderer = nullptr;
 	ComPtr<ID3D12Resource> skyboxCubemap;
@@ -117,6 +124,90 @@ namespace {
 	DescriptorHandle* s_envCubemapHandle = nullptr;
 	DescriptorHandle* s_terrainMaskHandle = nullptr;
 	DescriptorHandle* s_hizPyramidSrvHandle = nullptr;
+	DescriptorHandle* s_treeImposterMatTableStart[3] = { nullptr, nullptr, nullptr };
+	D3D12_GPU_DESCRIPTOR_HANDLE s_treeImposterMatGpu[3] = {};
+	bool s_treeImposterBakeOk = false;
+	VertexBuffer* s_treeImposterQuadVb = nullptr;
+	IndexBuffer* s_treeImposterQuadIb = nullptr;
+
+	// マスク木の GPU アップロード（ポストCLで UpdateInstances → DispatchCull と同じ static を共有）
+	static bool s_treeGpuMaskUploaded = false;
+	static size_t s_treeGpuMaskLastUploadedCount = 0;
+	static uint64_t s_treeGpuMaskLastSerial = 0;
+
+	// DispatchCull と DrawIndirectLods に渡す indexCount を同一にする。
+	static void FillTreeIndexCountByPartByLod(uint32_t out[3][3])
+	{
+		const uint32_t idxMerged0 = TreeVegetation::GetMergedIndexCountLod(0);
+		const uint32_t idxMerged1 = TreeVegetation::GetMergedIndexCountLod(1);
+		const uint32_t idxMerged2 = TreeVegetation::GetMergedIndexCountLod(2);
+		const uint32_t idxTrunk0 = TreeVegetation::GetPartIndexCount(0);
+		const uint32_t idxLeaves0 = TreeVegetation::GetPartIndexCount(1);
+		const uint32_t idxBranch0 = TreeVegetation::GetPartIndexCount(2);
+
+		const bool noPartSplit = (idxTrunk0 == 0u && idxLeaves0 == 0u && idxBranch0 == 0u);
+		if (noPartSplit)
+		{
+			// FBX マージメッシュは幹/葉/枝を分離していない。
+			// part0(trunk) だけでフルメッシュを描き、part1/2 は 0 にして 3 倍描画を回避する。
+			out[0][0] = idxMerged0;
+			out[0][1] = idxMerged1;
+			out[0][2] = idxMerged2;
+			for (int lod = 0; lod < 3; ++lod)
+			{
+				out[1][lod] = 0u;
+				out[2][lod] = 0u;
+			}
+		}
+		else
+		{
+			const bool twoPartSplitNoBranchMesh =
+				idxTrunk0 != 0u && idxLeaves0 != 0u && idxBranch0 == 0u;
+			out[0][0] = idxTrunk0 ? idxTrunk0 : idxMerged0;
+			out[0][1] = idxTrunk0 ? idxTrunk0 : idxMerged1;
+			out[0][2] = idxTrunk0 ? idxTrunk0 : idxMerged2;
+			out[1][0] = idxLeaves0 ? idxLeaves0 : idxMerged0;
+			out[1][1] = idxLeaves0 ? idxLeaves0 : idxMerged1;
+			out[1][2] = idxLeaves0 ? idxLeaves0 : idxMerged2;
+			const uint32_t br0 = twoPartSplitNoBranchMesh ? 0u : (idxBranch0 ? idxBranch0 : idxMerged0);
+			const uint32_t br1 = twoPartSplitNoBranchMesh ? 0u : (idxBranch0 ? idxBranch0 : idxMerged1);
+			const uint32_t br2 = twoPartSplitNoBranchMesh ? 0u : (idxBranch0 ? idxBranch0 : idxMerged2);
+			out[2][0] = br0;
+			out[2][1] = br1;
+			out[2][2] = br2;
+		}
+
+		const bool imposterReady = s_treeImposterBakeOk && s_treeImposterQuadVb && s_treeImposterQuadIb
+			&& s_treeImposterMatGpu[0].ptr != 0 && s_treeImposterMatGpu[1].ptr != 0 && s_treeImposterMatGpu[2].ptr != 0;
+		if (imposterReady)
+		{
+			out[0][1] = 6u;
+			out[0][2] = 6u;
+			out[1][1] = 0u;
+			out[1][2] = 0u;
+			out[2][1] = 0u;
+			out[2][2] = 0u;
+		}
+		static int s_fillLog = 0;
+		if (s_fillLog < 3)
+		{
+			DebugLog("[FillIdx] imposterReady=%d (bakeOk=%d quadVb=%p quadIb=%p mat0=%llu mat1=%llu mat2=%llu) "
+				"idx[0]={%u,%u,%u} idx[1]={%u,%u,%u} idx[2]={%u,%u,%u}\n",
+				imposterReady ? 1 : 0, s_treeImposterBakeOk ? 1 : 0,
+				s_treeImposterQuadVb, s_treeImposterQuadIb,
+				(unsigned long long)s_treeImposterMatGpu[0].ptr,
+				(unsigned long long)s_treeImposterMatGpu[1].ptr,
+				(unsigned long long)s_treeImposterMatGpu[2].ptr,
+				out[0][0], out[0][1], out[0][2],
+				out[1][0], out[1][1], out[1][2],
+				out[2][0], out[2][1], out[2][2]);
+			++s_fillLog;
+		}
+	}
+
+	ComPtr<ID3D12Resource> s_treeImposterAtlas0;
+	ComPtr<ID3D12Resource> s_treeImposterAtlas1;
+	ComPtr<ID3D12Resource> s_treeImposterAtlas2;
 	PostProcessSettings s_postProcessSettings;
 
 	ComPtr<ID3D12Resource> s_pbrInstanceRingBuffer;
@@ -246,6 +337,8 @@ Scene::~Scene()
 	s_hiz = nullptr;
 	delete s_terrainGpuCull;
 	s_terrainGpuCull = nullptr;
+	delete s_treeGpuCull;
+	s_treeGpuCull = nullptr;
 
 	s_hdrSrvHandle = nullptr;
 	s_envCubemapHandle = nullptr;
@@ -272,6 +365,26 @@ Scene::~Scene()
 	terrainDepthPrepassPipelineState = nullptr;
 	delete terrainPipelineState;
 	terrainPipelineState = nullptr;
+	delete treeOpaquePipelineState;
+	treeOpaquePipelineState = nullptr;
+	delete treeLod1PipelineState;
+	treeLod1PipelineState = nullptr;
+	delete treeLod2PipelineState;
+	treeLod2PipelineState = nullptr;
+	delete treeImposterPipelineState;
+	treeImposterPipelineState = nullptr;
+
+	s_treeImposterAtlas0.Reset();
+	s_treeImposterAtlas1.Reset();
+	s_treeImposterAtlas2.Reset();
+	s_treeImposterBakeOk = false;
+	s_treeImposterQuadVb = nullptr;
+	s_treeImposterQuadIb = nullptr;
+	for (int i = 0; i < 3; ++i)
+	{
+		s_treeImposterMatTableStart[i] = nullptr;
+		s_treeImposterMatGpu[i] = {};
+	}
 
 	delete descriptorHeap;
 	descriptorHeap = nullptr;
@@ -450,6 +563,12 @@ bool Scene::SpawnModelEntities(const wchar_t* path, const ModelSpawnOptions& opt
 	return SpawnLoadedMeshes(path, std::move(loadedMeshes), import.outBaseTransform, opt, nullptr);
 }
 
+void Scene::RequestDestroyEntity(entt::entity root)
+{
+	if (m_registry.valid(root))
+		m_pendingDestroy.push_back(root);
+}
+
 void Scene::ProcessAsyncModelLoads()
 {
 	if (!g_AsyncModelLoader)
@@ -492,6 +611,76 @@ void Scene::ProcessAsyncModelLoads()
 			spawned ? L"" : detail,
 			finalPos.x, finalPos.y, finalPos.z);
 	});
+}
+
+void Scene::TryEnsureTreeImposterBake()
+{
+	if (s_treeImposterBakeOk)
+		return;
+	if (!descriptorHeap || !rootSignature || !treeImposterPipelineState || !treeImposterPipelineState->IsValid()
+		|| !pbrPropertyBuffer[0])
+		return;
+	if (TreeVegetation::GetMergedIndexCountLod(0) == 0)
+		return;
+
+	if (!s_treeImposterQuadVb || !s_treeImposterQuadIb)
+	{
+		VertexBuffer* qvb = nullptr;
+		IndexBuffer* qib = nullptr;
+		if (!TreeImposterBake::CreateQuadMeshes(&qvb, &qib) || !qvb || !qib)
+			return;
+		m_ownedVertexBuffers.push_back(qvb);
+		m_ownedIndexBuffers.push_back(qib);
+		s_treeImposterQuadVb = qvb;
+		s_treeImposterQuadIb = qib;
+	}
+
+	const D3D12_GPU_DESCRIPTOR_HANDLE iblGpu = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{};
+	DescriptorHandle* matStart[3] = {};
+	const TreeSpeciesMaterials* sm0 = TreeVegetation::GetSpeciesMaterials(0);
+	const TreeSpeciesMaterials* sm1 = TreeVegetation::GetSpeciesMaterials(1);
+	const TreeSpeciesMaterials* sm2 = TreeVegetation::GetSpeciesMaterials(2);
+	if (TreeImposterBake::BakeAtlases(
+		descriptorHeap,
+		rootSignature->Get(),
+		pbrPropertyBuffer[0]->GetAddress(),
+		iblGpu,
+		TreeVegetation::GetMergedVertexBufferLod(0),
+		TreeVegetation::GetMergedIndexBufferLod(0),
+		TreeVegetation::GetMergedIndexCountLod(0),
+		TreeVegetation::GetMergedLocalBounds(),
+		sm0, sm1, sm2,
+		s_treeImposterAtlas0, s_treeImposterAtlas1, s_treeImposterAtlas2,
+		matStart))
+	{
+		s_treeImposterBakeOk = true;
+		for (int i = 0; i < 3; ++i)
+		{
+			s_treeImposterMatTableStart[i] = matStart[i];
+			if (matStart[i])
+				s_treeImposterMatGpu[i] = matStart[i]->HandleGPU;
+		}
+	}
+	else
+		DebugLog("[Scene] Tree imposter bake failed.\n");
+}
+
+void Scene::TryEnsureTreeGpuCullInit()
+{
+	if (s_treeGpuCull)
+		return;
+	if (TreeVegetation::GetMergedIndexCountLod(0) == 0)
+		return;
+	if (!g_Engine || !descriptorHeap)
+		return;
+	s_treeGpuCull = new TreeGpuCullSystem();
+	// マスク全セルは数十万本になり得る。256 のみだと初回はクランプされ、直後に再 Init が走る。
+	const uint32_t maxInst = 262144u;
+	if (!s_treeGpuCull->Init(g_Engine->Device(), descriptorHeap, rootSignature ? rootSignature->Get() : nullptr, maxInst))
+	{
+		delete s_treeGpuCull;
+		s_treeGpuCull = nullptr;
+	}
 }
 
 void Scene::SetAsyncSpawnBudgetPerFrame(size_t budget)
@@ -606,7 +795,6 @@ bool Scene::InitTerrain()
 		return fallback;
 	};
 
-	(void)kTreeSpecies;
 	static const wchar_t* terrainTexturePaths[] = {
 		L"assets\\terrain\\tree_mask.png",
 		L"assets\\terrain\\nature_mask.png",
@@ -757,6 +945,47 @@ bool Scene::InitMainPipeline()
 	nprTransparentPipelineState->SetAlphaBlendPremultiplied();
 	nprTransparentPipelineState->Create();
 
+	// Trees: use a dedicated VS that reads visible-index indirection.
+	treeOpaquePipelineState = new PipelineState();
+	treeOpaquePipelineState->SetInputLayout(Vertex::InputLayout);
+	treeOpaquePipelineState->SetRootSignature(rootSignature->Get());
+	treeOpaquePipelineState->SetVS(L"TreeIndirectVS.cso");
+	treeOpaquePipelineState->SetPS(L"StandardPBR_PS.cso");
+	treeOpaquePipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	treeOpaquePipelineState->Create();
+	if (!treeOpaquePipelineState->IsValid())
+		DebugLog("[Scene] Tree opaque PSO invalid.\n");
+
+
+	treeLod1PipelineState = new PipelineState();
+	treeLod1PipelineState->SetInputLayout(Vertex::InputLayout);
+	treeLod1PipelineState->SetRootSignature(rootSignature->Get());
+	treeLod1PipelineState->SetVS(L"TreeIndirectVS.cso");
+	treeLod1PipelineState->SetPS(L"TreeLOD1_PS.cso");
+	treeLod1PipelineState->Create();
+	if (!treeLod1PipelineState->IsValid())
+		DebugLog("[Scene] Tree LOD1 PSO invalid.\n");
+
+	treeLod2PipelineState = new PipelineState();
+	treeLod2PipelineState->SetInputLayout(Vertex::InputLayout);
+	treeLod2PipelineState->SetRootSignature(rootSignature->Get());
+	treeLod2PipelineState->SetVS(L"TreeIndirectVS.cso");
+	treeLod2PipelineState->SetPS(L"TreeLOD2_PS.cso");
+	treeLod2PipelineState->Create();
+	if (!treeLod2PipelineState->IsValid())
+		DebugLog("[Scene] Tree LOD2 PSO invalid.\n");
+
+	// LOD1 インポスター（クワッド + 焼きアトラス）。未生成だとベイク条件も DrawIndirect の imposter 経路も常に無効になる。
+	treeImposterPipelineState = new PipelineState();
+	treeImposterPipelineState->SetInputLayout(Vertex::InputLayout);
+	treeImposterPipelineState->SetRootSignature(rootSignature->Get());
+	treeImposterPipelineState->SetVS(L"TreeImposterVS.cso");
+	treeImposterPipelineState->SetPS(L"TreeImposterPS.cso");
+	treeImposterPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	treeImposterPipelineState->Create();
+	if (!treeImposterPipelineState->IsValid())
+		DebugLog("[Scene] Tree imposter PSO invalid (TreeImposterVS/PS.cso?). LOD1 falls back to full mesh.\n");
+
 	return true;
 }
 
@@ -771,7 +1000,8 @@ bool Scene::InitSkyboxAndIBL()
 	IBLGenerator ibl;
 	const auto doExecuteAndWait = []() { g_Engine->ExecuteAndWait(); };
 
-	if (ibl.Generate(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), L"assets\\skybox.exr", 2560u, &cubemap, doExecuteAndWait, &equirect))
+	// NOTE: 2560 cubemap は環境によっては初期化時に TDR を踏みやすい。まず 512 で安定化（必要なら後で戻す）。
+	if (ibl.Generate(g_Engine->Device(), g_Engine->MainGraphicsCmdList(), L"assets\\skybox.exr", 512u, &cubemap, doExecuteAndWait, &equirect))
 	{
 		skyboxCubemap = cubemap;
 		skyboxEquirect = equirect;
@@ -917,7 +1147,10 @@ bool Scene::Init()
 		L"SimpleVS.cso",
 		L"StandardPBR_PS.cso",
 		L"NPR_PS.cso",
-		L"NPR_PS_Transparent.cso"
+		L"NPR_PS_Transparent.cso",
+		L"BakeTreeLOD0_PS.cso",
+		L"TreeImposterVS.cso",
+		L"TreeImposterPS.cso"
 	});
 
 	if (!InitDescriptorHeap())
@@ -944,7 +1177,7 @@ bool Scene::Init()
 		g_Camera->SetPosition(XMVectorSet(0.0f, groundY + 2.0f, 0.0f, 0.0f));
 	}
 
-	constexpr float kPlayerScaleMultiplier = 1.0f;
+	constexpr float kPlayerScaleMultiplier = 0.1f;
 	{
 		ModelSpawnOptions player = {};
 		player.position = { 0.0f, 0.0f, 0.0f };
@@ -959,8 +1192,24 @@ bool Scene::Init()
 
 	if (!InitMainPipeline())
 		return false;
+	TreeVegetation::Initialize(m_registry, descriptorHeap, m_ownedVertexBuffers, m_ownedIndexBuffers);
 	if (!InitSkyboxAndIBL())
 		return false;
+
+	s_treeImposterBakeOk = false;
+	for (int i = 0; i < 3; ++i)
+	{
+		s_treeImposterMatGpu[i] = {};
+		s_treeImposterMatTableStart[i] = nullptr;
+	}
+	s_treeImposterAtlas0.Reset();
+	s_treeImposterAtlas1.Reset();
+	s_treeImposterAtlas2.Reset();
+	s_treeImposterQuadVb = nullptr;
+	s_treeImposterQuadIb = nullptr;
+
+	TryEnsureTreeImposterBake();
+
 	if (!InitPostProcess())
 		return false;
 
@@ -985,6 +1234,9 @@ bool Scene::Init()
 		}
 	}
 
+	// Tree GPU cull: LOD0 は非同期のため、メッシュ確定後に TryEnsureTreeGpuCullInit() で確保。
+	TryEnsureTreeGpuCullInit();
+
 	return true;
 }
 
@@ -998,6 +1250,18 @@ TerrainGpuCullSystem* Scene::GetTerrainGpuCullSystem() const
 	return s_terrainGpuCull;
 }
 
+TreeGpuCullSystem* Scene::GetTreeGpuCullSystem() const
+{
+	return s_treeGpuCull;
+}
+
+void Scene::GetDebugTreeDirectLodCounts(uint32_t& outLod0, uint32_t& outLod1, uint32_t& outLod2) const
+{
+	outLod0 = m_debugTreeDirectLodCount[0];
+	outLod1 = m_debugTreeDirectLodCount[1];
+	outLod2 = m_debugTreeDirectLodCount[2];
+}
+
 void Scene::SetTerrainPsDebugMode(int mode)
 {
 	if (mode < 0) mode = 0;
@@ -1007,9 +1271,69 @@ void Scene::SetTerrainPsDebugMode(int mode)
 
 void Scene::Update()
 {
+	// Deferred entity destruction (requested from EditorUI etc. during previous frame)
+	if (!m_pendingDestroy.empty())
+	{
+		// GPU may still reference VB/IB from in-flight frames; wait for all commands to finish.
+		g_Engine->WaitForGpuIdle();
+
+		auto removeOwned = [](auto& vec, auto* ptr) {
+			auto it = std::find(vec.begin(), vec.end(), ptr);
+			if (it != vec.end()) { delete *it; vec.erase(it); }
+		};
+
+		for (const entt::entity ent : m_pendingDestroy)
+		{
+			if (!m_registry.valid(ent))
+				continue;
+
+			std::wstring label;
+			if (auto* lab = m_registry.try_get<EditorHierarchyLabelComponent>(ent))
+				label = lab->displayName;
+
+			auto* rootComp = m_registry.try_get<ModelGroupRootComponent>(ent);
+			if (rootComp)
+			{
+				std::vector<entt::entity> children = rootComp->children;
+				size_t freed = 0;
+				for (const entt::entity child : children)
+				{
+					if (!m_registry.valid(child))
+						continue;
+					if (auto* mr = m_registry.try_get<MeshRendererComponent>(child); mr && mr->OwnsGpuBuffers)
+					{
+						removeOwned(m_ownedVertexBuffers, mr->pVB);
+						removeOwned(m_ownedIndexBuffers, mr->pIB);
+						++freed;
+					}
+					m_registry.destroy(child);
+				}
+				m_registry.destroy(ent);
+				DebugLog("[Scene] Destroyed model group '%ls' (%zu meshes, %zu GPU buffers freed)\n",
+					label.c_str(), children.size(), freed);
+			}
+			else
+			{
+				if (auto* mr = m_registry.try_get<MeshRendererComponent>(ent); mr && mr->OwnsGpuBuffers)
+				{
+					removeOwned(m_ownedVertexBuffers, mr->pVB);
+					removeOwned(m_ownedIndexBuffers, mr->pIB);
+				}
+				m_registry.destroy(ent);
+				DebugLog("[Scene] Destroyed entity '%ls'\n", label.c_str());
+			}
+		}
+		m_pendingDestroy.clear();
+	}
+
 	ProcessAsyncModelLoads();
+	TryEnsureTreeImposterBake();
+	TryEnsureTreeGpuCullInit();
 
 	float dt = 0.016f;
+	// PlayerSystem が毎フレーム Y を地形に合わせる → その後に CameraSystem が追従するのが一貫。
+	// CameraSystem を先にすると TPS 追従が1フレームずれ、地形の上で「引き戻される／遅延」に見えやすい。
+	PlayerSystem::Update(m_registry);
 	CameraSystem::Update(g_Camera, dt, m_registry);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
@@ -1020,6 +1344,8 @@ void Scene::Update()
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
 	sc->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
 	sc->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
+	XMStoreFloat4(&sc->CameraWorld, g_Camera->GetPosition());
+	sc->CameraWorld.w = 1.f;
 
 	// Terrain DrawMain reads SceneConstants; keep slot0 in sync for any legacy readers.
 	auto currentTransform = constantBuffer[currentIndex]->GetPtr<Transform>();
@@ -1047,9 +1373,9 @@ void Scene::Update()
 
 	XMFLOAT3 cameraPos;
 	XMStoreFloat3(&cameraPos, g_Camera->GetPosition());
-	PlayerSystem::Update(m_registry);
 	TransformSystem::Update(m_registry);
 	LODSystem::Update(m_registry, cameraPos);
+	TreeLodSystem::Update(m_registry);
 }
 
 void Scene::SyncNprGpuTuningToMaterialCB()
@@ -1086,6 +1412,8 @@ void Scene::Draw()
 {
 	auto commandList = g_Engine->MainGraphicsCmdList();
 	auto postCommandList = g_Engine->PostGraphicsCmdList();
+	// Update() 後に非同期で LOD0 が載ったフレームでも、Draw 冒頭で一度確保してマスク経路に乗せる。
+	TryEnsureTreeGpuCullInit();
 
 	bool hasNprTag = false;
 	for ([[maybe_unused]] entt::entity e : m_registry.view<NPRTag>())
@@ -1121,6 +1449,11 @@ void Scene::Draw()
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
 	auto materialHeap = descriptorHeap->GetHeap();
+	bool treeIndirectPrepared = false;
+	D3D12_GPU_DESCRIPTOR_HANDLE treeIndirectMats[3][3][3]{};
+	VertexBuffer* treeIndirectVb[3][3]{};
+	IndexBuffer* treeIndirectIb[3][3]{};
+	uint32_t treeIndirectIdx[3][3]{};
 	commandList->SetDescriptorHeaps(1, &materialHeap);
 	commandList->SetGraphicsRootSignature(rootSignature->Get());
 	commandList->SetPipelineState(pipelineState->Get());
@@ -1136,9 +1469,85 @@ void Scene::Draw()
 		const bool hizReadyForTerrainCull = (s_hiz && s_hiz->IsValid() && s_hiz->GetEnabled());
 		terrainCullForDraw->SetHiZResources(s_hizPyramidSrvHandle, w, h, mips, hizReadyForTerrainCull);
 	}
-	const bool disableParallelPbr = useNprDrawPath;
+
+	bool hasStreamedTreesThisFrame = false;
+	const TreeGpuCullSystem::TreeInstanceCpu* treeCpuDataForThisFrame = nullptr;
+	uint32_t treeCpuCountForThisFrame = 0;
+	DirectX::XMFLOAT3 treeCamPosForThisFrame{};
+	// マスク上の全インスタンス（CPU）。実体は GetAllMaskInstancesCached。毎フレーム vector を再確保しない。
+	{
+		static std::vector<TreeVegetation::StreamedTreeInstance> s_maskBuildTmp;
+		TreeVegetation::BuildAllMaskInstances(m_registry, s_maskBuildTmp, 8.0f);
+	}
+	const auto& treeInstCached = TreeVegetation::GetAllMaskInstancesCached();
+	// Tree GPU cull uses previous frame Hi-Z (same as terrain)
+	if (!kDisableTreeGpuCullWork && s_treeGpuCull && s_treeGpuCull->IsValid())
+	{
+		const UINT w = g_Engine->GetFrameBufferWidth();
+		const UINT h = g_Engine->GetFrameBufferHeight();
+		const UINT mips = s_hiz ? s_hiz->GetMipCount() : 1u;
+		// Tree Hi-Z: use previous frame Hi-Z when available.
+		// (CS has a near-disable distance so near trees won't be occlusion-tested)
+		const bool hizReady = (s_hiz && s_hiz->IsValid() && s_hiz->GetEnabled());
+		s_treeGpuCull->SetHiZResources(s_hizPyramidSrvHandle, w, h, mips, hizReady && kTreeCullUseHiZ);
+
+		// Full-nature mode: build ALL instances from the mask (no thinning).
+		DirectX::XMFLOAT3 camPos{};
+		DirectX::XMStoreFloat3(&camPos, g_Camera->GetPosition());
+		treeCamPosForThisFrame = camPos;
+		if (treeInstCached.empty())
+		{
+			// Fallback: use existing spawned TreeInstance entities so we always have something to render/debug.
+			// (unchanged)
+		}
+		if (!treeInstCached.empty())
+		{
+			hasStreamedTreesThisFrame = true;
+			// StreamedTreeInstance は TreeInstanceCpu と同一レイアウト。二重 vector を持たずマスクキャッシュを直接渡す。
+			treeCpuDataForThisFrame = reinterpret_cast<const TreeGpuCullSystem::TreeInstanceCpu*>(treeInstCached.data());
+			treeCpuCountForThisFrame = static_cast<uint32_t>(treeInstCached.size());
+			// Ensure TreeGpuCull has enough capacity for the full mask.
+			// If not, recreate it once with a larger maxInstances.
+			if (s_treeGpuCull && s_treeGpuCull->IsValid() && s_treeGpuCull->GetMaxInstances() < static_cast<uint32_t>(treeInstCached.size()))
+			{
+				const uint32_t want = static_cast<uint32_t>(std::min(treeInstCached.size(), static_cast<size_t>(kTreeGpuMaxMaskInstances)));
+				DebugLog("[Trees][GPUCull] reinit for maxInst=%u (was %u)\n", want, s_treeGpuCull->GetMaxInstances());
+				TreeGpuCullSystem* old = s_treeGpuCull;
+				s_treeGpuCull = new TreeGpuCullSystem();
+				if (!s_treeGpuCull->Init(g_Engine->Device(), descriptorHeap, rootSignature ? rootSignature->Get() : nullptr, want))
+				{
+					delete s_treeGpuCull;
+					s_treeGpuCull = old; // keep old (will clamp instance count)
+				}
+				else
+				{
+					// old resources may still be referenced by in-flight GPU work from previous frames.
+					// wait once before releasing to avoid OBJECT_DELETED_WHILE_STILL_IN_USE.
+					if (g_Engine)
+						g_Engine->WaitForGpuIdle();
+					delete old;
+					s_treeGpuMaskUploaded = false;
+				}
+			}
+
+			const uint32_t idxMerged0 = TreeVegetation::GetMergedIndexCountLod(0);
+			const uint32_t idxMerged1 = TreeVegetation::GetMergedIndexCountLod(1);
+			const uint32_t idxMerged2 = TreeVegetation::GetMergedIndexCountLod(2);
+			const uint32_t idxTrunk0 = TreeVegetation::GetPartIndexCount(0);
+			const uint32_t idxLeaves0 = TreeVegetation::GetPartIndexCount(1);
+			const uint32_t idxBranch0 = TreeVegetation::GetPartIndexCount(2);
+			DebugLog("[Trees][Mesh] merged lod0=%u lod1=%u lod2=%u | part trunk=%u leaves=%u branches=%u\n",
+				idxMerged0, idxMerged1, idxMerged2, idxTrunk0, idxLeaves0, idxBranch0);
+			// index 表は DrawMain 後の FillTreeIndexCountByPartByLod(treeIndirectIdx) のみとする。
+			// メインで先に Fill して Dispatch に渡すと、インポスター bake 前後で [0][1] 等がズレ、CS の IndexCount=0・Draw 側 idx>0 になり RenderDoc で <0, N> になる。
+		}
+	}
+	// CPU parallelization: enable worker command-list recording for PBR batches.
+	// This reduces main-thread recording load when many draws are present.
+	const bool disableParallelPbr = false;
+	// 森の木は TreeGpuCullSystem（ポストCL: Upload+Dispatch+ExecuteIndirect 同一リスト）RenderSystem 内 kSkipEcsTreeMeshesInMainPbrPass。
 	Profiler::GpuMarkDrawMainBegin(commandList);
-	GPU_CMD_BEGIN_EVENT(commandList, 80, 180, 255, L"Scene: DrawMain (terrain + PBR)");
+	GPU_CMD_BEGIN_EVENT(commandList, 80, 180, 255, L"Scene: DrawMain (terrain + ECS PBR; trees = post CL GPU path)");
 	RenderSystem::DrawMain(m_registry, commandList,
 		constantBuffer[currentIndex],
 		sceneConstantBuffer[currentIndex],
@@ -1157,9 +1566,221 @@ void Scene::Draw()
 		nprTransPsoOk,
 		terrainCullForDraw,
 		m_terrainSharedVB,
-		m_terrainSharedIB);
+		m_terrainSharedIB,
+		treeLod1PipelineState,
+		treeLod2PipelineState);
 	GPU_CMD_END_EVENT(commandList);
 	Profiler::GpuMarkDrawMainEnd(commandList);
+
+	// Tree ExecuteIndirect draw (species×LOD×part) — マテ・VB 束ね（Dispatch はポストCLで Draw と連結）
+	// NOTE: streamed instances が 0 のフレームで ExecuteIndirect を呼ぶと、未初期化の counter/args を参照して暴走し得る
+	if (!kDisableTreeGpuCullWork && s_treeGpuCull && s_treeGpuCull->IsValid()
+		&& hasStreamedTreesThisFrame)
+	{
+		// 案A: ExecuteIndirect（GPU駆動）をメイン経路にする
+		const bool kEnableTreeExecuteIndirect = true;
+		if (!kEnableTreeExecuteIndirect)
+		{
+			// Stable fallback path: direct instancing (no ExecuteIndirect)
+			// CPU LOD split to match ExecuteIndirect LOD distances:
+			// - LOD0: <= 10m
+			// - LOD1: <= 50m
+			// - LOD2:  > 50m
+			std::vector<TreeGpuCullSystem::TreeInstanceCpu> lodCpu[3];
+			const size_t cpuCount = treeCpuDataForThisFrame ? static_cast<size_t>(treeCpuCountForThisFrame) : 0u;
+			lodCpu[0].reserve(cpuCount);
+			lodCpu[1].reserve(cpuCount);
+			lodCpu[2].reserve(cpuCount);
+			// Hysteresis to prevent LOD flicker near thresholds (esp. 2m).
+			// Keyed by quantized XZ + species so classification is stable frame-to-frame.
+			static std::unordered_map<uint64_t, uint8_t> s_treeLodHistory;
+			s_treeLodHistory.reserve(4096);
+			const float lod0In = 2.0f;
+			const float lod0Out = 2.4f;   // leave LOD0 only when clearly farther
+			const float lod1In = 50.0f;
+			const float lod1Out = 55.0f;  // leave LOD1 only when clearly farther
+			const float lod0In2 = lod0In * lod0In;
+			const float lod0Out2 = lod0Out * lod0Out;
+			const float lod1In2 = lod1In * lod1In;
+			const float lod1Out2 = lod1Out * lod1Out;
+
+			if (treeCpuDataForThisFrame && treeCpuCountForThisFrame > 0)
+			for (uint32_t ci = 0; ci < treeCpuCountForThisFrame; ++ci)
+			{
+				const TreeGpuCullSystem::TreeInstanceCpu& inst = treeCpuDataForThisFrame[ci];
+				DirectX::XMFLOAT4X4 w{};
+				DirectX::XMStoreFloat4x4(&w, inst.worldGpuT);
+
+				// NOTE: TreeInstanceCpu::worldGpuT is "GPU transposed" (see struct comment).
+				// Therefore translation lives in (m14,m24,m34) after transpose.
+				const float tx = w._14;
+				const float tz = w._34;
+				// LOD distance should be ground distance (XZ) not 3D distance (Y),
+				// because the camera often sits far above the ground.
+				const float dx = tx - treeCamPosForThisFrame.x;
+				const float dz = tz - treeCamPosForThisFrame.z;
+				const float d2 = dx * dx + dz * dz;
+
+				// Quantize XZ position to build a stable key (1m grid).
+				const int qx = static_cast<int>(floorf(tx));
+				const int qz = static_cast<int>(floorf(tz));
+				uint64_t key = 0;
+				key |= (static_cast<uint64_t>(static_cast<uint32_t>(qx)) & 0xFFFFFFFFull) << 32;
+				key |= (static_cast<uint64_t>(static_cast<uint32_t>(qz)) & 0xFFFFFFFFull);
+				key ^= static_cast<uint64_t>(inst.speciesIndex) * 0x9E3779B185EBCA87ull;
+
+				uint8_t prev = 2;
+				if (auto it = s_treeLodHistory.find(key); it != s_treeLodHistory.end())
+					prev = it->second;
+
+				uint8_t lod = prev;
+				// Transition rules with hysteresis bands
+				if (prev == 0)
+				{
+					if (d2 > lod0Out2)
+						lod = (d2 <= lod1In2) ? 1 : 2;
+				}
+				else if (prev == 1)
+				{
+					if (d2 <= lod0In2) lod = 0;
+					else if (d2 > lod1Out2) lod = 2;
+				}
+				else
+				{
+					if (d2 <= lod0In2) lod = 0;
+					else if (d2 <= lod1In2) lod = 1;
+					else lod = 2;
+				}
+
+				s_treeLodHistory[key] = lod;
+				lodCpu[lod].push_back(inst);
+			}
+
+			// Debug UI: record actual direct-instancing LOD split counts.
+			m_debugTreeDirectLodCount[0] = static_cast<uint32_t>(lodCpu[0].size());
+			m_debugTreeDirectLodCount[1] = static_cast<uint32_t>(lodCpu[1].size());
+			m_debugTreeDirectLodCount[2] = static_cast<uint32_t>(lodCpu[2].size());
+
+			for (int lod = 0; lod < 3; ++lod)
+			{
+				if (lodCpu[lod].empty())
+					continue;
+
+				s_treeGpuCull->UpdateInstances(commandList, lodCpu[lod].data(), static_cast<uint32_t>(lodCpu[lod].size()));
+
+				for (int part = 0; part < 3; ++part)
+				{
+					// Direct-instancing "visual LOD":
+					// - Only draw leaves in LOD0 (near). LOD1/2 skip leaves to reduce alpha-cut cost and avoid "always LOD0" look.
+					// - For LOD2, also skip branches (keep trunk only).
+					if (part == 1 && lod > 0)
+						continue;
+					if (part == 2 && lod > 1)
+						continue;
+
+					VertexBuffer* tvb = TreeVegetation::GetPartVertexBuffer(part);
+					IndexBuffer* tib = TreeVegetation::GetPartIndexBuffer(part);
+					const uint32_t tic = TreeVegetation::GetPartIndexCount(part);
+					if (!tvb || !tib || tic == 0)
+						continue;
+
+					PipelineState* drawPso = pipelineState;
+					if (part == 1 && treeLod1PipelineState && treeLod1PipelineState->IsValid())
+						drawPso = treeLod1PipelineState;
+
+					D3D12_GPU_DESCRIPTOR_HANDLE tmat = {};
+					if (part == 1)
+					{
+						if (const TreeSpeciesMaterials* sm0 = TreeVegetation::GetSpeciesMaterials(0); sm0 && sm0->matLod1)
+							tmat = sm0->matLod1->HandleGPU;
+					}
+					if (tmat.ptr == 0)
+					{
+						if (DescriptorHandle* pm = TreeVegetation::GetPartMaterialHandle(part))
+							tmat = pm->HandleGPU;
+					}
+
+					s_treeGpuCull->DrawDirectInstancedDebug(
+						commandList, rootSignature, drawPso,
+						sceneConstantBuffer[currentIndex]->GetAddress(),
+						pbrPropertyBuffer[currentIndex]->GetAddress(),
+						tmat, envHandle, tvb, tib, tic);
+				}
+			}
+		}
+		if (kEnableTreeExecuteIndirect)
+		{
+		for (int si = 0; si < 3; ++si)
+		{
+			const TreeSpeciesMaterials* sm = TreeVegetation::GetSpeciesMaterials(static_cast<size_t>(si));
+			for (int part = 0; part < 3; ++part)
+			{
+				// trunk/branches: species の LOD0 マテリアルを流用（後で species別の幹/枝マテに拡張）
+				D3D12_GPU_DESCRIPTOR_HANDLE m0 = (sm && sm->matLod0) ? sm->matLod0->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{};
+				D3D12_GPU_DESCRIPTOR_HANDLE m1 = (sm && sm->matLod1) ? sm->matLod1->HandleGPU : m0;
+				D3D12_GPU_DESCRIPTOR_HANDLE m2 = (sm && sm->matLod2) ? sm->matLod2->HandleGPU : m0;
+
+				// Safety fallback: species material missing -> use part-generic material.
+				if (m0.ptr == 0)
+				{
+					if (DescriptorHandle* pm = TreeVegetation::GetPartMaterialHandle(part))
+						m0 = pm->HandleGPU;
+				}
+				if (m1.ptr == 0)
+					m1 = m0;
+				if (m2.ptr == 0)
+					m2 = m1.ptr ? m1 : m0;
+
+				if (part == 1)
+				{
+					// leaves: alpha-cut 用に matLod1（t3=alpha）を優先
+					treeIndirectMats[si][part][0] = m1;
+					treeIndirectMats[si][part][1] = m1;
+					treeIndirectMats[si][part][2] = m2;
+				}
+				else
+				{
+					treeIndirectMats[si][part][0] = m0;
+					treeIndirectMats[si][part][1] = m0;
+					treeIndirectMats[si][part][2] = m0;
+				}
+			}
+		}
+		// species0(tree1): per-part materials from FBX submeshes
+		for (int lod = 0; lod < 3; ++lod)
+		{
+			for (int part = 0; part < 3; ++part)
+			{
+				if (DescriptorHandle* pm = TreeVegetation::GetPartMaterialHandle(part))
+					treeIndirectMats[0][part][lod] = pm->HandleGPU;
+			}
+		}
+
+		FillTreeIndexCountByPartByLod(treeIndirectIdx);
+		for (int part = 0; part < 3; ++part)
+		{
+			VertexBuffer* pvb = TreeVegetation::GetPartVertexBuffer(part);
+			IndexBuffer* pib = TreeVegetation::GetPartIndexBuffer(part);
+			for (int lod = 0; lod < 3; ++lod)
+			{
+				treeIndirectVb[part][lod] = pvb ? pvb : TreeVegetation::GetMergedVertexBufferLod(lod);
+				treeIndirectIb[part][lod] = pib ? pib : TreeVegetation::GetMergedIndexBufferLod(lod);
+			}
+		}
+		// vb[0][1] は常に LOD1 メッシュ。クワッドは DrawIndirectLods が vbImposterQuad を渡すときだけ使う。
+
+			treeIndirectPrepared = true;
+
+			// NOTE: Do not auto-fallback to direct instancing here.
+			// The debug visible counter is based on previous-frame readback and can be 0 on warm-up,
+			// and drawing even a sample can still distort perf measurements. Use explicit debug paths instead.
+		}
+	}
+	else if (!kDisableTreeGpuCullWork && s_treeGpuCull && s_treeGpuCull->IsValid())
+	{
+		Profiler::GpuMarkTreeDrawBegin(commandList);
+		Profiler::GpuMarkTreeDrawEnd(commandList);
+	}
 
 	if (useNprDrawPath)
 	{
@@ -1186,6 +1807,65 @@ void Scene::Draw()
 			dsvHandle,
 			camPos);
 		GPU_CMD_END_EVENT(commandList);
+	}
+
+	// 木: Post CL で UpdateInstances → DispatchCull → ExecuteIndirect を同一リストに記録（メインCLと分離しない）
+	if (treeIndirectPrepared && s_treeGpuCull && s_treeGpuCull->IsValid())
+	{
+		postCommandList->SetDescriptorHeaps(1, &materialHeap);
+		Profiler::GpuMarkTreeUploadCullBegin(postCommandList);
+		bool didTreeDispatchCullThisFrame = false;
+		const auto& treeInstForGpu = TreeVegetation::GetAllMaskInstancesCached();
+		if (hasStreamedTreesThisFrame && !treeInstForGpu.empty())
+		{
+			const uint64_t maskSerial = TreeVegetation::GetMaskInstancesBuildSerial();
+			if (!s_treeGpuMaskUploaded || s_treeGpuMaskLastUploadedCount != treeInstForGpu.size()
+				|| s_treeGpuMaskLastSerial != maskSerial)
+			{
+				s_treeGpuCull->UpdateInstances(
+					postCommandList,
+					reinterpret_cast<const TreeGpuCullSystem::TreeInstanceCpu*>(treeInstForGpu.data()),
+					static_cast<uint32_t>(treeInstForGpu.size()));
+				s_treeGpuMaskUploaded = true;
+				s_treeGpuMaskLastUploadedCount = treeInstForGpu.size();
+				s_treeGpuMaskLastSerial = maskSerial;
+			}
+			if (const SceneConstants* scGpu = sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetPtr<SceneConstants>() : nullptr)
+			{
+				// TreeFrustumHiZCull_CS の IndexCounts と DrawIndirectLods の idx は treeIndirectIdx と同一必須（上で Fill 済み）。
+				if (s_treeGpuCull->DispatchCull(
+					postCommandList,
+					scGpu,
+					treeIndirectIdx,
+					treeCamPosForThisFrame))
+					didTreeDispatchCullThisFrame = true;
+			}
+		}
+		Profiler::GpuMarkTreeUploadCullEnd(postCommandList);
+		if (didTreeDispatchCullThisFrame)
+		{
+			RenderSystem::DrawPostScenePbrTreesExecuteIndirect(
+				postCommandList,
+				materialHeap,
+				hdrRtvHandle,
+				dsvHandle,
+				s_treeGpuCull,
+				rootSignature,
+				treeOpaquePipelineState ? treeOpaquePipelineState : pipelineState,
+				treeLod1PipelineState,
+				(treeImposterPipelineState && treeImposterPipelineState->IsValid()) ? treeImposterPipelineState : nullptr,
+				nullptr,
+				sceneConstantBuffer[currentIndex]->GetAddress(),
+				pbrPropertyBuffer[currentIndex]->GetAddress(),
+				treeIndirectMats,
+				s_treeImposterMatGpu,
+				envHandle,
+				treeIndirectVb,
+				treeIndirectIb,
+				treeIndirectIdx,
+				s_treeImposterQuadVb,
+				s_treeImposterQuadIb);
+		}
 	}
 
 	if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
@@ -1228,5 +1908,7 @@ void Scene::Draw()
 			splitNprPost);
 		GPU_CMD_END_EVENT(postCommandList);
 	}
+	// 木 GPU（TreeGpuCull）未初期化のフレームでは 10..13 に EndQuery が無く、ResolveQueryData が失敗する。
+	Profiler::EnsureTreeGpuStampPlaceholders(postCommandList);
 	Profiler::GpuMarkPostProcessEndAndResolve(postCommandList);
 }

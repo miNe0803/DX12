@@ -31,6 +31,10 @@ void ProfilerWindow::Draw(bool* pOpen)
 		ImGui::Text("  - GPU Terrain color pass: %.2f ms", latest.gpuTerrainColorMs);
 		ImGui::Text("GPU Hi-Z Build: %.2f ms", latest.gpuHiZBuildMs);
 		ImGui::Text("GPU PostProcess: %.2f ms", latest.gpuPostProcessMs);
+		ImGui::Text("GPU Tree upload+cull (CS): %.2f ms", latest.gpuTreeUploadCullMs);
+		ImGui::Text("GPU Tree draw (ExecuteIndirect): %.2f ms", latest.gpuTreeDrawMs);
+		ImGui::Text("GPU (sum of tagged passes): %.2f ms", latest.gpuTaggedPassesSumMs);
+		ImGui::TextDisabled("    (上記以外のキュー処理・ドライバオーバーヘッドは含みません)");
 		ImGui::Text("Total Draw Calls: %u", latest.render.totalDrawCalls);
 		ImGui::Text("PBR Instances: %u", latest.render.pbrInstancesDrawn);
 		ImGui::Separator();

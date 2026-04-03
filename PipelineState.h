@@ -18,6 +18,8 @@ public:
 	void SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask);
 	void SetDepthFunc(D3D12_COMPARISON_FUNC func);
 	void SetNumRenderTargets(UINT numRenderTargets);
+	/// RTV0 のフォーマット（ベイク用に R8G8B8A8_UNORM 等へ変更する場合。Create 前に呼ぶ）
+	void SetRenderTargetFormat(DXGI_FORMAT fmt);
 	void SetAlphaBlendPremultiplied();
 	void Create(); // ?p?C?v???C???X?e?[?g???
 	static void WarmupShaderBytecode(const std::vector<std::wstring>& shaderPaths);
