@@ -33,6 +33,8 @@
 #include "Graphics/TerrainGpuCullSystem.h"
 #include "Graphics/HiZSystem.h"
 #include "Graphics/TreeGpuCullSystem.h"
+#include "Graphics/ShadowSystem.h"
+#include "Graphics/AtmosphereSystem.h"
 #include "Graphics/TreeVegetation.h"
 #include "Graphics/TreeImposterBake.h"
 #include "ComPtr.h"
@@ -55,6 +57,9 @@ namespace fs = std::filesystem;
 static HiZSystem* s_hiz = nullptr;
 static TerrainGpuCullSystem* s_terrainGpuCull = nullptr;
 static TreeGpuCullSystem* s_treeGpuCull = nullptr;
+static ShadowSystem* s_shadow = nullptr;
+static AtmosphereSystem* s_atmosphere = nullptr;
+static AtmosphereParams s_atmosphereParams;
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -339,6 +344,8 @@ Scene::~Scene()
 	s_terrainGpuCull = nullptr;
 	delete s_treeGpuCull;
 	s_treeGpuCull = nullptr;
+	if (s_shadow) { s_shadow->Shutdown(); delete s_shadow; s_shadow = nullptr; }
+	if (s_atmosphere) { s_atmosphere->Shutdown(); delete s_atmosphere; s_atmosphere = nullptr; }
 
 	s_hdrSrvHandle = nullptr;
 	s_envCubemapHandle = nullptr;
@@ -1106,6 +1113,39 @@ bool Scene::InitSkyboxAndIBL()
 	return true;
 }
 
+bool Scene::InitShadowSystem()
+{
+	if (!g_Engine || !descriptorHeap) return true;
+	s_shadow = new ShadowSystem();
+	if (!s_shadow->Init(g_Engine->Device(), descriptorHeap))
+	{
+		delete s_shadow;
+		s_shadow = nullptr;
+		DebugLog("[Shadow] ShadowSystem::Init failed. Shadows disabled.\n");
+	}
+	else
+		DebugLog("[Shadow] ShadowSystem::Init OK (%ux%u, %u cascades).\n",
+			ShadowSystem::kShadowMapSize, ShadowSystem::kShadowMapSize, ShadowSystem::kCascadeCount);
+	return true;
+}
+
+bool Scene::InitAtmosphereSystem()
+{
+	if (!g_Engine || !descriptorHeap) return true;
+	s_atmosphere = new AtmosphereSystem();
+	if (!s_atmosphere->Init(g_Engine->Device(), descriptorHeap,
+		g_Engine->GetFrameBufferWidth(), g_Engine->GetFrameBufferHeight(),
+		g_Engine->GetDepthStencilResource()))
+	{
+		delete s_atmosphere;
+		s_atmosphere = nullptr;
+		DebugLog("[Atmosphere] AtmosphereSystem::Init failed. Fog/volumetric disabled.\n");
+	}
+	else
+		DebugLog("[Atmosphere] AtmosphereSystem::Init OK.\n");
+	return true;
+}
+
 bool Scene::InitPostProcess()
 {
 	s_postProcessSettings.gamma = 2.2f;
@@ -1210,6 +1250,12 @@ bool Scene::Init()
 
 	TryEnsureTreeImposterBake();
 
+	if (!InitShadowSystem())
+		return false;
+
+	if (!InitAtmosphereSystem())
+		return false;
+
 	if (!InitPostProcess())
 		return false;
 
@@ -1253,6 +1299,21 @@ TerrainGpuCullSystem* Scene::GetTerrainGpuCullSystem() const
 TreeGpuCullSystem* Scene::GetTreeGpuCullSystem() const
 {
 	return s_treeGpuCull;
+}
+
+ShadowSystem* Scene::GetShadowSystem() const
+{
+	return s_shadow;
+}
+
+AtmosphereParams& Scene::GetAtmosphereParams()
+{
+	return s_atmosphereParams;
+}
+
+const AtmosphereParams& Scene::GetAtmosphereParams() const
+{
+	return s_atmosphereParams;
 }
 
 void Scene::GetDebugTreeDirectLodCounts(uint32_t& outLod0, uint32_t& outLod1, uint32_t& outLod2) const
@@ -1342,10 +1403,25 @@ void Scene::Update()
 		return;
 
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
-	sc->View = XMMatrixTranspose(g_Camera->GetViewMatrix());
-	sc->Proj = XMMatrixTranspose(g_Camera->GetProjectionMatrix(aspect));
+	XMMATRIX viewMat = g_Camera->GetViewMatrix();
+	XMMATRIX projMat = g_Camera->GetProjectionMatrix(aspect);
+	sc->View = XMMatrixTranspose(viewMat);
+	sc->Proj = XMMatrixTranspose(projMat);
 	XMStoreFloat4(&sc->CameraWorld, g_Camera->GetPosition());
 	sc->CameraWorld.w = 1.f;
+
+	XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.5f, 0.7f, -1.0f, 0.0f));
+	XMStoreFloat4(&sc->SunDirection, sunDir);
+	sc->SunDirection.w = 1.0f;
+	sc->SunColor = XMFLOAT4(1.2f, 1.2f, 1.2f, 1.0f);
+	sc->InvViewProj = XMMatrixTranspose(XMMatrixInverse(nullptr, viewMat * projMat));
+
+	if (s_shadow && s_shadow->IsValid())
+	{
+		XMFLOAT3 sunDirF3;
+		XMStoreFloat3(&sunDirF3, sunDir);
+		s_shadow->UpdateCascades(viewMat, projMat, sunDirF3, 0.1f, 500.0f);
+	}
 
 	// Terrain DrawMain reads SceneConstants; keep slot0 in sync for any legacy readers.
 	auto currentTransform = constantBuffer[currentIndex]->GetPtr<Transform>();
@@ -1436,6 +1512,74 @@ void Scene::Draw()
 			D3D12_RESOURCE_STATE_RENDER_TARGET);
 	}
 
+	// ---- Shadow Pass: render depth from light viewpoint ----
+	if (s_shadow && s_shadow->IsValid())
+	{
+		GPU_CMD_BEGIN_EVENT(commandList, 60, 60, 60, L"Shadow Pass (CSM)");
+		s_shadow->ResetPerDrawRing();
+
+		for (UINT cascade = 0; cascade < ShadowSystem::kCascadeCount; ++cascade)
+		{
+			s_shadow->BeginShadowPass(commandList, cascade);
+			commandList->SetPipelineState(s_shadow->GetShadowPSO());
+			commandList->SetGraphicsRootSignature(s_shadow->GetShadowRootSignature());
+			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+			XMMATRIX lightVP = s_shadow->GetLightVPTransposed(cascade);
+			lightVP = XMMatrixTranspose(lightVP);
+
+			auto view = m_registry.view<TransformComponent, MeshRendererComponent>();
+			for (auto entity : view)
+			{
+				auto& mr = view.get<MeshRendererComponent>(entity);
+				if (!mr.pVB || !mr.pIB || mr.IndexCount == 0) continue;
+				if (m_registry.any_of<TerrainMeshTag>(entity)) continue;
+
+				auto& tc = view.get<TransformComponent>(entity);
+				XMMATRIX world = tc.WorldMatrix;
+				XMMATRIX wlvp = world * lightVP;
+
+				D3D12_GPU_VIRTUAL_ADDRESS cbAddr = s_shadow->WritePerDrawCB(wlvp);
+				if (cbAddr == 0) break;
+
+				commandList->SetGraphicsRootConstantBufferView(0, cbAddr);
+				auto vbView = mr.pVB->View();
+				auto ibView = mr.pIB->View();
+				commandList->IASetVertexBuffers(0, 1, &vbView);
+				commandList->IASetIndexBuffer(&ibView);
+				commandList->DrawIndexedInstanced(mr.IndexCount, 1, mr.StartIndexLocation, 0, 0);
+			}
+
+			// Tree shadows: limited cascade count + capped instance count
+			if (s_treeGpuCull && s_treeGpuCull->IsValid() && s_shadow->HasTreeShadowPipeline()
+				&& s_treeGpuCull->GetInstanceCount() > 0
+				&& s_atmosphereParams.enableTreeShadows
+				&& cascade < static_cast<UINT>(s_atmosphereParams.treeShadowCascades))
+			{
+				VertexBuffer* treeVb = TreeVegetation::GetMergedVertexBufferLod(0);
+				IndexBuffer* treeIb = TreeVegetation::GetMergedIndexBufferLod(0);
+				uint32_t treeIdxCount = TreeVegetation::GetMergedIndexCountLod(0);
+				UINT drawCount = std::min(s_treeGpuCull->GetInstanceCount(),
+					static_cast<uint32_t>(s_atmosphereParams.treeShadowMaxInstances));
+				s_shadow->DrawTreeShadows(
+					commandList, cascade,
+					s_treeGpuCull->GetInstanceDataResource(),
+					drawCount,
+					treeVb, treeIb, treeIdxCount);
+			}
+
+			s_shadow->EndShadowPass(commandList, cascade);
+		}
+
+		s_shadow->TransitionToSRV(commandList);
+		GPU_CMD_END_EVENT(commandList);
+
+		// Restore main viewport/scissor after shadow pass
+		commandList->RSSetViewports(1, &g_Engine->GetViewport());
+		commandList->RSSetScissorRects(1, &g_Engine->GetScissorRect());
+	}
+
+	// ---- Main forward pass ----
 	D3D12_CPU_DESCRIPTOR_HANDLE hdrRtvHandle = g_Engine->GetHdrRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE nprHdrRtvHandle = g_Engine->GetNprHdrRtvCpuHandle();
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_Engine->GetDsvCpuHandle();
@@ -1457,6 +1601,13 @@ void Scene::Draw()
 	commandList->SetDescriptorHeaps(1, &materialHeap);
 	commandList->SetGraphicsRootSignature(rootSignature->Get());
 	commandList->SetPipelineState(pipelineState->Get());
+
+	// Bind shadow resources on PBR root signature slots 7, 8 (space2)
+	if (s_shadow && s_shadow->IsValid())
+	{
+		commandList->SetGraphicsRootDescriptorTable(7, s_shadow->GetShadowMapSrvGpu());
+		commandList->SetGraphicsRootConstantBufferView(8, s_shadow->GetShadowCBAddress());
+	}
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
@@ -1882,6 +2033,34 @@ void Scene::Draw()
 		Profiler::GpuMarkHiZBuildBegin(postCommandList);
 		s_hiz->Build(postCommandList, g_Engine->GetDepthStencilResource());
 		Profiler::GpuMarkHiZBuildEnd(postCommandList);
+	}
+
+	// ---- Atmosphere: fog + volumetric light (before bloom/tonemap) ----
+	if (s_atmosphere && s_atmosphere->IsValid() &&
+		(s_atmosphereParams.enableFog || s_atmosphereParams.enableVolumetric))
+	{
+		ID3D12Resource* hdrRes = g_Engine->GetHdrColorResource();
+		ID3D12Resource* depthRes = g_Engine->GetDepthStencilResource();
+
+		XMMATRIX invVP = XMMatrixInverse(nullptr, g_Camera->GetViewMatrix()
+			* g_Camera->GetProjectionMatrix(static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT)));
+		XMFLOAT3 camPos;
+		XMStoreFloat3(&camPos, g_Camera->GetPosition());
+		XMFLOAT3 sunDirF;
+		{
+			auto* sc = sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetPtr<SceneConstants>() : nullptr;
+			sunDirF = sc ? XMFLOAT3(sc->SunDirection.x, sc->SunDirection.y, sc->SunDirection.z) : XMFLOAT3(0.5f, 0.7f, -1.0f);
+		}
+
+		s_atmosphere->Execute(postCommandList, materialHeap,
+			s_hdrSrvHandle ? s_hdrSrvHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{0},
+			g_Engine->GetHdrRtvCpuHandle(),
+			hdrRes, depthRes,
+			s_shadow,
+			invVP, camPos, sunDirF,
+			XMFLOAT4(1.2f, 1.2f, 1.2f, 1.0f),
+			g_Engine->CurrentBackBufferIndex(),
+			s_atmosphereParams);
 	}
 
 	Profiler::GpuMarkPostProcessBegin(postCommandList);

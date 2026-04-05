@@ -141,6 +141,9 @@ public:
 	/// 直近の DrawIndirectLods で発行した ExecuteIndirect 呼び出し数（デバッグ統計用）
 	uint32_t GetLastDrawIndirectBatchCount() const { return m_lastDrawIndirectBatchCount; }
 
+	/// GPU instance data buffer (all species, for shadow pass etc.)
+	ID3D12Resource* GetInstanceDataResource() const { return m_instanceDataDefault.Get(); }
+
 private:
 	bool CreatePipelines(ID3D12Device* device);
 	bool CreateIndirectCommandSignature(ID3D12Device* device, ID3D12RootSignature* pbrRootSignature);

@@ -56,6 +56,9 @@ struct alignas(256) SceneConstants {
     DirectX::XMMATRIX View;
     DirectX::XMMATRIX Proj;
     DirectX::XMFLOAT4 CameraWorld; // .xyz = world position, .w 未使用
+    DirectX::XMFLOAT4 SunDirection; // .xyz = normalised direction TO the light, .w = intensity
+    DirectX::XMFLOAT4 SunColor;    // .rgb = colour, .a = unused
+    DirectX::XMMATRIX InvViewProj;  // depth → world reconstruction (column-major for HLSL)
 };
 
 struct alignas(256) Transform {

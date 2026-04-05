@@ -190,6 +190,8 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClInclude Include="Source\Graphics\SkyboxRenderer.h" />
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
     <ClInclude Include="Source\Graphics\HiZSystem.h" />
+    <ClInclude Include="Source\Graphics\ShadowSystem.h" />
+    <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
     <ClInclude Include="Engine\ECS\Components.h" />
@@ -221,6 +223,8 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     </ClCompile>
     <ClCompile Include="Source\Graphics\IBLGenerator.cpp" />
     <ClCompile Include="Source\Graphics\HiZSystem.cpp" />
+    <ClCompile Include="Source\Graphics\ShadowSystem.cpp" />
+    <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeImposterBake.cpp" />
@@ -507,6 +511,54 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
       <ObjectFileName>$(OutDir)TreeImposterPS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Shadow\ShadowPass_VS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)ShadowPass_VS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Atmospheric\Volumetric_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Volumetric_CS.cso</ObjectFileName>
+      <AdditionalIncludeDirectories>$(ProjectDir)Shaders\Atmospheric</AdditionalIncludeDirectories>
+    </FxCompile>
+    <FxCompile Include="Shaders\Atmospheric\FogComposite_PS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)FogComposite_PS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Atmospheric\Temporal_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Temporal_CS.cso</ObjectFileName>
+      <AdditionalIncludeDirectories>$(ProjectDir)Shaders\Atmospheric</AdditionalIncludeDirectories>
+    </FxCompile>
+    <FxCompile Include="Shaders\Shadow\TreeShadowPass_VS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeShadowPass_VS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Shadow\TreeShadowAlphaTest_PS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TreeShadowAlphaTest_PS.cso</ObjectFileName>
     </FxCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

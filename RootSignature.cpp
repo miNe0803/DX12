@@ -9,8 +9,8 @@ RootSignature::RootSignature(bool forTerrain)
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
-	CD3DX12_ROOT_PARAMETER rootParam[7] = {};
-	CD3DX12_DESCRIPTOR_RANGE tableRange[2] = {};
+	CD3DX12_ROOT_PARAMETER rootParam[10] = {};
+	CD3DX12_DESCRIPTOR_RANGE tableRange[4] = {};
 
 	if (forTerrain)
 	{
@@ -74,14 +74,30 @@ RootSignature::RootSignature(bool forTerrain)
 	// - Root constants b2 space1 (8x32-bit): VisibleBase + インポスター用 footLocal(xyz)+halfW+height（float を uint ビットで）
 	rootParam[5].InitAsShaderResourceView(1, 1, D3D12_SHADER_VISIBILITY_VERTEX);
 	rootParam[6].InitAsConstants(8, 2, 1, D3D12_SHADER_VISIBILITY_VERTEX);
+	// Shadow mapping (space2): shadow map SRV + shadow constant buffer
+	tableRange[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2); // t0, space2
+	rootParam[7].InitAsDescriptorTable(1, &tableRange[2], D3D12_SHADER_VISIBILITY_PIXEL);
+	rootParam[8].InitAsConstantBufferView(1, 2, D3D12_SHADER_VISIBILITY_PIXEL); // b1, space2
 
-	auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+	D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+	samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+	// PCF comparison sampler for shadow mapping
+	samplers[1] = {};
+	samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	samplers[1].ShaderRegister = 1;
+	samplers[1].RegisterSpace = 2;
+	samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 	D3D12_ROOT_SIGNATURE_DESC desc = {};
-	desc.NumParameters = 7;
-	desc.NumStaticSamplers = 1;
+	desc.NumParameters = 9;
+	desc.NumStaticSamplers = 2;
 	desc.pParameters = rootParam;
-	desc.pStaticSamplers = &sampler;
+	desc.pStaticSamplers = samplers;
 	desc.Flags = flag;
 
 	ComPtr<ID3DBlob> pBlob;

@@ -14,6 +14,9 @@ struct ModelBounds;
 class HiZSystem;
 class TerrainGpuCullSystem;
 class TreeGpuCullSystem;
+class ShadowSystem;
+class AtmosphereSystem;
+struct AtmosphereParams;
 
 class Scene
 {
@@ -49,6 +52,9 @@ public:
 	HiZSystem* GetHiZSystem() const;
 	TerrainGpuCullSystem* GetTerrainGpuCullSystem() const;
 	TreeGpuCullSystem* GetTreeGpuCullSystem() const;
+	ShadowSystem* GetShadowSystem() const;
+	AtmosphereParams& GetAtmosphereParams();
+	const AtmosphereParams& GetAtmosphereParams() const;
 	// Direct-instancing tree debug: actual per-frame LOD split counts (not ECS LODComponent).
 	void GetDebugTreeDirectLodCounts(uint32_t& outLod0, uint32_t& outLod1, uint32_t& outLod2) const;
 
@@ -70,6 +76,8 @@ private:
 	bool InitMainPipeline();
 	bool InitSkyboxAndIBL();
 	bool InitPostProcess();
+	bool InitShadowSystem();
+	bool InitAtmosphereSystem();
 	/// LOD0 が非同期で後から揃う場合に、初回だけインポスターアトラスをベイクする。
 	void TryEnsureTreeImposterBake();
 	/// LOD0 メッシュが揃った後に TreeGpuCullSystem を一度だけ確保する。

@@ -54,6 +54,8 @@ public:
 	ID3D12Resource* GetDepthStencilResource() const { return m_pDepthStencilBuffer.Get(); }
 	UINT GetFrameBufferWidth() const { return m_FrameBufferWidth; }
 	UINT GetFrameBufferHeight() const { return m_FrameBufferHeight; }
+	const D3D12_VIEWPORT& GetViewport() const { return m_Viewport; }
+	const D3D12_RECT& GetScissorRect() const { return m_Scissor; }
 
 private:
 	bool CreateDevice();

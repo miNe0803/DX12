@@ -22,6 +22,16 @@ TextureCube _PrefilterEnv  : register(t6, space0);
 TextureCube _IrradianceMap : register(t7, space0);
 Texture2D _BrdfLut         : register(t8, space0);
 
+cbuffer SceneCB : register(b0, space0)
+{
+    matrix View;
+    matrix Proj;
+    float4 CameraWorld;
+    float4 SunDirection; // .xyz = normalised dir TO light, .w = intensity
+    float4 SunColor;     // .rgb
+    matrix InvViewProj;
+};
+
 cbuffer MaterialParams : register(b1, space0)
 {
     float4 RimParams;
@@ -30,6 +40,49 @@ cbuffer MaterialParams : register(b1, space0)
     float4 NprTuning2;
     float4 NprDebugHdr;
 };
+
+// Shadow mapping (space2)
+Texture2DArray _ShadowMap : register(t0, space2);
+SamplerComparisonState shadowSampler : register(s1, space2);
+
+cbuffer ShadowCB : register(b1, space2)
+{
+    matrix LightVP[3]; // per-cascade
+    float4 CascadeSplits;
+};
+
+static const float kShadowBias = 0.001;
+
+float SampleShadowPCF(float3 worldPos, float viewDepth)
+{
+    uint cascade = 2;
+    if (viewDepth < CascadeSplits.x) cascade = 0;
+    else if (viewDepth < CascadeSplits.y) cascade = 1;
+
+    float4 lightClip = mul(float4(worldPos, 1.0), LightVP[cascade]);
+    float3 projCoord = lightClip.xyz / lightClip.w;
+    float2 shadowUV = projCoord.xy * 0.5 + 0.5;
+    shadowUV.y = 1.0 - shadowUV.y;
+
+    if (shadowUV.x < 0 || shadowUV.x > 1 || shadowUV.y < 0 || shadowUV.y > 1)
+        return 1.0;
+
+    float compareDepth = projCoord.z - kShadowBias;
+
+    // 3x3 PCF
+    float shadow = 0;
+    const float texelSize = 1.0 / 2048.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        float2 offset = float2(x, y) * texelSize;
+        shadow += _ShadowMap.SampleCmpLevelZero(
+            shadowSampler,
+            float3(shadowUV + offset, (float)cascade),
+            compareDepth);
+    }
+    return shadow / 9.0;
+}
 
 // --- [Pixel shader main] ---
 float4 main(VSOutput input) : SV_TARGET
@@ -81,11 +134,13 @@ float4 main(VSOutput input) : SV_TARGET
     float3 normalTS = normalize(float3(0, 0, 1) + (decodedNormal - float3(0, 0, 1)) * nScale);
     float3 worldNormal = normalize(mul(normalTS, TBN));
 
-    // 4. Direct lighting
-    float3 L = normalize(float3(0.5, 0.7, -1.0));
-    float3 LightColor = float3(1.2, 1.2, 1.2);
+    // 4. Direct lighting (data-driven from SceneCB) + shadow
+    float3 L = normalize(SunDirection.xyz);
+    float3 LightColor = SunColor.rgb;
     float diffuseFactor = max(dot(worldNormal, L), 0.0);
-    float3 directLight = albedo.rgb * diffuseFactor * LightColor;
+    float4 viewPos = mul(float4(input.worldPos, 1.0), View);
+    float shadowFactor = SampleShadowPCF(input.worldPos, viewPos.z);
+    float3 directLight = albedo.rgb * diffuseFactor * LightColor * shadowFactor;
 
     // 事前準備: 視線・F0・フレネル
     float3 V = normalize(CameraPos.xyz - input.worldPos);

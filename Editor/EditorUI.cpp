@@ -12,6 +12,7 @@
 
 #include "Core/ModelSpawnOptions.h"
 #include "Scene.h"
+#include "Graphics/AtmosphereSystem.h"
 #include "Engine/Core/AsyncModelLoader.h"
 #include "Engine/ECS/Components.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
@@ -180,7 +181,34 @@ void EditorUI::DrawWindows(entt::registry& registry)
 	if (m_State.showAtmosphere)
 	{
 		if (ImGui::Begin("Atmosphere && Skybox", &m_State.showAtmosphere))
-			ImGui::TextUnformatted("Fog distance and IBL intensity controls will go here.");
+		{
+			if (g_Scene)
+			{
+				AtmosphereParams& ap = g_Scene->GetAtmosphereParams();
+				ImGui::Checkbox("Enable Fog", &ap.enableFog);
+				ImGui::Checkbox("Enable Volumetric Light", &ap.enableVolumetric);
+				ImGui::Separator();
+				ImGui::SliderFloat("Fog Density", &ap.fogDensity, 0.0f, 0.05f, "%.4f");
+				ImGui::SliderFloat("Height Falloff", &ap.heightFalloff, 0.0f, 0.05f, "%.5f");
+				ImGui::SliderFloat("Base Height", &ap.baseHeight, -200.0f, 500.0f);
+				ImGui::SliderFloat("Max Fog Distance", &ap.maxFogDistance, 100.0f, 5000.0f);
+				ImGui::SliderFloat("Scattering G (Anisotropy)", &ap.scatteringG, -0.9f, 0.99f);
+				ImGui::ColorEdit3("Fog Color", &ap.fogColorR);
+				ImGui::Separator();
+				ImGui::Checkbox("Temporal Reprojection", &ap.enableTemporal);
+				if (ap.enableTemporal)
+					ImGui::SliderFloat("Temporal Blend", &ap.temporalBlend, 0.01f, 0.5f, "%.3f");
+				ImGui::Separator();
+				ImGui::Checkbox("Tree Shadows", &ap.enableTreeShadows);
+				if (ap.enableTreeShadows)
+				{
+					ImGui::SliderInt("Tree Shadow Cascades", &ap.treeShadowCascades, 1, 3);
+					ImGui::SliderInt("Tree Shadow Max Instances", &ap.treeShadowMaxInstances, 512, 16384);
+				}
+			}
+			else
+				ImGui::TextUnformatted("Scene not loaded.");
+		}
 		ImGui::End();
 	}
 
