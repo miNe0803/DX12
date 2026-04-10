@@ -225,6 +225,89 @@ void PipelineState::WarmupShaderBytecode(const std::vector<std::wstring>& shader
 	}
 }
 
+void PipelineState::SetAS(std::wstring filePath)
+{
+	m_asPath = std::move(filePath);
+	m_pAsBlob = LoadShaderBlobCached(m_asPath);
+	if (!m_pAsBlob) printf("AS load failed: %ls\n", m_asPath.c_str());
+}
+
+void PipelineState::SetMS(std::wstring filePath)
+{
+	m_msPath = std::move(filePath);
+	m_pMsBlob = LoadShaderBlobCached(m_msPath);
+	if (!m_pMsBlob) printf("MS load failed: %ls\n", m_msPath.c_str());
+}
+
+void PipelineState::CreateMeshPipeline()
+{
+	if (!m_pMsBlob) { printf("PipelineState::CreateMeshPipeline: MS not loaded\n"); return; }
+
+	// Use D3D12_PIPELINE_STATE_STREAM for Mesh Shader PSO
+	struct MeshPipelineStream {
+		CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE        RootSignature;
+		CD3DX12_PIPELINE_STATE_STREAM_AS                    AS;
+		CD3DX12_PIPELINE_STATE_STREAM_MS                    MS;
+		CD3DX12_PIPELINE_STATE_STREAM_PS                    PS;
+		CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER            Rasterizer;
+		CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC            Blend;
+		CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL         DepthStencil;
+		CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT  DSVFormat;
+		CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+		CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC           SampleDesc;
+		CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK           SampleMask;
+	} stream = {};
+
+	stream.RootSignature = desc.pRootSignature;
+
+	if (m_pAsBlob)
+		stream.AS = CD3DX12_SHADER_BYTECODE(m_pAsBlob.Get());
+	stream.MS = CD3DX12_SHADER_BYTECODE(m_pMsBlob.Get());
+	if (m_pPSBlob)
+		stream.PS = CD3DX12_SHADER_BYTECODE(m_pPSBlob.Get());
+
+	stream.Rasterizer = CD3DX12_RASTERIZER_DESC(desc.RasterizerState);
+	stream.Blend = CD3DX12_BLEND_DESC(desc.BlendState);
+	stream.DepthStencil = CD3DX12_DEPTH_STENCIL_DESC(desc.DepthStencilState);
+	stream.DSVFormat = desc.DSVFormat;
+	stream.SampleMask = desc.SampleMask;
+
+	D3D12_RT_FORMAT_ARRAY rtvArray = {};
+	rtvArray.NumRenderTargets = desc.NumRenderTargets;
+	for (UINT i = 0; i < desc.NumRenderTargets; ++i)
+		rtvArray.RTFormats[i] = desc.RTVFormats[i];
+	stream.RTVFormats = rtvArray;
+
+	stream.SampleDesc = DXGI_SAMPLE_DESC{ desc.SampleDesc.Count, desc.SampleDesc.Quality };
+
+	D3D12_PIPELINE_STATE_STREAM_DESC streamDesc = {};
+	streamDesc.SizeInBytes = sizeof(stream);
+	streamDesc.pPipelineStateSubobjectStream = &stream;
+
+	auto hr = g_Engine->Device()->CreatePipelineState(&streamDesc,
+		IID_PPV_ARGS(m_pPipelineState.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+	{
+		printf("PipelineState::CreateMeshPipeline failed: 0x%08X\n", hr);
+		return;
+	}
+
+	{
+		std::wstring label = L"PSO:MS|";
+		label += ShaderFileBase(m_asPath.empty() ? L"noAS" : m_asPath);
+		label += L'|';
+		label += ShaderFileBase(m_msPath);
+		if (!m_psPath.empty()) { label += L'|'; label += ShaderFileBase(m_psPath); }
+		GPU_SET_NAME(m_pPipelineState.Get(), label.c_str());
+	}
+
+	m_IsValid = true;
+	printf("MeshShader PSO created: AS=%ls MS=%ls PS=%ls\n",
+		m_asPath.empty() ? L"none" : m_asPath.c_str(),
+		m_msPath.c_str(),
+		m_psPath.empty() ? L"none" : m_psPath.c_str());
+}
+
 ID3D12PipelineState* PipelineState::Get()
 {
 	return m_pPipelineState.Get();

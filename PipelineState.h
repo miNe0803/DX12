@@ -7,32 +7,42 @@
 class PipelineState
 {
 public:
-	PipelineState(); // ?R???X?g???N?^???????x?????????
-	bool IsValid(); // ????????????????????????
+	PipelineState();
+	bool IsValid();
 
-	void SetInputLayout(D3D12_INPUT_LAYOUT_DESC layout); // ??????C?A?E?g????
-	void SetRootSignature(ID3D12RootSignature* rootSignature); // ???[?g?V?O?l?`??????
-	void SetVS(std::wstring filePath); // ???_?V?F?[?_?[????
-	void SetPS(std::wstring filePath); // ?s?N?Z???V?F?[?_?[????
+	// --- Traditional IA pipeline (VS/PS) ---
+	void SetInputLayout(D3D12_INPUT_LAYOUT_DESC layout);
+	void SetRootSignature(ID3D12RootSignature* rootSignature);
+	void SetVS(std::wstring filePath);
+	void SetPS(std::wstring filePath);
 	void SetCullMode(D3D12_CULL_MODE mode);
 	void SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask);
 	void SetDepthFunc(D3D12_COMPARISON_FUNC func);
 	void SetNumRenderTargets(UINT numRenderTargets);
-	/// RTV0 のフォーマット（ベイク用に R8G8B8A8_UNORM 等へ変更する場合。Create 前に呼ぶ）
 	void SetRenderTargetFormat(DXGI_FORMAT fmt);
 	void SetAlphaBlendPremultiplied();
-	void Create(); // ?p?C?v???C???X?e?[?g???
+	void Create();
 	static void WarmupShaderBytecode(const std::vector<std::wstring>& shaderPaths);
+
+	// --- Mesh Shader pipeline (AS/MS/PS) ---
+	void SetAS(std::wstring filePath);
+	void SetMS(std::wstring filePath);
+	/// Create a Mesh Shader PSO using Pipeline State Stream.
+	/// Requires AS and MS set; PS is optional (depth-only if omitted).
+	void CreateMeshPipeline();
 
 	ID3D12PipelineState* Get();
 
 private:
-	bool m_IsValid = false; // ????????????????????
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {}; // ?p?C?v???C???X?e?[?g????
-	ComPtr<ID3D12PipelineState> m_pPipelineState = nullptr; // ?p?C?v???C???X?e?[?g
-	ComPtr<ID3DBlob> m_pVsBlob; // ???_?V?F?[?_?[
-	ComPtr<ID3DBlob> m_pPSBlob; // ?s?N?Z???V?F?[?_?[
+	bool m_IsValid = false;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+	ComPtr<ID3D12PipelineState> m_pPipelineState = nullptr;
+	ComPtr<ID3DBlob> m_pVsBlob;
+	ComPtr<ID3DBlob> m_pPSBlob;
+	ComPtr<ID3DBlob> m_pAsBlob;
+	ComPtr<ID3DBlob> m_pMsBlob;
 	std::wstring m_vsPath;
 	std::wstring m_psPath;
+	std::wstring m_asPath;
+	std::wstring m_msPath;
 };
-
