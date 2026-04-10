@@ -1,8 +1,105 @@
 #include "RootSignature.h"
 #include "Engine.h"
 #include <d3dx12.h>
+#include <stdio.h>
 
+// ----- Legacy constructor (backward compat) -----
 RootSignature::RootSignature(bool forTerrain)
+{
+	CreateLegacy(forTerrain);
+}
+
+// ----- Typed constructor -----
+RootSignature::RootSignature(RootSigType type)
+{
+	switch (type)
+	{
+	case RootSigType::PbrLegacy:      CreateLegacy(false); break;
+	case RootSigType::TerrainLegacy:  CreateLegacy(true);  break;
+	case RootSigType::Bindless:       CreateBindless(false); break;
+	case RootSigType::TerrainBindless: CreateBindless(true); break;
+	}
+}
+
+// =====================================================================
+// Bindless root signature (SM6.6 ResourceDescriptorHeap)
+// =====================================================================
+void RootSignature::CreateBindless(bool forTerrain)
+{
+	CD3DX12_ROOT_PARAMETER1 rootParam[4] = {};
+
+	// Param 0: Root CBV b0 s0 — SceneConstants
+	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, D3D12_SHADER_VISIBILITY_ALL);
+	// Param 1: Root CBV b1 s0 — ShadowConstants (PBR) or TerrainConstants (Terrain)
+	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, D3D12_SHADER_VISIBILITY_ALL);
+	// Param 2: Root 32-bit constants b2 s0 — 4 DWORDs (materialBufSrvIdx, instanceBufSrvIdx, drawID, reserved)
+	rootParam[2].InitAsConstants(4, 2, 0, D3D12_SHADER_VISIBILITY_ALL);
+	// Param 3: Root SRV t0 s1 — Meshlet/tree extra data (optional, used by AS/MS/VS)
+	rootParam[3].InitAsShaderResourceView(0, 1, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_ALL);
+
+	// Static samplers
+	D3D12_STATIC_SAMPLER_DESC samplers[3] = {};
+
+	// s0: Linear wrap (general textures)
+	samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+
+	// s1 space2: PCF comparison sampler (shadow mapping)
+	samplers[1] = {};
+	samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	samplers[1].ShaderRegister = 1;
+	samplers[1].RegisterSpace = 0;
+	samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	// s2: Point clamp (Hi-Z, depth reads)
+	samplers[2] = CD3DX12_STATIC_SAMPLER_DESC(
+		2, D3D12_FILTER_MIN_MAG_MIP_POINT,
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+	D3D12_ROOT_SIGNATURE_FLAGS flags =
+		D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | // kept during IA→MS transition
+		D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+		D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+		D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+
+	CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC desc;
+	desc.Init_1_1(_countof(rootParam), rootParam, _countof(samplers), samplers, flags);
+
+	ComPtr<ID3DBlob> pBlob;
+	ComPtr<ID3DBlob> pErrorBlob;
+	auto hr = D3DX12SerializeVersionedRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_1,
+		pBlob.GetAddressOf(), pErrorBlob.GetAddressOf());
+	if (FAILED(hr))
+	{
+		if (pErrorBlob) printf("Bindless root sig serialize: %s\n", (char*)pErrorBlob->GetBufferPointer());
+		printf("Bindless root signature serialize failed (terrain=%d)\n", forTerrain);
+		return;
+	}
+
+	hr = g_Engine->Device()->CreateRootSignature(
+		0, pBlob->GetBufferPointer(), pBlob->GetBufferSize(),
+		IID_PPV_ARGS(m_pRootSignature.GetAddressOf()));
+	if (FAILED(hr))
+	{
+		printf("Bindless root signature create failed (terrain=%d)\n", forTerrain);
+		return;
+	}
+
+	m_IsValid = true;
+	printf("RootSignature: Bindless (terrain=%d) created OK.\n", forTerrain);
+}
+
+// =====================================================================
+// Legacy root signature (existing code, preserved for transition)
+// =====================================================================
+void RootSignature::CreateLegacy(bool forTerrain)
 {
 	auto flag = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 	flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS;
@@ -14,9 +111,6 @@ RootSignature::RootSignature(bool forTerrain)
 
 	if (forTerrain)
 	{
-		// Terrain: CBV0 transform, CBV1 terrain constants,
-		// table masks+groundTex(t0-t3), table IBL(t4-t6), root SRV payload(t0,s1),
-		// [5] shadow map SRV (t0 space2), [6] shadow CB (b1 space2)
 		rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 		rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
@@ -50,34 +144,19 @@ RootSignature::RootSignature(bool forTerrain)
 
 		ComPtr<ID3DBlob> pBlob;
 		ComPtr<ID3DBlob> pErrorBlob;
-		auto hr = D3D12SerializeRootSignature(
-			&desc,
-			D3D_ROOT_SIGNATURE_VERSION_1_0,
-			pBlob.GetAddressOf(),
-			pErrorBlob.GetAddressOf());
-		if (FAILED(hr))
-		{
-			printf("Terrain root signature serialize failed\n");
-			return;
-		}
+		auto hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0,
+			pBlob.GetAddressOf(), pErrorBlob.GetAddressOf());
+		if (FAILED(hr)) { printf("Terrain root signature serialize failed\n"); return; }
 
-		hr = g_Engine->Device()->CreateRootSignature(
-			0,
-			pBlob->GetBufferPointer(),
-			pBlob->GetBufferSize(),
+		hr = g_Engine->Device()->CreateRootSignature(0, pBlob->GetBufferPointer(), pBlob->GetBufferSize(),
 			IID_PPV_ARGS(m_pRootSignature.GetAddressOf()));
-		if (FAILED(hr))
-		{
-			printf("Terrain root signature create failed\n");
-			return;
-		}
+		if (FAILED(hr)) { printf("Terrain root signature create failed\n"); return; }
 
 		m_IsValid = true;
 		return;
 	}
 
-	// PBR instanced: CBV0 scene (b0,s0), CBV1 material (b1,s0), Root SRV instances (t0,s1),
-	// table materials (t0-t5: albedo,normal,metallic,roughness,ramp,sphere), table IBL (t6-t8,s0)
+	// PBR instanced (legacy)
 	rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 	rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[2].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX);
@@ -85,19 +164,14 @@ RootSignature::RootSignature(bool forTerrain)
 	tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6);
 	rootParam[3].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 	rootParam[4].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
-	// Trees (GPU-driven): additional inputs for TreeIndirectVS only.
-	// - Root SRV t1 space1: StructuredBuffer<uint> visibleIndex
-	// - Root constants b2 space1 (8x32-bit): VisibleBase + インポスター用 footLocal(xyz)+halfW+height（float を uint ビットで）
 	rootParam[5].InitAsShaderResourceView(1, 1, D3D12_SHADER_VISIBILITY_VERTEX);
 	rootParam[6].InitAsConstants(8, 2, 1, D3D12_SHADER_VISIBILITY_VERTEX);
-	// Shadow mapping (space2): shadow map SRV + shadow constant buffer
-	tableRange[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2); // t0, space2
+	tableRange[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2);
 	rootParam[7].InitAsDescriptorTable(1, &tableRange[2], D3D12_SHADER_VISIBILITY_PIXEL);
-	rootParam[8].InitAsConstantBufferView(1, 2, D3D12_SHADER_VISIBILITY_PIXEL); // b1, space2
+	rootParam[8].InitAsConstantBufferView(1, 2, D3D12_SHADER_VISIBILITY_PIXEL);
 
 	D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
 	samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
-	// PCF comparison sampler for shadow mapping
 	samplers[1] = {};
 	samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
 	samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -118,27 +192,13 @@ RootSignature::RootSignature(bool forTerrain)
 
 	ComPtr<ID3DBlob> pBlob;
 	ComPtr<ID3DBlob> pErrorBlob;
-	auto hr = D3D12SerializeRootSignature(
-		&desc,
-		D3D_ROOT_SIGNATURE_VERSION_1_0,
-		pBlob.GetAddressOf(),
-		pErrorBlob.GetAddressOf());
-	if (FAILED(hr))
-	{
-		printf("PBR root signature serialize failed\n");
-		return;
-	}
+	auto hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0,
+		pBlob.GetAddressOf(), pErrorBlob.GetAddressOf());
+	if (FAILED(hr)) { printf("PBR root signature serialize failed\n"); return; }
 
-	hr = g_Engine->Device()->CreateRootSignature(
-		0,
-		pBlob->GetBufferPointer(),
-		pBlob->GetBufferSize(),
+	hr = g_Engine->Device()->CreateRootSignature(0, pBlob->GetBufferPointer(), pBlob->GetBufferSize(),
 		IID_PPV_ARGS(m_pRootSignature.GetAddressOf()));
-	if (FAILED(hr))
-	{
-		printf("PBR root signature create failed\n");
-		return;
-	}
+	if (FAILED(hr)) { printf("PBR root signature create failed\n"); return; }
 
 	m_IsValid = true;
 }

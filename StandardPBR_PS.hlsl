@@ -47,17 +47,18 @@ SamplerComparisonState shadowSampler : register(s1, space2);
 
 cbuffer ShadowCB : register(b1, space2)
 {
-    matrix LightVP[3]; // per-cascade
-    float4 CascadeSplits;
+    matrix LightVP[4]; // 4-cascade CSM
+    float4 CascadeSplits; // .x/.y/.z/.w = view-space far for cascade 0/1/2/3
 };
 
 static const float kShadowBias = 0.001;
 
 float SampleShadowPCF(float3 worldPos, float viewDepth)
 {
-    uint cascade = 2;
-    if (viewDepth < CascadeSplits.x) cascade = 0;
+    uint cascade = 3;
+    if      (viewDepth < CascadeSplits.x) cascade = 0;
     else if (viewDepth < CascadeSplits.y) cascade = 1;
+    else if (viewDepth < CascadeSplits.z) cascade = 2;
 
     float4 lightClip = mul(float4(worldPos, 1.0), LightVP[cascade]);
     float3 projCoord = lightClip.xyz / lightClip.w;

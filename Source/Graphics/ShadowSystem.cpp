@@ -19,7 +19,7 @@ using namespace DirectX;
 
 static void ComputeCascadeSplits(float nearClip, float farClip, UINT count, float* outSplits)
 {
-	constexpr float lambda = 0.75f;
+	constexpr float lambda = 0.70f; // PSSM blend (log vs uniform); 0.7 suits open-world forests
 	for (UINT i = 0; i < count; ++i)
 	{
 		const float p = static_cast<float>(i + 1) / static_cast<float>(count);
@@ -886,7 +886,9 @@ void ShadowSystem::UpdateCascades(
 		for (UINT i = 0; i < kCascadeCount; ++i)
 			m_shadowCBMapped->LightVP[i] = XMMatrixTranspose(m_lightVP[i]);
 		m_shadowCBMapped->CascadeSplits = XMFLOAT4(
-			m_cascadeSplits[0], m_cascadeSplits[1], m_cascadeSplits[2], 0.0f);
+			m_cascadeSplits[0], m_cascadeSplits[1],
+			m_cascadeSplits[2],
+			(kCascadeCount >= 4) ? m_cascadeSplits[3] : 0.0f);
 	}
 }
 

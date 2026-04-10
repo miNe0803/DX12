@@ -13,6 +13,14 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
+/// GPU feature support detected at init time.
+struct GpuFeatureSupport {
+	bool meshShaderSupported = false;
+	bool raytracingSupported = false;   // DXR 1.1+
+	bool shaderModel66       = false;
+	D3D_SHADER_MODEL highestShaderModel = D3D_SHADER_MODEL_6_0;
+};
+
 class Engine
 {
 public:
@@ -27,7 +35,8 @@ public:
 	void BeginRender();
 	void EndRender();
 
-	ID3D12Device6* Device();
+	ID3D12Device10* Device();
+	const GpuFeatureSupport& GetFeatureSupport() const { return m_features; }
 	// Main pass: HDR clear + terrain (avoid "CommandList" in method names; some SDKs macro it)
 	ID3D12GraphicsCommandList* MainGraphicsCmdList();
 	ID3D12GraphicsCommandList* PbrRecordCmdList(int workerIndex);
@@ -76,7 +85,8 @@ private:
 	UINT m_CurrentBackBufferIndex = 0;
 	UINT m_lastSubmittedBackBufferIndex = 0;
 
-	ComPtr<ID3D12Device6> m_pDevice = nullptr;
+	GpuFeatureSupport m_features{};
+	ComPtr<ID3D12Device10> m_pDevice = nullptr;
 	ComPtr<ID3D12CommandQueue> m_pQueue = nullptr;
 	ComPtr<IDXGISwapChain3> m_pSwapChain = nullptr;
 	ComPtr<ID3D12CommandAllocator> m_pAllocator[FRAME_BUFFER_COUNT] = { nullptr };

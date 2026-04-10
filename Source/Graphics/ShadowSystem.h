@@ -16,7 +16,7 @@ class IndexBuffer;
 class ShadowSystem
 {
 public:
-	static constexpr UINT kCascadeCount = 3;
+	static constexpr UINT kCascadeCount = 4;
 	static constexpr UINT kShadowMapSize = 2048;
 
 	bool Init(ID3D12Device* device, DescriptorHeap* sceneHeap);
@@ -106,7 +106,7 @@ public:
 
 	struct alignas(256) ShadowConstants {
 		DirectX::XMMATRIX LightVP[kCascadeCount];
-		DirectX::XMFLOAT4 CascadeSplits; // .x/.y/.z = view-space far for cascade 0/1/2
+		DirectX::XMFLOAT4 CascadeSplits; // .x/.y/.z/.w = view-space far for cascade 0/1/2/3
 	};
 
 private:

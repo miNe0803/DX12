@@ -3,18 +3,35 @@
 
 struct ID3D12RootSignature;
 
+/// Root signature variants.
+enum class RootSigType {
+	PbrLegacy,      // Legacy PBR with descriptor tables (backward compat during transition)
+	TerrainLegacy,  // Legacy terrain with descriptor tables
+	Bindless,       // SM6.6 bindless (CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)
+	TerrainBindless, // Terrain bindless variant
+};
+
 class RootSignature
 {
 public:
-	// forTerrain=false: PBR インスタンス (CBV0/1, Root SRV t0 s1, t0-t5 材質, t6-t8 IBL)。
-	// true: 地形 (CBV0/1, t0-t3 マスク+地面, t4-t6 IBL, Root SRV t0 s1 payload)
+	// Legacy constructors (kept for backward compatibility during transition)
 	explicit RootSignature(bool forTerrain = false);
-	bool IsValid(); // ルートシグネチャの生成に成功したかどうかを返す
-	ID3D12RootSignature* Get(); // ルートシグネチャを返す
+	// Bindless constructor
+	explicit RootSignature(RootSigType type);
+
+	bool IsValid();
+	ID3D12RootSignature* Get();
+
+	// Bindless root parameter indices
+	static constexpr UINT kBindlessParam_SceneCBV     = 0; // b0 s0: SceneConstants
+	static constexpr UINT kBindlessParam_ShadowCBV    = 1; // b1 s0: ShadowConstants
+	static constexpr UINT kBindlessParam_DrawConstants = 2; // b2 s0: 4x32-bit root constants
+	static constexpr UINT kBindlessParam_MeshletSRV   = 3; // t0 s1: meshlet/tree extra data
 
 private:
-	bool m_IsValid = false; // ルートシグネチャの生成に成功したかどうか
-	ComPtr<ID3D12RootSignature> m_pRootSignature = nullptr; // ルートシグネチャ
+	void CreateLegacy(bool forTerrain);
+	void CreateBindless(bool forTerrain);
+
+	bool m_IsValid = false;
+	ComPtr<ID3D12RootSignature> m_pRootSignature = nullptr;
 };
-
-
