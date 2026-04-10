@@ -39,26 +39,40 @@ struct Vertex {
 static_assert(sizeof(Vertex) == 84, "Vertex size must be 84 bytes.");
 
 /// PBR instancing: one row-major world matrix per instance (HLSL row_major + mul(pos, World)).
-/// NprPerMesh: x=セル影用頂点ブレンド上書き(>=0 で有効), w=1 で x を使用（未設定は -1）
-/// y=スフィアモード, z=マテリアル不透明度乗算（NPR 透明パス。PMX で頂点/定数が 1 のとき用）, w=予備
+/// materialIndex: index into StructuredBuffer<GpuMaterialData> (bindless material lookup).
 struct InstanceData {
+    DirectX::XMFLOAT4X4 World;       // 64 bytes
+    uint32_t materialIndex;            // 4 bytes — bindless material buffer index
+    uint32_t _pad[3];                  // 12 bytes
+};
+static_assert(sizeof(InstanceData) == 80, "InstanceData must match HLSL StructuredBuffer stride");
+
+/// Legacy NprPerMesh layout (kept for reference during transition, will be removed).
+struct InstanceDataLegacy {
     DirectX::XMFLOAT4X4 World;
     DirectX::XMFLOAT4 NprPerMesh;
 };
-static_assert(sizeof(InstanceData) == 80, "InstanceData must match HLSL StructuredBuffer stride");
+static_assert(sizeof(InstanceDataLegacy) == 80, "Legacy InstanceData stride");
 
 /// Per-frame ring slices; keep in sync with Engine::FRAME_BUFFER_COUNT.
 inline constexpr size_t kMaxPbrInstancesPerFrame = 16384u;
 inline constexpr size_t kPbrInstanceRingFrameCount = 2u;
 
-/// PBR path b0: View/Proj + world camera (VS でビルボード等に使用。b1 MaterialParams は PS のみ)。
+/// PBR path b0: View/Proj + world camera + Forward+ cluster info.
 struct alignas(256) SceneConstants {
     DirectX::XMMATRIX View;
     DirectX::XMMATRIX Proj;
-    DirectX::XMFLOAT4 CameraWorld; // .xyz = world position, .w 未使用
-    DirectX::XMFLOAT4 SunDirection; // .xyz = normalised direction TO the light, .w = intensity
-    DirectX::XMFLOAT4 SunColor;    // .rgb = colour, .a = unused
-    DirectX::XMMATRIX InvViewProj;  // depth → world reconstruction (column-major for HLSL)
+    DirectX::XMFLOAT4 CameraWorld;   // .xyz = world position, .w = time
+    DirectX::XMFLOAT4 SunDirection;  // .xyz = normalised direction TO the light, .w = intensity
+    DirectX::XMFLOAT4 SunColor;      // .rgb = colour, .a = unused
+    DirectX::XMMATRIX InvViewProj;    // depth → world reconstruction (column-major for HLSL)
+    // Forward+ cluster grid (Step 4)
+    DirectX::XMFLOAT4 ClusterGridParams;  // x=tileCountX, y=tileCountY, z=nearZ, w=farZ
+    DirectX::XMFLOAT4 ClusterSliceParams; // x=logScale, y=logBias, z=sliceCount, w=unused
+    uint32_t lightBufferSRVIdx;
+    uint32_t clusterDataSRVIdx;
+    uint32_t lightIndexListSRVIdx;
+    uint32_t activeLightCount;
 };
 
 struct alignas(256) Transform {
@@ -91,6 +105,8 @@ struct TerrainConstants {
     DirectX::XMFLOAT4 CameraPos;
     /// x:Terrain PS debug stage 0..3 / y:cheap path on (1/0) / z:grazing threshold / w:near preserve dist (m, 0=off)
     DirectX::XMFLOAT4 DebugParams;
+    DirectX::XMFLOAT4 SunDirection;  // .xyz = normalised dir TO light, .w = intensity
+    DirectX::XMFLOAT4 SunColor;      // .rgb
 };
 
 struct Mesh {

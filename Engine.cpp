@@ -64,14 +64,43 @@ bool Engine::Init(HWND hwnd, UINT windowWidth, UINT windowHeight)
 
 bool Engine::CreateDevice()
 {
-	auto hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(m_pDevice.ReleaseAndGetAddressOf()));
-	if (FAILED(hr)) return false;
+	// Require Feature Level 12_2 for Mesh Shaders, SM6.6 bindless, DXR 1.1.
+	auto hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(m_pDevice.ReleaseAndGetAddressOf()));
+	if (FAILED(hr))
+	{
+		printf("Engine::CreateDevice: FL 12_2 failed (0x%08X). Falling back to 12_0.\n", hr);
+		hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(m_pDevice.ReleaseAndGetAddressOf()));
+		if (FAILED(hr)) return false;
+	}
+
+	// --- Feature support queries ---
+	{
+		D3D12_FEATURE_DATA_D3D12_OPTIONS7 opts7{};
+		if (SUCCEEDED(m_pDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &opts7, sizeof(opts7))))
+			m_features.meshShaderSupported = (opts7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1);
+
+		D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5{};
+		if (SUCCEEDED(m_pDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opts5, sizeof(opts5))))
+			m_features.raytracingSupported = (opts5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1);
+
+		D3D12_FEATURE_DATA_SHADER_MODEL sm{ D3D_SHADER_MODEL_6_8 };
+		if (SUCCEEDED(m_pDevice->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))))
+		{
+			m_features.highestShaderModel = sm.HighestShaderModel;
+			m_features.shaderModel66 = (sm.HighestShaderModel >= D3D_SHADER_MODEL_6_6);
+		}
+	}
+
+	printf("Engine::CreateDevice: MeshShader=%s  DXR=%s  SM=%d.%d\n",
+		m_features.meshShaderSupported ? "YES" : "NO",
+		m_features.raytracingSupported ? "YES" : "NO",
+		(m_features.highestShaderModel >> 4) & 0xF,
+		m_features.highestShaderModel & 0xF);
+
 #if defined(_DEBUG)
 	ComPtr<ID3D12InfoQueue> infoQueue;
 	if (SUCCEEDED(m_pDevice->QueryInterface(IID_PPV_ARGS(&infoQueue))))
 	{
-		// PIX 併用時、検証が厳しくなり ERROR が増え SetBreakOnSeverity でデバッガが止まる（クラッシュに見える）。
-		// DX12_DISABLE_BREAK_ON_ERROR=1 で無効化（DX12_DISABLE_DEBUG_LAYER=1 と併用推奨）。
 		wchar_t ev[8]{};
 		const DWORD n = GetEnvironmentVariableW(L"DX12_DISABLE_BREAK_ON_ERROR", ev, 8u);
 		const bool noBreak = (n > 0 && ev[0] == L'1');
@@ -484,7 +513,7 @@ void Engine::EndRender()
 	m_CurrentBackBufferIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 }
 
-ID3D12Device6* Engine::Device()
+ID3D12Device10* Engine::Device()
 {
 	return m_pDevice.Get();
 }

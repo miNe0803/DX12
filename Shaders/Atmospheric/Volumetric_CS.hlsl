@@ -13,8 +13,8 @@ cbuffer AtmosphereCB : register(b0)
 
 cbuffer ShadowCB : register(b1)
 {
-    matrix LightVP[3];
-    float4 CascadeSplits;
+    matrix LightVP[4];
+    float4 CascadeSplits; // .x/.y/.z/.w = cascade 0/1/2/3
 };
 
 Texture2D<float>       SceneDepth : register(t0);
