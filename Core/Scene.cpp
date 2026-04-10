@@ -1410,10 +1410,22 @@ void Scene::Update()
 	XMStoreFloat4(&sc->CameraWorld, g_Camera->GetPosition());
 	sc->CameraWorld.w = 1.f;
 
-	XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.5f, 0.7f, -1.0f, 0.0f));
+	// Sun direction from azimuth/elevation (AtmosphereParams)
+	float azRad = XMConvertToRadians(s_atmosphereParams.sunAzimuth);
+	float elRad = XMConvertToRadians(s_atmosphereParams.sunElevation);
+	float cosEl = cosf(elRad);
+	XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(
+		sinf(azRad) * cosEl,
+		sinf(elRad),
+		cosf(azRad) * cosEl,
+		0.0f));
 	XMStoreFloat4(&sc->SunDirection, sunDir);
 	sc->SunDirection.w = 1.0f;
-	sc->SunColor = XMFLOAT4(1.2f, 1.2f, 1.2f, 1.0f);
+	sc->SunColor = XMFLOAT4(
+		s_atmosphereParams.sunColorR * s_atmosphereParams.sunIntensity,
+		s_atmosphereParams.sunColorG * s_atmosphereParams.sunIntensity,
+		s_atmosphereParams.sunColorB * s_atmosphereParams.sunIntensity,
+		1.0f);
 	sc->InvViewProj = XMMatrixTranspose(XMMatrixInverse(nullptr, viewMat * projMat));
 
 	if (s_shadow && s_shadow->IsValid())
@@ -1444,6 +1456,8 @@ void Scene::Update()
 				m_terrainCheapPathEnabled ? 1.0f : 0.0f,
 				m_terrainCheapGrazingThresh,
 				m_terrainCheapNearPreserveMeters);
+			terrConst->SunDirection = sc->SunDirection;
+			terrConst->SunColor = sc->SunColor;
 		}
 	}
 
@@ -1518,6 +1532,52 @@ void Scene::Draw()
 		GPU_CMD_BEGIN_EVENT(commandList, 60, 60, 60, L"Shadow Pass (CSM)");
 		s_shadow->ResetPerDrawRing();
 
+		// Resolve tree shadow mesh LOD (prefer LOD1 for cheaper geo; fall back if imposter)
+		const bool wantTreeShadows = s_treeGpuCull && s_treeGpuCull->IsValid()
+			&& s_shadow->HasTreeShadowPipeline()
+			&& s_treeGpuCull->GetInstanceCount() > 0
+			&& s_atmosphereParams.enableTreeShadows;
+
+		int shadowLod = 1;
+		if (wantTreeShadows)
+		{
+			uint32_t testIdx = TreeVegetation::GetMergedIndexCountLod(shadowLod);
+			if (testIdx <= 6 || !TreeVegetation::GetMergedVertexBufferLod(shadowLod))
+				shadowLod = 0;
+		}
+
+		const bool useGpuCull = wantTreeShadows && s_shadow->HasShadowCullPipeline()
+			&& s_treeGpuCull->GetTreeInfoResource();
+
+		// GPU cull dispatch: run BEFORE the per-cascade draw loop so results are ready
+		const UINT maxShadowInstances = static_cast<UINT>(s_atmosphereParams.treeShadowMaxInstances);
+		if (useGpuCull)
+		{
+			XMFLOAT3 camWorldPos;
+			XMStoreFloat3(&camWorldPos, g_Camera->GetPosition());
+
+			// Pre-set IndexCount in the reset template (avoids per-cascade copy barriers)
+			VertexBuffer* preVb = TreeVegetation::GetMergedVertexBufferLod(shadowLod);
+			IndexBuffer*  preIb = TreeVegetation::GetMergedIndexBufferLod(shadowLod);
+			uint32_t preIdxCount = TreeVegetation::GetMergedIndexCountLod(shadowLod);
+			if (preVb && preIb && preIdxCount > 0)
+				s_shadow->SetShadowIndexCount(0, preIdxCount);
+
+			const float baseShadowDist = s_atmosphereParams.treeShadowDistance;
+			const UINT treeCascades = static_cast<UINT>(s_atmosphereParams.treeShadowCascades);
+			for (UINT cascade = 0; cascade < std::min(treeCascades, ShadowSystem::kCascadeCount); ++cascade)
+			{
+				const float cascadeDist = baseShadowDist * (1u << cascade);
+				s_shadow->DispatchShadowCull(
+					commandList, cascade,
+					s_treeGpuCull->GetTreeInfoResource(),
+					s_treeGpuCull->GetInstanceCount(),
+					maxShadowInstances,
+					camWorldPos,
+					cascadeDist);
+			}
+		}
+
 		for (UINT cascade = 0; cascade < ShadowSystem::kCascadeCount; ++cascade)
 		{
 			s_shadow->BeginShadowPass(commandList, cascade);
@@ -1550,22 +1610,34 @@ void Scene::Draw()
 				commandList->DrawIndexedInstanced(mr.IndexCount, 1, mr.StartIndexLocation, 0, 0);
 			}
 
-			// Tree shadows: limited cascade count + capped instance count
-			if (s_treeGpuCull && s_treeGpuCull->IsValid() && s_shadow->HasTreeShadowPipeline()
-				&& s_treeGpuCull->GetInstanceCount() > 0
-				&& s_atmosphereParams.enableTreeShadows
-				&& cascade < static_cast<UINT>(s_atmosphereParams.treeShadowCascades))
+			// Tree shadows
+			if (wantTreeShadows && cascade < static_cast<UINT>(s_atmosphereParams.treeShadowCascades))
 			{
-				VertexBuffer* treeVb = TreeVegetation::GetMergedVertexBufferLod(0);
-				IndexBuffer* treeIb = TreeVegetation::GetMergedIndexBufferLod(0);
-				uint32_t treeIdxCount = TreeVegetation::GetMergedIndexCountLod(0);
-				UINT drawCount = std::min(s_treeGpuCull->GetInstanceCount(),
-					static_cast<uint32_t>(s_atmosphereParams.treeShadowMaxInstances));
-				s_shadow->DrawTreeShadows(
-					commandList, cascade,
-					s_treeGpuCull->GetInstanceDataResource(),
-					drawCount,
-					treeVb, treeIb, treeIdxCount);
+				VertexBuffer* treeVb = TreeVegetation::GetMergedVertexBufferLod(shadowLod);
+				IndexBuffer* treeIb = TreeVegetation::GetMergedIndexBufferLod(shadowLod);
+				uint32_t treeIdxCount = TreeVegetation::GetMergedIndexCountLod(shadowLod);
+				if (treeVb && treeIb && treeIdxCount > 0)
+				{
+					if (useGpuCull)
+					{
+						s_shadow->DrawTreeShadowsIndirect(
+							commandList, cascade,
+							s_treeGpuCull->GetInstanceDataResource(),
+							treeVb, treeIb,
+							nullptr, D3D12_GPU_DESCRIPTOR_HANDLE{0});
+					}
+					else
+					{
+						// Fallback: draw capped instances without GPU culling
+						UINT drawCount = std::min(s_treeGpuCull->GetInstanceCount(), maxShadowInstances);
+						s_shadow->DrawTreeShadows(
+							commandList, cascade,
+							s_treeGpuCull->GetInstanceDataResource(),
+							drawCount,
+							treeVb, treeIb, treeIdxCount,
+							nullptr, D3D12_GPU_DESCRIPTOR_HANDLE{0});
+					}
+				}
 			}
 
 			s_shadow->EndShadowPass(commandList, cascade);
@@ -1719,7 +1791,9 @@ void Scene::Draw()
 		m_terrainSharedVB,
 		m_terrainSharedIB,
 		treeLod1PipelineState,
-		treeLod2PipelineState);
+		treeLod2PipelineState,
+		(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowMapSrvGpu() : D3D12_GPU_DESCRIPTOR_HANDLE{0},
+		(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowCBAddress() : 0);
 	GPU_CMD_END_EVENT(commandList);
 	Profiler::GpuMarkDrawMainEnd(commandList);
 
@@ -2058,7 +2132,11 @@ void Scene::Draw()
 			hdrRes, depthRes,
 			s_shadow,
 			invVP, camPos, sunDirF,
-			XMFLOAT4(1.2f, 1.2f, 1.2f, 1.0f),
+			XMFLOAT4(
+				s_atmosphereParams.sunColorR * s_atmosphereParams.sunIntensity,
+				s_atmosphereParams.sunColorG * s_atmosphereParams.sunIntensity,
+				s_atmosphereParams.sunColorB * s_atmosphereParams.sunIntensity,
+				1.0f),
 			g_Engine->CurrentBackBufferIndex(),
 			s_atmosphereParams);
 	}

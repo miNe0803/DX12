@@ -12,6 +12,7 @@ class IndexBuffer;
 
 /// Directional-light Cascaded Shadow Map system.
 /// Manages a Texture2DArray depth target and per-cascade light VP matrices.
+/// Phase B+C: GPU frustum culling + ExecuteIndirect for tree shadow instances.
 class ShadowSystem
 {
 public:
@@ -58,8 +59,7 @@ public:
 	/// Reset per-draw ring offset (call once per frame before shadow pass).
 	void ResetPerDrawRing() { m_perDrawRingOffset = 0; }
 
-	/// Draw all tree instances into the shadow map for a given cascade.
-	/// Must be called between BeginShadowPass/EndShadowPass for the cascade.
+	/// (Legacy) Draw all tree instances without GPU culling.
 	void DrawTreeShadows(
 		ID3D12GraphicsCommandList* cmd,
 		UINT cascadeIndex,
@@ -67,9 +67,42 @@ public:
 		UINT instanceCount,
 		VertexBuffer* vb,
 		IndexBuffer* ib,
-		UINT indexCount);
+		UINT indexCount,
+		ID3D12DescriptorHeap* srvHeap,
+		D3D12_GPU_DESCRIPTOR_HANDLE alphaMaskSrvGpu);
 
 	bool HasTreeShadowPipeline() const { return m_treeShadowPso.Get() != nullptr; }
+
+	// ---- GPU Shadow Culling + ExecuteIndirect (Phase B+C) ----
+
+	bool HasShadowCullPipeline() const { return m_shadowCullPso.Get() != nullptr; }
+
+	/// Dispatch frustum cull CS for one cascade. Call before BeginShadowPass.
+	/// treeInfoBuffer: TreeGpuCullSystem's TreeInfo GPU resource.
+	/// maxOutput: hard cap on InstanceCount in the indirect args (prevents GPU overload).
+	/// cameraPos: camera world position for distance culling.
+	/// maxShadowDist: trees beyond this XZ distance from camera are excluded (0 = unlimited).
+	void DispatchShadowCull(
+		ID3D12GraphicsCommandList* cmd,
+		UINT cascadeIndex,
+		ID3D12Resource* treeInfoBuffer,
+		UINT instanceCount,
+		UINT maxOutput,
+		const DirectX::XMFLOAT3& cameraPos,
+		float maxShadowDist);
+
+	/// Pre-set IndexCount for a cascade's indirect args (call before DispatchShadowCull).
+	void SetShadowIndexCount(UINT cascadeIndex, UINT indexCount);
+
+	/// Draw GPU-culled tree shadows via ExecuteIndirect. Call between Begin/EndShadowPass.
+	void DrawTreeShadowsIndirect(
+		ID3D12GraphicsCommandList* cmd,
+		UINT cascadeIndex,
+		ID3D12Resource* instanceDataBuffer,
+		VertexBuffer* vb,
+		IndexBuffer* ib,
+		ID3D12DescriptorHeap* srvHeap,
+		D3D12_GPU_DESCRIPTOR_HANDLE alphaMaskSrvGpu);
 
 	struct alignas(256) ShadowConstants {
 		DirectX::XMMATRIX LightVP[kCascadeCount];
@@ -82,6 +115,8 @@ private:
 	bool CreateTreeShadowPipeline(ID3D12Device* device);
 	bool CreateConstantBuffer(ID3D12Device* device);
 	bool CreatePerDrawRing(ID3D12Device* device);
+	bool CreateShadowCullPipeline(ID3D12Device* device);
+	bool CreateShadowCullBuffers(ID3D12Device* device, UINT maxInstances);
 
 	bool m_valid = false;
 
@@ -99,7 +134,8 @@ private:
 
 	// Tree shadow pipeline (instanced, reads StructuredBuffer<InstanceData>)
 	ComPtr<ID3D12RootSignature> m_treeShadowRootSig;
-	ComPtr<ID3D12PipelineState> m_treeShadowPso;
+	ComPtr<ID3D12PipelineState> m_treeShadowPso;        // depth-only (no PS)
+	ComPtr<ID3D12PipelineState> m_treeShadowAlphaPso;   // with alpha-test PS
 
 	DirectX::XMMATRIX m_lightVP[kCascadeCount] = {};
 	float m_cascadeSplits[kCascadeCount] = {};
@@ -110,4 +146,29 @@ private:
 	ComPtr<ID3D12Resource> m_perDrawRing;
 	uint8_t* m_perDrawRingMapped = nullptr;
 	UINT m_perDrawRingOffset = 0;
+
+	// Identity visible-index buffer [0,1,2,...,N-1] for legacy fallback
+	ComPtr<ID3D12Resource> m_identityVisibleIdx;
+	UINT m_identitySize = 0;
+	bool EnsureIdentityBuffer(ID3D12Device* device, UINT count);
+
+	// ---- GPU Shadow Cull resources ----
+	ComPtr<ID3D12RootSignature> m_shadowCullRootSig;
+	ComPtr<ID3D12PipelineState> m_shadowCullPso;
+	ComPtr<ID3D12CommandSignature> m_shadowCmdSig;
+
+	// Per-cascade: visible index buffer + indirect args
+	ComPtr<ID3D12Resource> m_shadowVisibleIdx[kCascadeCount];
+	ComPtr<ID3D12Resource> m_shadowIndirectArgs[kCascadeCount];
+	D3D12_RESOURCE_STATES m_shadowArgsState[kCascadeCount] = {};
+	D3D12_RESOURCE_STATES m_shadowVisIdxState[kCascadeCount] = {};
+
+	ComPtr<ID3D12Resource> m_shadowArgsResetUpload; // zeroed template for CopyBufferRegion
+	ComPtr<ID3D12Resource> m_shadowCullCB;          // upload CB for cull CS
+	uint8_t* m_shadowCullCBMapped = nullptr;
+
+	// Shader-visible descriptor heap for cull CS (SRV + UAVs)
+	ComPtr<ID3D12DescriptorHeap> m_shadowCullDescHeap;
+	UINT m_shadowCullDescStride = 0;
+	UINT m_shadowCullMaxInstances = 0;
 };

@@ -318,7 +318,9 @@ void RenderSystem::DrawMain(
 	VertexBuffer* terrainSharedVB,
 	IndexBuffer* terrainSharedIB,
 	PipelineState* treeInstancingLod1Pso,
-	PipelineState* treeInstancingLod2Pso)
+	PipelineState* treeInstancingLod2Pso,
+	D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu,
+	D3D12_GPU_VIRTUAL_ADDRESS shadowCBGpu)
 {
 	(void)descriptorHeap;
 	auto view = registry.view<TransformComponent, MeshRendererComponent, LODComponent>();
@@ -568,7 +570,9 @@ void RenderSystem::DrawMain(
 				terrainMaskHandleGPU,
 				envCubemapHandleGPU,
 				terrainSharedVB,
-				terrainSharedIB);
+				terrainSharedIB,
+				shadowMapSrvGpu,
+				shadowCBGpu);
 			Profiler::GpuMarkTerrainColorEnd(cmdList);
 			++statTotal;
 			++statTerr;
@@ -674,6 +678,10 @@ void RenderSystem::DrawMain(
 				if (payloadSrv != 0)
 					cmdList->SetGraphicsRootShaderResourceView(4, payloadSrv);
 			}
+			if (shadowMapSrvGpu.ptr != 0)
+				cmdList->SetGraphicsRootDescriptorTable(5, shadowMapSrvGpu);
+			if (shadowCBGpu != 0)
+				cmdList->SetGraphicsRootConstantBufferView(6, shadowCBGpu);
 
 			D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
 			D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();

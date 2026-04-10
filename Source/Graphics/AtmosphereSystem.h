@@ -9,11 +9,21 @@ class ShadowSystem;
 
 struct AtmosphereParams
 {
+	// Sun
+	float sunAzimuth    = 220.0f;   // degrees, 0=North, 90=East
+	float sunElevation  = 45.0f;    // degrees above horizon
+	float sunIntensity  = 1.2f;
+	float sunColorR     = 1.0f;
+	float sunColorG     = 1.0f;
+	float sunColorB     = 1.0f;
+
+	// Fog
 	float fogDensity    = 0.003f;
 	float scatteringG   = 0.7f;
 	float heightFalloff = 0.002f;
 	float baseHeight    = 0.0f;
 	float maxFogDistance = 2000.0f;
+	float noiseStrength = 0.4f;
 	float temporalBlend = 0.05f;
 	float fogColorR     = 0.55f;
 	float fogColorG     = 0.62f;
@@ -22,8 +32,9 @@ struct AtmosphereParams
 	bool  enableVolumetric = true;
 	bool  enableTemporal = false;
 	bool  enableTreeShadows = false;
-	int   treeShadowMaxInstances = 512;
+	int   treeShadowMaxInstances = 128;
 	int   treeShadowCascades = 1;
+	float treeShadowDistance = 30.0f;
 };
 
 /// Exponential height fog + volumetric light (ray-marched at quarter resolution)

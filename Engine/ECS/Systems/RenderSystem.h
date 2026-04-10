@@ -118,7 +118,9 @@ namespace RenderSystem
 		VertexBuffer* terrainSharedVB = nullptr,
 		IndexBuffer* terrainSharedIB = nullptr,
 		PipelineState* treeInstancingLod1Pso = nullptr,
-		PipelineState* treeInstancingLod2Pso = nullptr);
+		PipelineState* treeInstancingLod2Pso = nullptr,
+		D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu = {},
+		D3D12_GPU_VIRTUAL_ADDRESS shadowCBGpu = 0);
 
 	/// DrawMain の後。PBR キューから NPR 親子は除外済み。不透明 NPR → 透明 NPR（距離ソート）。
 	void DrawNprPasses(

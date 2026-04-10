@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "ComPtr.h"
 #include <d3d12.h>
@@ -62,7 +62,9 @@ public:
 		D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskTable,
 		D3D12_GPU_DESCRIPTOR_HANDLE iblTable,
 		VertexBuffer* vb,
-		IndexBuffer* ib);
+		IndexBuffer* ib,
+		D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu = {},
+		D3D12_GPU_VIRTUAL_ADDRESS shadowCBGpu = 0);
 
 private:
 	bool CreatePipelines(ID3D12Device* device);

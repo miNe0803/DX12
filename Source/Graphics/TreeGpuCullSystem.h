@@ -144,6 +144,9 @@ public:
 	/// GPU instance data buffer (all species, for shadow pass etc.)
 	ID3D12Resource* GetInstanceDataResource() const { return m_instanceDataDefault.Get(); }
 
+	/// GPU TreeInfo buffer (center/radius/world, for shadow frustum culling)
+	ID3D12Resource* GetTreeInfoResource() const { return m_treeInfoDefault.Get(); }
+
 private:
 	bool CreatePipelines(ID3D12Device* device);
 	bool CreateIndirectCommandSignature(ID3D12Device* device, ID3D12RootSignature* pbrRootSignature);

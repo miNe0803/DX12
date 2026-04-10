@@ -85,12 +85,14 @@ struct PBRConstants {
     DirectX::XMFLOAT4 NprDebugHdr;
 };
 
-// 地形用: ベース地面 + 3種の木 + 雪 + 川 + カメラ位置
+// 地形用: ベース地面 + 3種の木 + 雪 + 川 + カメラ位置 + ライティング
 struct TerrainConstants {
     DirectX::XMFLOAT4 LayerColor[6]; // 0=地面, 1..3=木3種, 4=雪, 5=川
     DirectX::XMFLOAT4 CameraPos;
     /// x:Terrain PS debug stage 0..3 / y:cheap path on (1/0) / z:grazing threshold / w:near preserve dist (m, 0=off)
     DirectX::XMFLOAT4 DebugParams;
+    DirectX::XMFLOAT4 SunDirection;  // .xyz = normalised dir TO light, .w = intensity
+    DirectX::XMFLOAT4 SunColor;      // .rgb
 };
 
 struct Mesh {

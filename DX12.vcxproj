@@ -552,6 +552,14 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
       <ObjectFileName>$(OutDir)TreeShadowPass_VS.cso</ObjectFileName>
     </FxCompile>
+    <FxCompile Include="Shaders\Shadow\ShadowFrustumCull_CS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)ShadowFrustumCull_CS.cso</ObjectFileName>
+    </FxCompile>
     <FxCompile Include="Shaders\Shadow\TreeShadowAlphaTest_PS.hlsl">
       <EntryPointName>main</EntryPointName>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>

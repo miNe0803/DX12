@@ -180,34 +180,121 @@ void EditorUI::DrawWindows(entt::registry& registry)
 
 	if (m_State.showAtmosphere)
 	{
-		if (ImGui::Begin("Atmosphere && Skybox", &m_State.showAtmosphere))
+		ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
+		if (ImGui::Begin("Atmosphere", &m_State.showAtmosphere))
 		{
-			if (g_Scene)
+			if (!g_Scene)
 			{
-				AtmosphereParams& ap = g_Scene->GetAtmosphereParams();
-				ImGui::Checkbox("Enable Fog", &ap.enableFog);
-				ImGui::Checkbox("Enable Volumetric Light", &ap.enableVolumetric);
-				ImGui::Separator();
-				ImGui::SliderFloat("Fog Density", &ap.fogDensity, 0.0f, 0.05f, "%.4f");
-				ImGui::SliderFloat("Height Falloff", &ap.heightFalloff, 0.0f, 0.05f, "%.5f");
-				ImGui::SliderFloat("Base Height", &ap.baseHeight, -200.0f, 500.0f);
-				ImGui::SliderFloat("Max Fog Distance", &ap.maxFogDistance, 100.0f, 5000.0f);
-				ImGui::SliderFloat("Scattering G (Anisotropy)", &ap.scatteringG, -0.9f, 0.99f);
-				ImGui::ColorEdit3("Fog Color", &ap.fogColorR);
-				ImGui::Separator();
-				ImGui::Checkbox("Temporal Reprojection", &ap.enableTemporal);
-				if (ap.enableTemporal)
-					ImGui::SliderFloat("Temporal Blend", &ap.temporalBlend, 0.01f, 0.5f, "%.3f");
-				ImGui::Separator();
-				ImGui::Checkbox("Tree Shadows", &ap.enableTreeShadows);
-				if (ap.enableTreeShadows)
-				{
-					ImGui::SliderInt("Tree Shadow Cascades", &ap.treeShadowCascades, 1, 3);
-					ImGui::SliderInt("Tree Shadow Max Instances", &ap.treeShadowMaxInstances, 512, 16384);
-				}
+				ImGui::TextDisabled("Scene not loaded.");
+				ImGui::End();
+				return;
 			}
-			else
-				ImGui::TextUnformatted("Scene not loaded.");
+
+			AtmosphereParams& ap = g_Scene->GetAtmosphereParams();
+
+			// ========== Sun ==========
+			if (ImGui::CollapsingHeader("Sun##atm", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				ImGui::Indent(4.0f);
+
+				ImGui::SliderFloat("Azimuth##sun", &ap.sunAzimuth, 0.0f, 360.0f, "%.1f\xc2\xb0");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=North  90=East  180=South  270=West");
+
+				ImGui::SliderFloat("Elevation##sun", &ap.sunElevation, -10.0f, 90.0f, "%.1f\xc2\xb0");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Angle above horizon. Low values = long shadows / sunset.");
+
+				ImGui::SliderFloat("Intensity##sun", &ap.sunIntensity, 0.0f, 5.0f, "%.2f");
+				ImGui::ColorEdit3("Color##sun", &ap.sunColorR, ImGuiColorEditFlags_Float);
+
+				ImGui::Unindent(4.0f);
+			}
+
+			// ========== Fog ==========
+			if (ImGui::CollapsingHeader("Height Fog##atm", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				ImGui::Indent(4.0f);
+
+				ImGui::Checkbox("Enable##fog", &ap.enableFog);
+				if (!ap.enableFog) ImGui::BeginDisabled();
+
+				ImGui::SliderFloat("Density##fog", &ap.fogDensity, 0.0f, 0.05f, "%.4f");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global fog density. Higher = thicker fog.");
+
+				ImGui::SliderFloat("Height Falloff##fog", &ap.heightFalloff, 0.0f, 0.05f, "%.4f");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rate of fog thinning with altitude.\n0 = uniform  |  higher = ground-hugging.");
+
+				ImGui::SliderFloat("Base Height##fog", &ap.baseHeight, -200.0f, 500.0f, "%.0f m");
+				ImGui::SliderFloat("Max Distance##fog", &ap.maxFogDistance, 100.0f, 5000.0f, "%.0f m");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fog distance is clamped to this value.\nPrevents distant geometry from whiting out.");
+
+				ImGui::ColorEdit3("Fog Color##fog", &ap.fogColorR, ImGuiColorEditFlags_Float);
+
+				if (!ap.enableFog) ImGui::EndDisabled();
+
+				ImGui::Unindent(4.0f);
+			}
+
+			// ========== Volumetric Light ==========
+			if (ImGui::CollapsingHeader("Volumetric Light##atm", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				ImGui::Indent(4.0f);
+
+				ImGui::Checkbox("Enable##vol", &ap.enableVolumetric);
+				if (!ap.enableVolumetric) ImGui::BeginDisabled();
+
+				ImGui::SliderFloat("Scattering G##vol", &ap.scatteringG, -0.9f, 0.99f, "%.2f");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Henyey-Greenstein anisotropy.\n>0 = forward scattering (sun-facing god rays)\n<0 = back scattering\n 0 = isotropic");
+
+				ImGui::SliderFloat("Noise Strength##vol", &ap.noiseStrength, 0.0f, 1.0f, "%.2f");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("3D FBM noise modulates fog density.\nCreates pockets of thicker/thinner fog.\n0 = uniform density.");
+
+				if (!ap.enableVolumetric) ImGui::EndDisabled();
+
+				ImGui::Unindent(4.0f);
+			}
+
+			// ========== Quality ==========
+			if (ImGui::CollapsingHeader("Quality##atm"))
+			{
+				ImGui::Indent(4.0f);
+
+				ImGui::Checkbox("Temporal Reprojection##qual", &ap.enableTemporal);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend with previous frame to reduce\nray marching jitter noise.\nAdds ~0.2ms GPU cost.");
+
+				if (ap.enableTemporal)
+				{
+					ImGui::Indent(12.0f);
+					ImGui::SliderFloat("Blend Factor##qual", &ap.temporalBlend, 0.01f, 0.5f, "%.3f");
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lower = smoother but more ghosting.\nHigher = responsive but noisier.\nRecommended: 0.05");
+					ImGui::Unindent(12.0f);
+				}
+
+				ImGui::Unindent(4.0f);
+			}
+
+			// ========== Shadows ==========
+			if (ImGui::CollapsingHeader("Tree Shadows##atm"))
+			{
+				ImGui::Indent(4.0f);
+
+				ImGui::Checkbox("Enable##treeShadow", &ap.enableTreeShadows);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw GPU-driven tree instances into shadow map.\nOFF by default (expensive in Debug builds).");
+
+				if (!ap.enableTreeShadows) ImGui::BeginDisabled();
+
+				ImGui::SliderInt("Cascades##treeShadow", &ap.treeShadowCascades, 1, 3);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("1 = near only (fastest)\n2 = near + mid\n3 = all cascades");
+
+				ImGui::SliderInt("Max Instances##treeShadow", &ap.treeShadowMaxInstances, 16, 4096);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cap on tree instances drawn per cascade.\nLower = faster. 128-512 recommended.");
+
+				ImGui::SliderFloat("Shadow Distance##treeShadow", &ap.treeShadowDistance, 5.0f, 200.0f, "%.0f m");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Trees beyond this XZ distance from camera\nare excluded from shadow rendering.\nLower = faster, fewer distant shadows.");
+
+				if (!ap.enableTreeShadows) ImGui::EndDisabled();
+
+				ImGui::Unindent(4.0f);
+			}
 		}
 		ImGui::End();
 	}

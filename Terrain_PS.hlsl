@@ -1,4 +1,4 @@
-﻿struct VSOutput
+struct VSOutput
 {
     float4 svpos : SV_POSITION;
     float4 color : COLOR;
@@ -6,6 +6,13 @@
     float3 normal : NORMAL;
     float3 tangent : TANGENT;
     float3 worldPos : TEXCOORD1;
+};
+
+cbuffer Transform : register(b0)
+{
+    matrix World;
+    matrix View;
+    matrix Proj;
 };
 
 SamplerState smp : register(s0);
@@ -23,6 +30,48 @@ cbuffer TerrainParams : register(b1)
     float4 CameraPos;
     // x: stage 0..3, y: cheap path on, z: grazing threshold, w: near preserve (m, 0=no extra gate)
     float4 DebugParams;
+    float4 SunDirection; // .xyz = normalised dir TO light
+    float4 SunColor;     // .rgb
+};
+
+// Shadow mapping (space2)
+Texture2DArray _ShadowMap : register(t0, space2);
+SamplerComparisonState shadowSampler : register(s1, space2);
+cbuffer ShadowCB : register(b1, space2)
+{
+    matrix LightVP[3];
+    float4 CascadeSplits;
+};
+
+static const float kShadowBias = 0.002;
+
+float SampleShadowPCF(float3 worldPos, float viewDepth)
+{
+    uint cascade = 2;
+    if (viewDepth < CascadeSplits.x) cascade = 0;
+    else if (viewDepth < CascadeSplits.y) cascade = 1;
+
+    float4 lightClip = mul(float4(worldPos, 1.0), LightVP[cascade]);
+    float3 projCoord = lightClip.xyz / lightClip.w;
+    float2 shadowUV = projCoord.xy * 0.5 + 0.5;
+    shadowUV.y = 1.0 - shadowUV.y;
+
+    if (shadowUV.x < 0 || shadowUV.x > 1 || shadowUV.y < 0 || shadowUV.y > 1)
+        return 1.0;
+
+    float compareDepth = projCoord.z - kShadowBias;
+    float shadow = 0;
+    const float texelSize = 1.0 / 2048.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        float2 offset = float2(x, y) * texelSize;
+        shadow += _ShadowMap.SampleCmpLevelZero(
+            shadowSampler,
+            float3(shadowUV + offset, (float)cascade),
+            compareDepth);
+    }
+    return shadow / 9.0;
 };
 
 float3 BlendTreeLayers(float3 mask, float3 ground, float3 tree0, float3 tree1, float3 tree2)
@@ -43,8 +92,12 @@ float4 main(VSOutput input) : SV_TARGET
     float3 N = input.normal;
     if (length(N) < 0.001f) N = float3(0.0f, 1.0f, 0.0f);
     else N = normalize(N);
-    float3 L = normalize(float3(0.5, 0.7, -1.0));
+    float3 L = normalize(SunDirection.xyz);
     float ndotl = max(dot(N, L), 0.0f);
+
+    // Shadow
+    float4 viewPos = mul(float4(input.worldPos, 1.0), View);
+    float shadowFactor = SampleShadowPCF(input.worldPos, viewPos.z);
 
     // 段階デバッグ:
     // 0 = diff のみ
@@ -72,7 +125,7 @@ float4 main(VSOutput input) : SV_TARGET
 
     if (useCheapPath)
     {
-        float3 cheapLit = albedo * (0.25f + 0.75f * ndotl);
+        float3 cheapLit = albedo * (0.25f + 0.75f * ndotl * shadowFactor);
         return float4(cheapLit, 1.0f);
     }
 
@@ -82,7 +135,7 @@ float4 main(VSOutput input) : SV_TARGET
 
     // disp はまず明るさ補正だけに使って影響を観察しやすくする
     albedo *= lerp(0.90f, 1.15f, disp);
-    float3 lit = albedo * (0.20f + 0.80f * ndotl);
+    float3 lit = albedo * (0.20f + 0.80f * ndotl * shadowFactor);
     if (kTerrainDebugStage == 1)
         return float4(lit, 1.0f);
 

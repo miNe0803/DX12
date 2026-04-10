@@ -1,4 +1,4 @@
-﻿#include "TerrainGpuCullSystem.h"
+#include "TerrainGpuCullSystem.h"
 #include "DescriptorHeap.h"
 #include "Engine.h"
 #include "SharedStruct.h"
@@ -544,7 +544,9 @@ void TerrainGpuCullSystem::DrawIndirect(
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskTable,
 	D3D12_GPU_DESCRIPTOR_HANDLE iblTable,
 	VertexBuffer* vb,
-	IndexBuffer* ib)
+	IndexBuffer* ib,
+	D3D12_GPU_DESCRIPTOR_HANDLE shadowMapSrvGpu,
+	D3D12_GPU_VIRTUAL_ADDRESS shadowCBGpu)
 {
 	if (!m_valid || !cmd || !terrainRootSig || !terrainPso || !terrainRootSig->IsValid() || !terrainPso->IsValid()
 		|| !vb || !ib || !m_drawIndexedSig)
@@ -589,6 +591,10 @@ void TerrainGpuCullSystem::DrawIndirect(
 	if (iblTable.ptr != 0)
 		cmd->SetGraphicsRootDescriptorTable(3, iblTable);
 	cmd->SetGraphicsRootShaderResourceView(4, m_drawPayloadDefault->GetGPUVirtualAddress());
+	if (shadowMapSrvGpu.ptr != 0)
+		cmd->SetGraphicsRootDescriptorTable(5, shadowMapSrvGpu);
+	if (shadowCBGpu != 0)
+		cmd->SetGraphicsRootConstantBufferView(6, shadowCBGpu);
 
 	D3D12_VERTEX_BUFFER_VIEW vbView = vb->View();
 	D3D12_INDEX_BUFFER_VIEW ibView = ib->View();
