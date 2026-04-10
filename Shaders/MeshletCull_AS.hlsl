@@ -1,12 +1,15 @@
 // ============================================================
-// Amplification Shader: per-meshlet culling
-// Dispatched as DispatchMesh(ceil(meshletCount/32), 1, 1)
-// Each thread group processes up to 32 meshlets.
+// Amplification Shader: per-meshlet culling with Two-Phase Occlusion
+//
+// Phase 0 (no Hi-Z): frustum + backface only (fallback)
+// Phase 1: frustum + backface + previous-frame Hi-Z
+//          Culled meshlets written to g_CulledList for Phase 2
+// Phase 2: process ONLY Phase 1 culled items against new Hi-Z
 // ============================================================
 
 #include "Bindless.hlsli"
+#include "TwoPhaseOcclusion.hlsli"
 
-// Scene constants
 cbuffer SceneCB : register(b0)
 {
     matrix View;
@@ -23,21 +26,12 @@ cbuffer SceneCB : register(b0)
     uint   activeLightCount;
 };
 
-// Per-dispatch constants (root constants b2)
 cbuffer DrawConstants : register(b2)
 {
     uint g_MeshletBufferIdx;     // StructuredBuffer<Meshlet>
     uint g_BoundsBufferIdx;      // StructuredBuffer<MeshletBounds>
-    uint g_MeshletCount;         // total meshlets to process
-    uint g_InstanceWorldIdx;     // StructuredBuffer<InstanceData> for world matrix
-};
-
-struct MeshletData
-{
-    uint vertexOffset;
-    uint vertexCount;
-    uint primitiveOffset;
-    uint primitiveCount;
+    uint g_MeshletCount;         // total meshlets to process (Phase 1) or culled count (Phase 2)
+    uint g_InstanceWorldIdx;     // unused for now (identity instance)
 };
 
 struct BoundsData
@@ -48,7 +42,8 @@ struct BoundsData
     float  coneCutoff;
 };
 
-// Frustum planes (extracted from ViewProj)
+// --- Frustum culling ---
+
 static float4 ExtractPlane(matrix vp, int row, float sign)
 {
     return float4(
@@ -67,38 +62,37 @@ bool SphereOutsidePlane(float3 center, float radius, float4 plane)
 bool FrustumCullSphere(float3 center, float radius, matrix vp)
 {
     float4 planes[6];
-    planes[0] = ExtractPlane(vp, 0, 1.0);  // left
+    planes[0] = ExtractPlane(vp, 0,  1.0); // left
     planes[1] = ExtractPlane(vp, 0, -1.0); // right
-    planes[2] = ExtractPlane(vp, 1, 1.0);  // bottom
+    planes[2] = ExtractPlane(vp, 1,  1.0); // bottom
     planes[3] = ExtractPlane(vp, 1, -1.0); // top
-    planes[4] = ExtractPlane(vp, 2, 1.0);  // near
+    planes[4] = ExtractPlane(vp, 2,  1.0); // near
     planes[5] = ExtractPlane(vp, 2, -1.0); // far
 
     [unroll] for (int i = 0; i < 6; ++i)
     {
         if (SphereOutsidePlane(center, radius, planes[i]))
-            return true; // culled
+            return true;
     }
     return false;
 }
 
-bool BackfaceConeCull(float3 coneAxis, float coneCutoff, float3 meshletCenter, float3 cameraPos)
+bool BackfaceConeCull(float3 coneAxis, float coneCutoff, float3 center, float3 cameraPos)
 {
-    // If all normals in the meshlet face away from the camera, cull it.
-    // coneCutoff: minimum dot(normal, avgNormal) across all normals in the meshlet.
-    // If dot(viewDir, coneAxis) < -coneCutoff, the entire meshlet is backfacing.
-    if (coneCutoff >= 1.0) return false; // degenerate cone, don't cull
-    float3 viewDir = normalize(meshletCenter - cameraPos);
+    if (coneCutoff >= 1.0) return false;
+    float3 viewDir = normalize(center - cameraPos);
     return dot(viewDir, coneAxis) < -coneCutoff;
 }
 
-// Payload passed from AS to MS
+// --- Payload to Mesh Shader ---
+
 struct MeshletPayload
 {
     uint meshletIndices[32];
 };
 
 groupshared MeshletPayload s_payload;
+groupshared uint s_visibleCount;
 
 [numthreads(32, 1, 1)]
 void main(
@@ -106,38 +100,65 @@ void main(
     uint dtid : SV_DispatchThreadID,
     uint gid  : SV_GroupID)
 {
+    if (gtid == 0) s_visibleCount = 0;
+    GroupMemoryBarrierWithGroupSync();
+
     bool visible = false;
+    uint meshletIdx = 0xFFFFFFFF;
 
     if (dtid < g_MeshletCount)
     {
-        StructuredBuffer<BoundsData> boundsBuffer = ResourceDescriptorHeap[g_BoundsBufferIdx];
-        BoundsData bounds = boundsBuffer[dtid];
+        // Phase 2: read actual meshlet index from culled list
+        if (g_Phase == 1)
+            meshletIdx = ReadFromCulledList(dtid);
+        else
+            meshletIdx = dtid;
 
-        matrix viewProj = mul(View, Proj);
-
-        // Frustum culling (world-space sphere — assumes identity instance transform for now)
-        // TODO: transform bounds by instance world matrix for instanced meshlets
-        visible = !FrustumCullSphere(bounds.center, bounds.radius, viewProj);
-
-        // Backface cone culling
-        if (visible)
+        if (meshletIdx != 0xFFFFFFFF && meshletIdx < g_TotalMeshlets)
         {
-            visible = !BackfaceConeCull(bounds.coneAxis, bounds.coneCutoff,
-                                        bounds.center, CameraWorld.xyz);
-        }
+            StructuredBuffer<BoundsData> boundsBuffer = ResourceDescriptorHeap[g_BoundsBufferIdx];
+            BoundsData bounds = boundsBuffer[meshletIdx];
 
-        // Hi-Z occlusion culling placeholder (Step 3 will add Two-Phase here)
+            matrix viewProj = mul(View, Proj);
+
+            // Frustum culling
+            visible = !FrustumCullSphere(bounds.center, bounds.radius, viewProj);
+
+            // Backface cone culling
+            if (visible)
+                visible = !BackfaceConeCull(bounds.coneAxis, bounds.coneCutoff,
+                                            bounds.center, CameraWorld.xyz);
+
+            // Hi-Z occlusion culling (Phase 1 uses prev Hi-Z, Phase 2 uses new Hi-Z)
+            if (visible && g_HiZMipCount > 0)
+            {
+                bool occluded = HiZOcclusionTest(bounds.center, bounds.radius,
+                                                  mul(View, Proj), CameraWorld.xyz);
+                if (occluded)
+                {
+                    visible = false;
+
+                    // Phase 1 only: save to culled list for Phase 2 re-test
+                    if (g_Phase == 0)
+                        WriteToCulledList(meshletIdx);
+                }
+            }
+        }
     }
 
-    // Compact visible meshlets
+    // Compact visible meshlets using wave intrinsics
     if (visible)
-        s_payload.meshletIndices[gtid] = dtid;
-    else
+    {
+        uint slot;
+        InterlockedAdd(s_visibleCount, 1, slot);
+        s_payload.meshletIndices[slot] = meshletIdx;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Fill unused slots
+    if (gtid >= s_visibleCount && gtid < 32)
         s_payload.meshletIndices[gtid] = 0xFFFFFFFF;
 
-    // Count visible meshlets in this group
-    uint visibleCount = WaveActiveCountBits(visible);
-
-    // Dispatch mesh shader groups for visible meshlets
-    DispatchMesh(visibleCount, 1, 1, s_payload);
+    DispatchMesh(s_visibleCount, 1, 1, s_payload);
 }

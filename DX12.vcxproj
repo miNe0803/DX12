@@ -193,6 +193,9 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClInclude Include="Source\Graphics\ShadowSystem.h" />
     <ClInclude Include="Source\Graphics\BindlessMaterial.h" />
     <ClInclude Include="Source\Graphics\MeshletBuilder.h" />
+    <ClInclude Include="Source\Graphics\TwoPhaseOcclusion.h" />
+    <ClInclude Include="Source\Graphics\ClusterGrid.h" />
+    <ClInclude Include="Source\Graphics\SnowParticleSystem.h" />
     <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
@@ -228,6 +231,9 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClCompile Include="Source\Graphics\ShadowSystem.cpp" />
     <ClCompile Include="Source\Graphics\BindlessMaterial.cpp" />
     <ClCompile Include="Source\Graphics\MeshletBuilder.cpp" />
+    <ClCompile Include="Source\Graphics\TwoPhaseOcclusion.cpp" />
+    <ClCompile Include="Source\Graphics\ClusterGrid.cpp" />
+    <ClCompile Include="Source\Graphics\SnowParticleSystem.cpp" />
     <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />

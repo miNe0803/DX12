@@ -15,6 +15,8 @@ public:
 
 	bool IsValid() const { return m_valid; }
 	UINT GetMipCount() const { return m_mipCount; }
+	UINT GetWidth() const { return m_w; }
+	UINT GetHeight() const { return m_h; }
 	ID3D12Resource* GetPyramidResource() const { return m_hizPyramid.Get(); }
 
 	void SetEnabled(bool e) { m_enabled = e; }

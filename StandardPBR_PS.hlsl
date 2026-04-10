@@ -163,7 +163,31 @@ float4 main(VSOutput input) : SV_TARGET
     float2 brdf = _BrdfLut.Sample(smp, float2(NdotV, roughness)).rg;
     float3 specularPart = prefiltered * (F0 * brdf.x + brdf.y);
 
-    // 7. Composite
+    // 7. Forward+ clustered point/spot lights (activated when Bindless pipeline is live)
+    // TODO: enable when Bindless root signature is active
+    // #ifdef ENABLE_FORWARD_PLUS
+    // #include "ClusterShading.hlsli"
+    // {
+    //     float linearDepth = viewPos.z;
+    //     uint3 clusterId = ComputeClusterId(input.svpos.xy, linearDepth,
+    //         ClusterSliceParams.x, ClusterSliceParams.y, (uint)ClusterGridParams.x);
+    //     uint flatIdx = FlattenClusterId(clusterId, (uint)ClusterGridParams.x, (uint)ClusterGridParams.y);
+    //     StructuredBuffer<ClusterEntry> clusterData = ResourceDescriptorHeap[clusterDataSRVIdx];
+    //     Buffer<uint> lightIndices = ResourceDescriptorHeap[lightIndexListSRVIdx];
+    //     StructuredBuffer<LightData> lights = ResourceDescriptorHeap[lightBufferSRVIdx];
+    //     ClusterEntry entry = clusterData[flatIdx];
+    //     float3 clusterLighting = float3(0, 0, 0);
+    //     for (uint li = 0; li < entry.count; ++li)
+    //     {
+    //         uint lightIdx = lightIndices[entry.offset + li];
+    //         clusterLighting += EvaluatePointLight(lights[lightIdx], input.worldPos,
+    //             worldNormal, V, albedo.rgb, metallic, roughness);
+    //     }
+    //     directLight += clusterLighting * shadowFactor;
+    // }
+    // #endif
+
+    // 8. Composite
     float3 finalColor = directLight + ambientLight + specularPart;
 
     finalColor += _RampTex.Sample(smp, float2(0.5f, 0.5f)).rgb * 0.0f;
