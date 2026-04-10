@@ -171,7 +171,8 @@ namespace
 			outInfo[i].speciesIndex = static_cast<UINT>(instances[i].speciesIndex);
 
 			XMStoreFloat4x4(&outInst[i].World, worldGpuT);
-			outInst[i].NprPerMesh = XMFLOAT4(-1.f, 0.f, 0.f, 1.f);
+			outInst[i].materialIndex = 0; // default PBR material
+			outInst[i]._pad[0] = outInst[i]._pad[1] = outInst[i]._pad[2] = 0;
 		}
 	}
 }

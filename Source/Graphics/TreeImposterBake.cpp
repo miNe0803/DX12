@@ -168,7 +168,8 @@ bool TreeImposterBake::BakeAtlases(
 
 	XMStoreFloat4x4(&inst.World, XMMatrixTranspose(worldBake));
 
-	inst.NprPerMesh = XMFLOAT4(-1.f, 0.f, 0.f, 0.f);
+	inst.materialIndex = 0;
+	inst._pad[0] = inst._pad[1] = inst._pad[2] = 0;
 
 
 

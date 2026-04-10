@@ -55,6 +55,8 @@ struct MeshRendererComponent
 	uint8_t              NprSphereMode = 0;
 	/// PMX 等のマテリアル Opacity（NPR 透明パスで NprPerMesh.z に乗算）
 	float                NprOpacity = 1.f;
+	/// Bindless material buffer index (set during model registration). 0 = default PBR.
+	uint32_t             BindlessMaterialIndex = 0;
 };
 
 /// NPR（トゥーン）描画対象のモデルルートに付与

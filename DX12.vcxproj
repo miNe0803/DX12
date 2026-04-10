@@ -134,7 +134,7 @@ copy /Y "C:\vcpkg\installed\x64-windows\debug\bin\WinPixEventRuntime.dll" "$(Out
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_SILENCE_CXX23_DENORM_DEPRECATION_WARNING;ENABLE_GPU_DEBUG_LABELS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_SILENCE_CXX23_DENORM_DEPRECATION_WARNING;NOMINMAX;ENABLE_GPU_DEBUG_LABELS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
@@ -191,6 +191,7 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
     <ClInclude Include="Source\Graphics\HiZSystem.h" />
     <ClInclude Include="Source\Graphics\ShadowSystem.h" />
+    <ClInclude Include="Source\Graphics\BindlessMaterial.h" />
     <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
@@ -224,6 +225,7 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClCompile Include="Source\Graphics\IBLGenerator.cpp" />
     <ClCompile Include="Source\Graphics\HiZSystem.cpp" />
     <ClCompile Include="Source\Graphics\ShadowSystem.cpp" />
+    <ClCompile Include="Source\Graphics\BindlessMaterial.cpp" />
     <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />

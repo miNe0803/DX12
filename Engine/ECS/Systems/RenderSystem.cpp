@@ -762,8 +762,8 @@ void RenderSystem::DrawMain(
 		}
 
 		DirectX::XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
-		pbrInstanceMapped[writeCursor].NprPerMesh = DirectX::XMFLOAT4(
-			-1.f, static_cast<float>(mesh.NprSphereMode), 0.f, 0.f);
+		pbrInstanceMapped[writeCursor].materialIndex = mesh.BindlessMaterialIndex;
+		pbrInstanceMapped[writeCursor]._pad[0] = pbrInstanceMapped[writeCursor]._pad[1] = pbrInstanceMapped[writeCursor]._pad[2] = 0;
 		++writeCursor;
 		++pbrBatchCount;
 		if (EntityIsPlayerFamilyMesh(registry, it.entity))
@@ -1011,13 +1011,8 @@ void RenderSystem::DrawNprPasses(
 		const auto& mesh = registry.get<MeshRendererComponent>(entity);
 		XMStoreFloat4x4(&pbrInstanceMapped[writeCursor].World, transform.WorldMatrix);
 		{
-			const float useO = mesh.NprCelVertexBlendOverride;
-			const float sph = static_cast<float>(mesh.NprSphereMode);
-			const float op = mesh.NprOpacity;
-			if (useO >= 0.f)
-				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(useO, sph, op, 1.f);
-			else
-				pbrInstanceMapped[writeCursor].NprPerMesh = XMFLOAT4(-1.f, sph, op, 0.f);
+			pbrInstanceMapped[writeCursor].materialIndex = mesh.BindlessMaterialIndex;
+			pbrInstanceMapped[writeCursor]._pad[0] = pbrInstanceMapped[writeCursor]._pad[1] = pbrInstanceMapped[writeCursor]._pad[2] = 0;
 		}
 		const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
 		cmdList->SetPipelineState(pso->Get());
