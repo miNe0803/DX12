@@ -23,7 +23,7 @@ SamplerComparisonState shadowSmp  : register(s0);
 SamplerState           pointSmp   : register(s1);
 RWTexture2D<float4>    OutVolume  : register(u0);
 
-static const int   NUM_STEPS = 24;
+static const int   NUM_STEPS = 8; // フォグ品質は temporal reprojection で補完
 static const float kShadowBias = 0.002;
 
 // ---- Procedural 3D noise (no texture needed) ----

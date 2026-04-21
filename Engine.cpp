@@ -91,6 +91,31 @@ bool Engine::CreateDevice()
 		}
 	}
 
+	// GPU 名を取得してログ出力
+	{
+		ComPtr<IDXGIFactory4> dxgiFactory;
+		if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory))))
+		{
+			LUID luid = m_pDevice->GetAdapterLuid();
+			ComPtr<IDXGIAdapter1> adapter;
+			for (UINT i = 0; dxgiFactory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i)
+			{
+				DXGI_ADAPTER_DESC1 desc{};
+				adapter->GetDesc1(&desc);
+				if (desc.AdapterLuid.HighPart == luid.HighPart && desc.AdapterLuid.LowPart == luid.LowPart)
+				{
+					{
+						char gn[256]; size_t conv = 0;
+						wcstombs_s(&conv, gn, sizeof(gn), desc.Description, _TRUNCATE);
+						char gl[512]; sprintf_s(gl, "[Engine] GPU: %s (VRAM: %lluMB)\n", gn, desc.DedicatedVideoMemory/(1024*1024));
+						OutputDebugStringA(gl);
+					}
+					break;
+				}
+				adapter.Reset();
+			}
+		}
+	}
 	printf("Engine::CreateDevice: MeshShader=%s  DXR=%s  SM=%d.%d\n",
 		m_features.meshShaderSupported ? "YES" : "NO",
 		m_features.raytracingSupported ? "YES" : "NO",
@@ -136,6 +161,19 @@ bool Engine::CreateSwapChain()
 		return false;
 	}
 
+	// Check tearing support for variable refresh rate / flicker-free Present(0)
+	m_tearingSupported = false;
+	{
+		ComPtr<IDXGIFactory5> factory5;
+		if (SUCCEEDED(pFactory->QueryInterface(IID_PPV_ARGS(&factory5))))
+		{
+			BOOL allowTearing = FALSE;
+			if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))))
+				m_tearingSupported = (allowTearing == TRUE);
+		}
+	}
+	printf("Engine: Tearing support = %s\n", m_tearingSupported ? "YES" : "NO");
+
 	DXGI_SWAP_CHAIN_DESC desc = {};
 	desc.BufferDesc.Width = m_FrameBufferWidth;
 	desc.BufferDesc.Height = m_FrameBufferHeight;
@@ -152,6 +190,8 @@ bool Engine::CreateSwapChain()
 	desc.Windowed = TRUE;
 	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+	if (m_tearingSupported)
+		desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
 	IDXGISwapChain* pSwapChain = nullptr;
 	hr = pFactory->CreateSwapChain(m_pQueue.Get(), &desc, &pSwapChain);
@@ -455,11 +495,11 @@ void Engine::BeginRender()
 		g_EngineFirstBeginRender = 0;
 		this->WaitForGpuIdle();
 	}
-	else if (m_fenceValue[frameIndex] > 0 && m_pFence && m_fenceEvent)
+	else if (m_pFence && m_fenceEvent && m_mainGraphicsFenceValue > 0)
 	{
-		if (m_pFence->GetCompletedValue() < m_fenceValue[frameIndex])
+		if (m_pFence->GetCompletedValue() < m_mainGraphicsFenceValue)
 		{
-			if (SUCCEEDED(m_pFence->SetEventOnCompletion(m_fenceValue[frameIndex], m_fenceEvent)))
+			if (SUCCEEDED(m_pFence->SetEventOnCompletion(m_mainGraphicsFenceValue, m_fenceEvent)))
 				WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 		}
 	}
@@ -509,7 +549,10 @@ void Engine::EndRender()
 	m_pQueue->Signal(m_pFence.Get(), m_mainGraphicsFenceValue);
 	m_fenceValue[m_lastSubmittedBackBufferIndex % FRAME_BUFFER_COUNT] = m_mainGraphicsFenceValue;
 
-	m_pSwapChain->Present(1, 0);
+	// VSync OFF: FPS 上限を撤廃
+	const UINT syncInterval = 0;
+	const UINT presentFlags = (syncInterval == 0 && m_tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+	m_pSwapChain->Present(syncInterval, presentFlags);
 	m_CurrentBackBufferIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 }
 

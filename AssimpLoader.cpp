@@ -342,7 +342,7 @@ static bool PmxMatNameSkinLikeToon3(const std::string& matNameUtf8)
 /// 戻り値: 0=このファイル用テーブル無し, 1=toon3 系, 2=toon4 系（名前判定が失敗したときのフォールバック）
 static int PmxRampKindByMaterialIndexTable(const std::wstring& modelPathLower, unsigned materialIndex)
 {
-    constexpr wchar_t kHibana[] = L"hibana.pmx";
+    constexpr wchar_t kHibana[] = L"hiban1a.pmx";
     constexpr size_t kHibanaLen = sizeof(kHibana) / sizeof(kHibana[0]) - 1u;
     if (modelPathLower.size() < kHibanaLen
         || modelPathLower.compare(modelPathLower.size() - kHibanaLen, kHibanaLen, kHibana) != 0)

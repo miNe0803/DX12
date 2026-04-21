@@ -31,10 +31,10 @@ struct AtmosphereParams
 	bool  enableFog     = true;
 	bool  enableVolumetric = true;
 	bool  enableTemporal = false;
-	bool  enableTreeShadows = false;
-	int   treeShadowMaxInstances = 128;
+	bool  enableTreeShadows = true;
+	int   treeShadowMaxInstances = 48;  // 距離内の全木をカバー → ちらつき防止
 	int   treeShadowCascades = 1;
-	float treeShadowDistance = 30.0f;
+	float treeShadowDistance = 25.0f;  // 短くして実描画数を抑制
 };
 
 /// Exponential height fog + volumetric light (ray-marched at quarter resolution)

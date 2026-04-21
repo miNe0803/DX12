@@ -96,12 +96,12 @@ float3 CornerFromSphere(float3 c, float r, int i)
 
 bool SphereOutsidePlane(float3 c, float r, float4 pl)
 {
-	// TerrainFrustumCull_CS と同じ未正規化平面 ax+by+cz+d=0。符号距離（世界単位）は d/|n|。
-	// 球が平面の「外側」半空間に完全にある ⇔ 中心からの符号距離が半径より大きい ⇔ d > r*|n|。
+	// 未正規化平面 ax+by+cz+d=0。符号距離（世界単位）は d/|n|。
+	// 球が平面の「外側」半空間に完全にある ⇔ d > r*|n|。
 	float3 n = pl.xyz;
 	float len = length(n);
 	if (len < 1e-5)
-		return false;
+		return true; // 退化した平面 → 安全にカリング
 	float d = dot(n, c) + pl.w;
 	return (d > r * len);
 }

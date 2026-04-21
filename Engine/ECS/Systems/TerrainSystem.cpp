@@ -45,3 +45,24 @@ float TerrainSystem::GetHeight(const entt::registry& registry, float worldX, flo
 
 	return heightNorm * terrain.MaxHeight;
 }
+
+DirectX::XMFLOAT3 TerrainSystem::GetNormal(const entt::registry& registry, float worldX, float worldZ)
+{
+	auto view = registry.view<TerrainComponent>();
+	if (view.begin() == view.end())
+		return DirectX::XMFLOAT3(0.f, 1.f, 0.f);
+
+	const auto& terrain = view.get<TerrainComponent>(*view.begin());
+	const float eps = terrain.CellSpacing;
+
+	const float hL = GetHeight(registry, worldX - eps, worldZ);
+	const float hR = GetHeight(registry, worldX + eps, worldZ);
+	const float hD = GetHeight(registry, worldX, worldZ - eps);
+	const float hU = GetHeight(registry, worldX, worldZ + eps);
+
+	DirectX::XMVECTOR n = DirectX::XMVector3Normalize(
+		DirectX::XMVectorSet(hL - hR, 2.f * eps, hD - hU, 0.f));
+	DirectX::XMFLOAT3 result;
+	DirectX::XMStoreFloat3(&result, n);
+	return result;
+}

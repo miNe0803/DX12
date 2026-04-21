@@ -40,6 +40,8 @@ struct ProfilerFrameStats
 	float gpuTreeUploadCullMs = 0.0f;
 	/// 木: ExecuteIndirect（RenderSystem::DrawPostScenePbrTreesExecuteIndirect、Post CL）
 	float gpuTreeDrawMs = 0.0f;
+	float gpuShadowPassMs = 0.0f;
+	float gpuAtmosphereMs = 0.0f;
 	float fps = 0.0f; // derived from frameTimeMs (text only)
 	RenderStats render{};
 };
@@ -65,7 +67,13 @@ public:
 	static void GpuMarkTreeUploadCullEnd(ID3D12GraphicsCommandList* cmd);
 	static void GpuMarkTreeDrawBegin(ID3D12GraphicsCommandList* cmd);
 	static void GpuMarkTreeDrawEnd(ID3D12GraphicsCommandList* cmd);
-	/// 木 GPU パスをスキップしたフレームでも、ResolveQueryData(0..13) 用に 10..13 の EndQuery を補う。
+	static void GpuMarkShadowPassBegin(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkShadowPassEnd(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkAtmosphereBegin(ID3D12GraphicsCommandList* cmd);
+	static void GpuMarkAtmosphereEnd(ID3D12GraphicsCommandList* cmd);
+	/// 全スタンプ書き込み後に呼ぶ。未書き込みスタンプのプレースホルダー補完 + ResolveQueryData。
+	static void GpuResolveAllStamps(ID3D12GraphicsCommandList* cmd);
+	/// 木 GPU パスをスキップしたフレームでも、ResolveQueryData 用にスタンプを補う。
 	static void EnsureTreeGpuStampPlaceholders(ID3D12GraphicsCommandList* cmd);
 	static void SetRenderCpuBreakdown(float beginMs, float sceneDrawMs, float endMs);
 	static void SetPreRenderCpuTimeMs(float ms);
@@ -98,7 +106,7 @@ private:
 	static UINT s_gpuWriteFrameIndex;
 	static ComPtr<ID3D12QueryHeap> s_gpuTimestampHeap;
 	static ComPtr<ID3D12Resource> s_gpuTimestampReadback;
-	static constexpr UINT kGpuStampCountPerFrame = 14;
+	static constexpr UINT kGpuStampCountPerFrame = 18; // 14 + Shadow(2) + Atmosphere(2)
 	static bool EnsureGpuProfilerReady();
 	static void WriteGpuStamp(ID3D12GraphicsCommandList* cmd, UINT stampIndexInFrame);
 };

@@ -1,6 +1,7 @@
 #include "ShadowSystem.h"
 #include "DescriptorHeap.h"
 #include "Engine.h"
+#include "DebugLog.h"
 #include "SharedStruct.h"
 #include "Core/GpuDebugLabels.h"
 #include "VertexBuffer.h"
@@ -8,6 +9,7 @@
 #include <d3dx12.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -61,7 +63,11 @@ static XMMATRIX ComputeLightVP(
 	const XMFLOAT3& lightDir, float splitNear, float splitFar,
 	float shadowMapSize)
 {
-	XMMATRIX invViewProj = XMMatrixInverse(nullptr, cameraView * cameraProj);
+	// Check for singular ViewProj to prevent NaN propagation (e.g., camera looking straight up)
+	XMVECTOR det;
+	XMMATRIX invViewProj = XMMatrixInverse(&det, cameraView * cameraProj);
+	if (XMVectorGetX(XMVectorAbs(det)) < 1e-10f)
+		return XMMatrixIdentity(); // degenerate frustum, return safe identity
 
 	const float zNearNdc = 0.0f;
 	const float zFarNdc = 1.0f;
@@ -124,6 +130,8 @@ static XMMATRIX ComputeLightVP(
 		radius = std::max(radius, d);
 	}
 	radius = ceilf(radius * 16.0f) / 16.0f;
+	// Guard against degenerate frustum or NaN (e.g., camera looking straight up/down)
+	if (!(radius > 0.01f)) radius = 10.0f; // catches NaN, negative, and near-zero
 
 	XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDir));
 	XMVECTOR lightPos = centre + lightDirVec * radius * 2.0f;
@@ -132,8 +140,13 @@ static XMMATRIX ComputeLightVP(
 	if (fabsf(XMVectorGetX(XMVector3Dot(lightDirVec, up))) > 0.99f)
 		up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
 
+	// Guard: if lightPos == centre, LookAtLH produces NaN
+	float eyeToDist = XMVectorGetX(XMVector3Length(lightPos - centre));
+	if (eyeToDist < 1e-4f)
+		lightPos = centre - lightDirVec * 1.0f;
+
 	XMMATRIX lightView = XMMatrixLookAtLH(lightPos, centre, up);
-	XMMATRIX lightProj = XMMatrixOrthographicLH(radius * 2.0f, radius * 2.0f, 0.0f, radius * 4.0f);
+	XMMATRIX lightProj = XMMatrixOrthographicLH(radius * 2.0f, radius * 2.0f, 0.01f, radius * 4.0f + 0.01f);
 
 	XMMATRIX lightVP = lightView * lightProj;
 	XMVECTOR shadowOrigin = XMVector4Transform(XMVectorSet(0, 0, 0, 1), lightVP);
@@ -144,7 +157,17 @@ static XMMATRIX ComputeLightVP(
 	offset = XMVectorSetW(offset, 0.0f);
 
 	lightProj.r[3] += offset;
-	return lightView * lightProj;
+	XMMATRIX result = lightView * lightProj;
+
+	// Final NaN guard: if any matrix element is NaN, return identity to prevent GPU TDR
+	XMFLOAT4X4 check;
+	XMStoreFloat4x4(&check, result);
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			if (std::isnan((&check._11)[r * 4 + c]) || std::isinf((&check._11)[r * 4 + c]))
+				return XMMatrixIdentity();
+
+	return result;
 }
 
 // ---- ShadowSystem implementation ----
@@ -965,4 +988,25 @@ D3D12_GPU_VIRTUAL_ADDRESS ShadowSystem::WritePerDrawCB(const XMMATRIX& worldLigh
 	memcpy(m_perDrawRingMapped + byteOffset, &transposed, sizeof(XMMATRIX));
 
 	return m_perDrawRing->GetGPUVirtualAddress() + byteOffset;
+}
+
+bool ShadowSystem::IsTreeShadowCacheDirty(const XMFLOAT3& camPos, const XMFLOAT3& lightDir) const
+{
+	if (m_treeShadowCacheDirty) return true;
+	// カメラが 5m 以上移動 or ライト方向が変化 → 再描画
+	float dx = camPos.x - m_cachedCameraPos.x;
+	float dz = camPos.z - m_cachedCameraPos.z;
+	if (dx * dx + dz * dz > 25.0f) return true; // 5m threshold
+	float ldx = lightDir.x - m_cachedLightDir.x;
+	float ldy = lightDir.y - m_cachedLightDir.y;
+	float ldz = lightDir.z - m_cachedLightDir.z;
+	if (ldx * ldx + ldy * ldy + ldz * ldz > 0.001f) return true;
+	return false;
+}
+
+void ShadowSystem::MarkTreeShadowCacheClean(const XMFLOAT3& camPos, const XMFLOAT3& lightDir)
+{
+	m_treeShadowCacheDirty = false;
+	m_cachedCameraPos = camPos;
+	m_cachedLightDir = lightDir;
 }

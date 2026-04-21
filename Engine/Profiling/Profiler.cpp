@@ -9,6 +9,8 @@ namespace
 {
 	bool s_profTreeCullStamped = false;
 	bool s_profTreeDrawStamped = false;
+	bool s_profShadowStamped = false;
+	bool s_profAtmosphereStamped = false;
 	UINT s_gpuHeapStampSlotsPerFrame = 0;
 }
 
@@ -32,6 +34,8 @@ void Profiler::BeginFrame()
 {
 	s_profTreeCullStamped = false;
 	s_profTreeDrawStamped = false;
+	s_profShadowStamped = false;
+	s_profAtmosphereStamped = false;
 	s_frameStartTime = std::chrono::high_resolution_clock::now();
 	s_currentMiscDrawCalls = 0;
 	s_currentRenderCpuTimeMs = 0.0f;
@@ -92,13 +96,20 @@ void Profiler::EndFrame()
 				stats.gpuTreeUploadCullMs = static_cast<float>(static_cast<double>(treeCullEnd - treeCullBegin) * toMs);
 			if (s_profTreeDrawStamped && treeDrawEnd >= treeDrawBegin)
 				stats.gpuTreeDrawMs = static_cast<float>(static_cast<double>(treeDrawEnd - treeDrawBegin) * toMs);
+			const UINT64 shadowBegin = t[14], shadowEnd = t[15];
+			const UINT64 atmosBegin = t[16], atmosEnd = t[17];
+			if (s_profShadowStamped && shadowEnd >= shadowBegin)
+				stats.gpuShadowPassMs = static_cast<float>(static_cast<double>(shadowEnd - shadowBegin) * toMs);
+			if (s_profAtmosphereStamped && atmosEnd >= atmosBegin)
+				stats.gpuAtmosphereMs = static_cast<float>(static_cast<double>(atmosEnd - atmosBegin) * toMs);
 			s_gpuTimestampReadback->Unmap(0, nullptr);
 		}
 	}
 
 	stats.gpuTaggedPassesSumMs =
 		stats.gpuTerrainDepthPrepassMs + stats.gpuTerrainColorMs + stats.gpuDrawMainMs
-		+ stats.gpuHiZBuildMs + stats.gpuPostProcessMs + stats.gpuTreeUploadCullMs + stats.gpuTreeDrawMs;
+		+ stats.gpuHiZBuildMs + stats.gpuPostProcessMs + stats.gpuTreeUploadCullMs + stats.gpuTreeDrawMs
+		+ stats.gpuShadowPassMs + stats.gpuAtmosphereMs;
 
 	// A案: RenderSystemからPull
 	const RenderSystem::GpuDrawStats gpu = RenderSystem::GetLastGpuDrawStats();
@@ -151,6 +162,8 @@ void Profiler::WriteGpuStamp(ID3D12GraphicsCommandList* cmd, UINT stampIndexInFr
 {
 	if (!cmd || !EnsureGpuProfilerReady() || !s_gpuTimestampHeap)
 		return;
+	if (stampIndexInFrame >= s_gpuHeapStampSlotsPerFrame)
+		return; // ヒープ再作成前のフレームでの範囲外アクセスを防止
 	const UINT queryIndex = s_gpuWriteFrameIndex * kGpuStampCountPerFrame + stampIndexInFrame;
 	cmd->EndQuery(s_gpuTimestampHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
 }
@@ -186,8 +199,22 @@ void Profiler::GpuMarkPostProcessBegin(ID3D12GraphicsCommandList* cmd)
 void Profiler::GpuMarkPostProcessEndAndResolve(ID3D12GraphicsCommandList* cmd)
 {
 	WriteGpuStamp(cmd, 9);
+	// Resolve は GpuResolveAllStamps で行う（Atmosphere 後）
+}
+
+void Profiler::GpuResolveAllStamps(ID3D12GraphicsCommandList* cmd)
+{
 	if (!cmd || !EnsureGpuProfilerReady() || !s_gpuTimestampHeap || !s_gpuTimestampReadback)
 		return;
+	// 未書き込みスタンプのプレースホルダーを補完
+	// Note: Tree cull/draw は別CL(postCL)だが同一キューで先に Submit されるので Resolve 可能
+	if (!s_profTreeCullStamped) { WriteGpuStamp(cmd, 10); WriteGpuStamp(cmd, 11); }
+	if (!s_profTreeDrawStamped) { WriteGpuStamp(cmd, 12); WriteGpuStamp(cmd, 13); }
+	// Shadow は mainCL で書かれるため postCL から Resolve 不可。常にプレースホルダー。
+	// Shadow コストは (tagged合計 - 他パス) で推定する。
+	WriteGpuStamp(cmd, 14); WriteGpuStamp(cmd, 15);
+	if (!s_profAtmosphereStamped) { WriteGpuStamp(cmd, 16); WriteGpuStamp(cmd, 17); }
+
 	const UINT begin = s_gpuWriteFrameIndex * kGpuStampCountPerFrame;
 	const UINT64 dstOffset = static_cast<UINT64>(begin) * sizeof(UINT64);
 	cmd->ResolveQueryData(
@@ -244,6 +271,28 @@ void Profiler::GpuMarkTreeDrawEnd(ID3D12GraphicsCommandList* cmd)
 	WriteGpuStamp(cmd, 13);
 }
 
+void Profiler::GpuMarkShadowPassBegin(ID3D12GraphicsCommandList* cmd)
+{
+	s_profShadowStamped = true;
+	WriteGpuStamp(cmd, 14);
+}
+
+void Profiler::GpuMarkShadowPassEnd(ID3D12GraphicsCommandList* cmd)
+{
+	WriteGpuStamp(cmd, 15);
+}
+
+void Profiler::GpuMarkAtmosphereBegin(ID3D12GraphicsCommandList* cmd)
+{
+	s_profAtmosphereStamped = true;
+	WriteGpuStamp(cmd, 16);
+}
+
+void Profiler::GpuMarkAtmosphereEnd(ID3D12GraphicsCommandList* cmd)
+{
+	WriteGpuStamp(cmd, 17);
+}
+
 void Profiler::EnsureTreeGpuStampPlaceholders(ID3D12GraphicsCommandList* cmd)
 {
 	if (!cmd || !EnsureGpuProfilerReady() || !s_gpuTimestampHeap || !g_Engine)
@@ -258,6 +307,16 @@ void Profiler::EnsureTreeGpuStampPlaceholders(ID3D12GraphicsCommandList* cmd)
 	{
 		WriteGpuStamp(cmd, 12);
 		WriteGpuStamp(cmd, 13);
+	}
+	if (!s_profShadowStamped)
+	{
+		WriteGpuStamp(cmd, 14);
+		WriteGpuStamp(cmd, 15);
+	}
+	if (!s_profAtmosphereStamped)
+	{
+		WriteGpuStamp(cmd, 16);
+		WriteGpuStamp(cmd, 17);
 	}
 }
 

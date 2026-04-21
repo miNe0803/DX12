@@ -113,7 +113,7 @@ namespace {
 	// 木: GPU ExecuteIndirect をメインにする
 	constexpr bool kDisableTreeGpuCullWork = false;
 	// true: Hi-Z オクルージョンを木 CS で使用。誤遮蔽で全滅する環境があるため既定はオフ（視錐のみ）。
-	constexpr bool kTreeCullUseHiZ = false;
+	constexpr bool kTreeCullUseHiZ = true; // HiZ オクルージョンカリングを有効化して非表示の木をスキップ
 
 	static_assert(sizeof(TreeVegetation::StreamedTreeInstance) == sizeof(TreeGpuCullSystem::TreeInstanceCpu));
 	static_assert(alignof(TreeVegetation::StreamedTreeInstance) == alignof(TreeGpuCullSystem::TreeInstanceCpu));
@@ -193,21 +193,21 @@ namespace {
 			out[2][1] = 0u;
 			out[2][2] = 0u;
 		}
-		static int s_fillLog = 0;
-		if (s_fillLog < 3)
-		{
-			DebugLog("[FillIdx] imposterReady=%d (bakeOk=%d quadVb=%p quadIb=%p mat0=%llu mat1=%llu mat2=%llu) "
-				"idx[0]={%u,%u,%u} idx[1]={%u,%u,%u} idx[2]={%u,%u,%u}\n",
-				imposterReady ? 1 : 0, s_treeImposterBakeOk ? 1 : 0,
-				s_treeImposterQuadVb, s_treeImposterQuadIb,
-				(unsigned long long)s_treeImposterMatGpu[0].ptr,
-				(unsigned long long)s_treeImposterMatGpu[1].ptr,
-				(unsigned long long)s_treeImposterMatGpu[2].ptr,
-				out[0][0], out[0][1], out[0][2],
-				out[1][0], out[1][1], out[1][2],
-				out[2][0], out[2][1], out[2][2]);
-			++s_fillLog;
-		}
+		//static int s_fillLog = 0;
+		//if (s_fillLog < 3)
+		//{
+		//	DebugLog("[FillIdx] imposterReady=%d (bakeOk=%d quadVb=%p quadIb=%p mat0=%llu mat1=%llu mat2=%llu) "
+		//		"idx[0]={%u,%u,%u} idx[1]={%u,%u,%u} idx[2]={%u,%u,%u}\n",
+		//		imposterReady ? 1 : 0, s_treeImposterBakeOk ? 1 : 0,
+		//		s_treeImposterQuadVb, s_treeImposterQuadIb,
+		//		(unsigned long long)s_treeImposterMatGpu[0].ptr,
+		//		(unsigned long long)s_treeImposterMatGpu[1].ptr,
+		//		(unsigned long long)s_treeImposterMatGpu[2].ptr,
+		//		out[0][0], out[0][1], out[0][2],
+		//		out[1][0], out[1][1], out[1][2],
+		//		out[2][0], out[2][1], out[2][2]);
+		//	++s_fillLog;
+		//}
 	}
 
 	ComPtr<ID3D12Resource> s_treeImposterAtlas0;
@@ -807,13 +807,17 @@ bool Scene::InitTerrain()
 		L"assets\\terrain\\nature_mask.png",
 		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_diff_4k.jpg",
 		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_disp_4k.png",
+		L"assets\\terrain\\Rivers_Rivers.png",
+		L"assets\\terrain\\Snow_Snow.png",
 	};
-	// t0: tree_mask, t1: nature_mask, t2: ground_diff, t3: ground_disp
-	Texture2D* terrainTex[4] = {
+	// t0-t5: tree_mask, nature_mask, ground_diff, ground_disp, rivers, snow
+	Texture2D* terrainTex[6] = {
 		loadTextureOrFallback(terrainTexturePaths[0], Texture2D::GetBlack()),
 		loadTextureOrFallback(terrainTexturePaths[1], Texture2D::GetBlack()),
 		loadTextureOrFallback(terrainTexturePaths[2], Texture2D::GetWhite()),
-		loadTextureOrFallback(terrainTexturePaths[3], Texture2D::GetBlack())
+		loadTextureOrFallback(terrainTexturePaths[3], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainTexturePaths[4], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainTexturePaths[5], Texture2D::GetBlack()),
 	};
 	s_terrainMaskHandle = nullptr;
 	for (Texture2D* tex : terrainTex)
@@ -1426,7 +1430,14 @@ void Scene::Update()
 		s_atmosphereParams.sunColorG * s_atmosphereParams.sunIntensity,
 		s_atmosphereParams.sunColorB * s_atmosphereParams.sunIntensity,
 		1.0f);
-	sc->InvViewProj = XMMatrixTranspose(XMMatrixInverse(nullptr, viewMat * projMat));
+	{
+		XMVECTOR det;
+		XMMATRIX vp = viewMat * projMat;
+		XMMATRIX invVp = XMMatrixInverse(&det, vp);
+		if (XMVectorGetX(XMVectorAbs(det)) < 1e-10f)
+			invVp = XMMatrixIdentity();
+		sc->InvViewProj = XMMatrixTranspose(invVp);
+	}
 
 	if (s_shadow && s_shadow->IsValid())
 	{
@@ -1451,6 +1462,10 @@ void Scene::Update()
 		{
 			XMVECTOR camPos = g_Camera->GetPosition();
 			XMStoreFloat4(&terrConst->CameraPos, camPos);
+			// Pack elapsed time into CameraPos.w for water wave animation
+			static float s_terrainElapsedTime = 0.0f;
+			s_terrainElapsedTime += 1.0f / 60.0f;
+			terrConst->CameraPos.w = s_terrainElapsedTime;
 			terrConst->DebugParams = XMFLOAT4(
 				static_cast<float>(m_terrainPsDebugMode),
 				m_terrainCheapPathEnabled ? 1.0f : 0.0f,
@@ -1532,34 +1547,26 @@ void Scene::Draw()
 		GPU_CMD_BEGIN_EVENT(commandList, 60, 60, 60, L"Shadow Pass (CSM)");
 		s_shadow->ResetPerDrawRing();
 
-		// Resolve tree shadow mesh LOD (prefer LOD1 for cheaper geo; fall back if imposter)
 		const bool wantTreeShadows = s_treeGpuCull && s_treeGpuCull->IsValid()
 			&& s_shadow->HasTreeShadowPipeline()
 			&& s_treeGpuCull->GetInstanceCount() > 0
 			&& s_atmosphereParams.enableTreeShadows;
 
-		int shadowLod = 1;
-		if (wantTreeShadows)
-		{
-			uint32_t testIdx = TreeVegetation::GetMergedIndexCountLod(shadowLod);
-			if (testIdx <= 6 || !TreeVegetation::GetMergedVertexBufferLod(shadowLod))
-				shadowLod = 0;
-		}
+		// 影にはトランク（幹）メッシュのみ使用（軽量: 3621 idx vs LOD0 merged: 155940 idx）
+		int shadowLod = 0;
 
 		const bool useGpuCull = wantTreeShadows && s_shadow->HasShadowCullPipeline()
 			&& s_treeGpuCull->GetTreeInfoResource();
 
-		// GPU cull dispatch: run BEFORE the per-cascade draw loop so results are ready
 		const UINT maxShadowInstances = static_cast<UINT>(s_atmosphereParams.treeShadowMaxInstances);
 		if (useGpuCull)
 		{
 			XMFLOAT3 camWorldPos;
 			XMStoreFloat3(&camWorldPos, g_Camera->GetPosition());
 
-			// Pre-set IndexCount in the reset template (avoids per-cascade copy barriers)
-			VertexBuffer* preVb = TreeVegetation::GetMergedVertexBufferLod(shadowLod);
-			IndexBuffer*  preIb = TreeVegetation::GetMergedIndexBufferLod(shadowLod);
-			uint32_t preIdxCount = TreeVegetation::GetMergedIndexCountLod(shadowLod);
+			VertexBuffer* preVb = TreeVegetation::GetMergedVertexBufferLod(0);
+			IndexBuffer*  preIb = TreeVegetation::GetMergedIndexBufferLod(0);
+			uint32_t preIdxCount = TreeVegetation::GetMergedIndexCountLod(0);
 			if (preVb && preIb && preIdxCount > 0)
 				s_shadow->SetShadowIndexCount(0, preIdxCount);
 
@@ -1578,6 +1585,7 @@ void Scene::Draw()
 			}
 		}
 
+		// 全カスケードをクリア（未初期化防止）。描画は cascade 0 のみ。
 		for (UINT cascade = 0; cascade < ShadowSystem::kCascadeCount; ++cascade)
 		{
 			s_shadow->BeginShadowPass(commandList, cascade);
@@ -1610,12 +1618,12 @@ void Scene::Draw()
 				commandList->DrawIndexedInstanced(mr.IndexCount, 1, mr.StartIndexLocation, 0, 0);
 			}
 
-			// Tree shadows
+			// Tree shadows — LOD0 フルメッシュ
 			if (wantTreeShadows && cascade < static_cast<UINT>(s_atmosphereParams.treeShadowCascades))
 			{
-				VertexBuffer* treeVb = TreeVegetation::GetMergedVertexBufferLod(shadowLod);
-				IndexBuffer* treeIb = TreeVegetation::GetMergedIndexBufferLod(shadowLod);
-				uint32_t treeIdxCount = TreeVegetation::GetMergedIndexCountLod(shadowLod);
+				VertexBuffer* treeVb = TreeVegetation::GetMergedVertexBufferLod(0);
+				IndexBuffer*  treeIb = TreeVegetation::GetMergedIndexBufferLod(0);
+				uint32_t treeIdxCount = TreeVegetation::GetMergedIndexCountLod(0);
 				if (treeVb && treeIb && treeIdxCount > 0)
 				{
 					if (useGpuCull)
@@ -1628,7 +1636,6 @@ void Scene::Draw()
 					}
 					else
 					{
-						// Fallback: draw capped instances without GPU culling
 						UINT drawCount = std::min(s_treeGpuCull->GetInstanceCount(), maxShadowInstances);
 						s_shadow->DrawTreeShadows(
 							commandList, cascade,
@@ -2126,6 +2133,7 @@ void Scene::Draw()
 			sunDirF = sc ? XMFLOAT3(sc->SunDirection.x, sc->SunDirection.y, sc->SunDirection.z) : XMFLOAT3(0.5f, 0.7f, -1.0f);
 		}
 
+		Profiler::GpuMarkAtmosphereBegin(postCommandList);
 		s_atmosphere->Execute(postCommandList, materialHeap,
 			s_hdrSrvHandle ? s_hdrSrvHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{0},
 			g_Engine->GetHdrRtvCpuHandle(),
@@ -2139,6 +2147,7 @@ void Scene::Draw()
 				1.0f),
 			g_Engine->CurrentBackBufferIndex(),
 			s_atmosphereParams);
+		Profiler::GpuMarkAtmosphereEnd(postCommandList);
 	}
 
 	Profiler::GpuMarkPostProcessBegin(postCommandList);
@@ -2165,7 +2174,7 @@ void Scene::Draw()
 			splitNprPost);
 		GPU_CMD_END_EVENT(postCommandList);
 	}
-	// 木 GPU（TreeGpuCull）未初期化のフレームでは 10..13 に EndQuery が無く、ResolveQueryData が失敗する。
-	Profiler::EnsureTreeGpuStampPlaceholders(postCommandList);
 	Profiler::GpuMarkPostProcessEndAndResolve(postCommandList);
+	// 全スタンプの Resolve（未書き込みスタンプはプレースホルダーで補完）
+	Profiler::GpuResolveAllStamps(postCommandList);
 }

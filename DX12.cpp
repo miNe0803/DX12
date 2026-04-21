@@ -36,19 +36,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // PIX は GPU キャプチャ時に独自のフックを入れるため、デバッグレイヤーと併用すると
     // 二重検証・タイミング変化で ERROR が増えたり、PIX 単独では問題ない経路で落ちたりしやすい。
     // RenderDoc はフック方式が異なり併用しやすい。PIX 用に環境変数 DX12_DISABLE_DEBUG_LAYER=1 で無効化可能。
-#if defined(_DEBUG)
     {
+        bool enableLayer = false;
+#if defined(_DEBUG)
+        enableLayer = false; // デフォルト OFF（FPS 優先）。環境変数 DX12_ENABLE_DEBUG_LAYER=1 で有効化
         wchar_t ev[8]{};
-        const DWORD n = GetEnvironmentVariableW(L"DX12_DISABLE_DEBUG_LAYER", ev, 8u);
-        const bool disableLayer = (n > 0 && ev[0] == L'1');
-        if (!disableLayer)
+        DWORD n = GetEnvironmentVariableW(L"DX12_ENABLE_DEBUG_LAYER", ev, 8u);
+        if (n > 0 && ev[0] == L'1')
+            enableLayer = true;
+#else
+        // Release: 環境変数 DX12_FORCE_DEBUG_LAYER=1 でデバッグレイヤーを有効化（診断用）
+        wchar_t ev[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"DX12_FORCE_DEBUG_LAYER", ev, 8u);
+        if (n > 0 && ev[0] == L'1')
+            enableLayer = true;
+#endif
+        if (enableLayer)
         {
             ComPtr<ID3D12Debug> debug;
             if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
                 debug->EnableDebugLayer();
         }
     }
-#endif
 
     // --- [2] COMライブラリの初期化 ---
     // AssimpLoaderやDirectXTexで使用するWIC（画像読み込み）のために必要です。

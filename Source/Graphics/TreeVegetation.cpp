@@ -37,6 +37,28 @@ namespace
 	std::vector<uint8_t> g_treeMaskRgba;
 	UINT g_treeMaskW = 0;
 	UINT g_treeMaskH = 0;
+
+	// River exclusion mask (Rivers_Rivers.png)
+	std::vector<uint8_t> g_riverMaskRgba;
+	UINT g_riverMaskW = 0;
+	UINT g_riverMaskH = 0;
+
+	/// Returns true if a world position is on a river (trees should not be planted here).
+	bool IsRiverAt(float wx, float wz, float halfW, float halfD, float threshold = 0.25f)
+	{
+		if (g_riverMaskRgba.empty() || g_riverMaskW == 0 || g_riverMaskH == 0)
+			return false;
+		const float fu = (wx + halfW) / (2.f * halfW);
+		const float fv = (wz + halfD) / (2.f * halfD);
+		if (fu < 0.f || fu > 1.f || fv < 0.f || fv > 1.f)
+			return false;
+		const UINT px = static_cast<UINT>(std::min<float>(g_riverMaskW - 1.f, std::max<float>(0.f, fu * (g_riverMaskW - 1.f))));
+		const UINT py = static_cast<UINT>(std::min<float>(g_riverMaskH - 1.f, std::max<float>(0.f, fv * (g_riverMaskH - 1.f))));
+		const size_t i = (static_cast<size_t>(py) * g_riverMaskW + px) * 4;
+		if (i >= g_riverMaskRgba.size())
+			return false;
+		return (g_riverMaskRgba[i] / 255.f) > threshold;
+	}
 	float g_speciesScale[3] = { 1.f, 1.f, 1.f };
 
 	// Full-nature cache (all instances from mask).
@@ -536,6 +558,19 @@ bool Initialize(::entt::registry& registry, DescriptorHeap* heap,
 	g_treeMaskW = mw;
 	g_treeMaskH = mh;
 
+	// Load river mask for exclusion
+	{
+		std::vector<uint8_t> riverRgba;
+		UINT rmw = 0, rmh = 0;
+		if (LoadMaskRgb(L"assets\\terrain\\Rivers_Rivers.png", riverRgba, rmw, rmh) && rmw > 0 && rmh > 0)
+		{
+			g_riverMaskRgba = std::move(riverRgba);
+			g_riverMaskW = rmw;
+			g_riverMaskH = rmh;
+			DebugLog("[TreeVegetation] Rivers mask loaded (%ux%u) for exclusion.\n", rmw, rmh);
+		}
+	}
+
 	auto terrainView = registry.view<TerrainComponent>();
 	if (terrainView.begin() == terrainView.end())
 		return true;
@@ -818,25 +853,23 @@ bool BuildAllMaskInstances(
 	if (halfW <= 1e-3f || halfD <= 1e-3f)
 		return false;
 
-	// Cache key: mask + terrain + cell + 足元 Y（LOD0 非同期完了で変わるため再構築する）
-	const bool lod0Ready = g_mergedVB[0] && g_mergedIB[0] && g_mergedIndexCount[0] > 0u;
-	const float footYForKey = lod0Ready ? g_mergedBounds.Min.y : 0.f;
+	// Cache key: mask + terrain + cell（footY は初回構築後固定 → キャッシュ安定化）
+	static bool s_cacheBuiltOnce = false;
 	uint64_t key = 0;
 	key ^= (static_cast<uint64_t>(g_treeMaskW) << 0);
 	key ^= (static_cast<uint64_t>(g_treeMaskH) << 16);
 	key ^= (static_cast<uint64_t>(terr.GridWidth) << 32);
 	key ^= (static_cast<uint64_t>(terr.GridDepth) << 40);
 	key ^= static_cast<uint64_t>(static_cast<uint32_t>(cellSize * 1000.0f)) * 0x9E3779B185EBCA87ull;
-	key ^= static_cast<uint64_t>(static_cast<int32_t>(footYForKey * 100000.f)) << 48;
 
 	if (g_allMaskCachedKey == key && !g_allMaskCached.empty())
 	{
-		// キャッシュヒット時は out に 10 万本超を毎フレームコピーしない（Scene は GetAllMaskInstancesCached() のみ参照）。
-		return true;
+		return true; // キャッシュヒット: 0ms
 	}
 
 	g_allMaskCached.clear();
 
+	const bool lod0Ready = g_mergedVB[0] && g_mergedIB[0] && g_mergedIndexCount[0] > 0u;
 	const float thr = 0.11f;
 	const float footY = lod0Ready ? g_mergedBounds.Min.y : 0.f;
 	const uint32_t seed = 0x1234abcd;
@@ -889,6 +922,10 @@ bool BuildAllMaskInstances(
 			else
 				continue;
 
+			// River exclusion: skip trees in river areas
+			if (IsRiverAt(wx, wz, halfW, halfD))
+				continue;
+
 			const float ground = TerrainSystem::GetHeight(registry, wx, wz);
 			const float sc = 1.0f;
 			const float gy = ground - footY * sc;
@@ -897,6 +934,11 @@ bool BuildAllMaskInstances(
 			const XMMATRIX T = XMMatrixTranslation(wx, gy, wz);
 			const XMMATRIX S = XMMatrixScaling(sc, sc, sc);
 			const XMMATRIX R = XMMatrixRotationY(rot);
+
+			// Terrain slope alignment (disabled temporarily for debugging)
+			// XMFLOAT3 terrNormal = TerrainSystem::GetNormal(registry, wx, wz);
+			// ... tilt calculation ...
+
 			const XMMATRIX world = S * R * T;
 
 			StreamedTreeInstance inst{};

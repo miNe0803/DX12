@@ -118,14 +118,16 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\vcpkg\installed\x64-windows\lib;C:\vcpkg\installed\x64-windows\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\vcpkg\installed\x64-windows\debug\lib;C:\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- Debug 構成では _d サフィックス付きの OpenEXR/Imath ライブラリをリンク -->
-      <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;assimp-vc143-mtd.lib;OpenEXR-3_3_d.lib;Imath-3_2_d.lib;Iex-3_3_d.lib;IlmThread-3_3_d.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;DirectXTex.lib;assimp-vc143-mtd.lib;OpenEXR-3_3_d.lib;Imath-3_2_d.lib;Iex-3_3_d.lib;IlmThread-3_3_d.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>xcopy /E /I /Y "$(ProjectDir)assets" "$(OutDir)assets"
-copy /Y "C:\vcpkg\installed\x64-windows\debug\bin\WinPixEventRuntime.dll" "$(OutDir)"</Command>
-      <Message>Copy assets + WinPixEventRuntime</Message>
+for %%f in ("C:\vcpkg\installed\x64-windows\debug\bin\*.dll") do copy /Y "%%f" "$(OutDir)" >NUL 2>&amp;1
+copy /Y "$(ProjectDir)assimp-vc143-mtd.dll" "$(OutDir)" >NUL 2>&amp;1
+exit /B 0</Command>
+      <Message>Copy assets + Debug DLLs</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -146,12 +148,14 @@ copy /Y "C:\vcpkg\installed\x64-windows\debug\bin\WinPixEventRuntime.dll" "$(Out
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;WinPixEventRuntime.lib;assimp-vc143-mt.lib;OpenEXR-3_3.lib;Imath-3_2.lib;Iex-3_3.lib;IlmThread-3_3.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;DirectXTex.lib;WinPixEventRuntime.lib;assimp-vc143-mt.lib;OpenEXR-3_3.lib;Imath-3_2.lib;Iex-3_3.lib;IlmThread-3_3.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /E /I /Y "$(ProjectDir)assets" "$(OutDir)assets"
-copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"</Command>
-      <Message>Copy assets + WinPixEventRuntime</Message>
+      <Command>xcopy /E /I /Y /Q "$(ProjectDir)assets" "$(OutDir)assets" || (echo [PostBuild] asset copy warning, continuing &amp;&amp; exit /B 0)
+copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)" >NUL 2>&amp;1
+copy /Y "$(ProjectDir)assimp-vc143-mt.dll" "$(OutDir)" >NUL 2>&amp;1
+exit /B 0</Command>
+      <Message>Copy assets + DLLs (Release)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -196,6 +200,8 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClInclude Include="Source\Graphics\TwoPhaseOcclusion.h" />
     <ClInclude Include="Source\Graphics\ClusterGrid.h" />
     <ClInclude Include="Source\Graphics\SnowParticleSystem.h" />
+    <ClInclude Include="Source\Graphics\RayTracingManager.h" />
+    <ClInclude Include="Source\Graphics\WaterSystem.h" />
     <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
@@ -234,6 +240,8 @@ copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)"<
     <ClCompile Include="Source\Graphics\TwoPhaseOcclusion.cpp" />
     <ClCompile Include="Source\Graphics\ClusterGrid.cpp" />
     <ClCompile Include="Source\Graphics\SnowParticleSystem.cpp" />
+    <ClCompile Include="Source\Graphics\RayTracingManager.cpp" />
+    <ClCompile Include="Source\Graphics\WaterSystem.cpp" />
     <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />

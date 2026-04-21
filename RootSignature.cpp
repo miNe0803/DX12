@@ -113,8 +113,8 @@ void RootSignature::CreateLegacy(bool forTerrain)
 	{
 		rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
 		rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
-		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
-		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 4);
+		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0); // t0-t5: tree_mask, nature_mask, ground_diff, ground_disp, rivers, snow
+		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6); // t6-t8: IBL
 		rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParam[4].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX);

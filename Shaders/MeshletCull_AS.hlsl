@@ -55,8 +55,11 @@ static float4 ExtractPlane(matrix vp, int row, float sign)
 
 bool SphereOutsidePlane(float3 center, float radius, float4 plane)
 {
+    float len = length(plane.xyz);
+    if (len < 1e-5)
+        return true; // 退化した平面 → 安全にカリング
     float dist = dot(plane.xyz, center) + plane.w;
-    return dist > radius * length(plane.xyz);
+    return dist > radius * len;
 }
 
 bool FrustumCullSphere(float3 center, float radius, matrix vp)

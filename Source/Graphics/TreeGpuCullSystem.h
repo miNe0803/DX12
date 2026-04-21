@@ -166,13 +166,15 @@ private:
 
 	/// LOD: 水平距離 (XZ) < m_lod1Start → LOD0（フルメッシュ）; それ以上 → LOD1（インポスター or LOD1 メッシュ）。
 	/// 既定 2m: カメラ周辺のみフルメッシュ、その外は LOD1。
-	float m_lod1StartDistance = 8.0f;
-	float m_lod2StartDistance = 25.0f;
-	float m_maxDrawDistance = 300.0f;
+	float m_lod1StartDistance = 40.0f;
+	float m_lod2StartDistance = 120.0f;
+	float m_maxDrawDistance = 250.0f; // 250m 以遠は 1px 未満 → カリング
 	bool m_debugSkipLod0 = false;
 	uint32_t m_lastReadbackLod0 = 0;
 	uint32_t m_lastReadbackLod1 = 0;
 	uint32_t m_lastReadbackLod2 = 0;
+	// 前フレームのバッチ単位 InstanceCount（0 のバッチは描画スキップ）
+	uint32_t m_lastBatchInstanceCount[27] = {}; // kBatchCount=27
 
 	ComPtr<ID3D12RootSignature> m_computeRootSig;
 	ComPtr<ID3D12PipelineState> m_computePso;

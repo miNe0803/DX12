@@ -4,6 +4,7 @@
 #include <d3d12.h>
 #include <dxgi.h>
 #include <dxgi1_4.h>
+#include <dxgi1_5.h>
 
 #include <DirectXTex.h>
 #include <d3dx12.h>
@@ -84,6 +85,7 @@ private:
 	UINT m_FrameBufferHeight = 0;
 	UINT m_CurrentBackBufferIndex = 0;
 	UINT m_lastSubmittedBackBufferIndex = 0;
+	bool m_tearingSupported = false;
 
 	GpuFeatureSupport m_features{};
 	ComPtr<ID3D12Device10> m_pDevice = nullptr;

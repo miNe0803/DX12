@@ -51,8 +51,14 @@ namespace
 	static_assert(sizeof(TerrainFrustumCullCB) == 256, "TerrainFrustumCull CB");
 
 
-	void ExtractFrustumPlanes(FXMMATRIX vp, XMFLOAT4 planes[6])
+	bool ExtractFrustumPlanes(FXMMATRIX vp, XMFLOAT4 planes[6])
 	{
+		// VP 行列が特異（カメラ真上/真下等）なら抽出を中止
+		XMVECTOR det;
+		(void)XMMatrixInverse(&det, vp);
+		if (XMVectorGetX(XMVectorAbs(det)) < 1e-10f)
+			return false;
+
 		const XMVECTOR r0 = vp.r[0];
 		const XMVECTOR r1 = vp.r[1];
 		const XMVECTOR r2 = vp.r[2];
@@ -63,6 +69,7 @@ namespace
 		XMStoreFloat4(&planes[3], XMVectorSubtract(r3, r1));
 		XMStoreFloat4(&planes[4], XMVectorAdd(r3, r2));
 		XMStoreFloat4(&planes[5], XMVectorSubtract(r3, r2));
+		return true;
 	}
 
 	bool AabbOutsidePlaneCpu(const ModelBounds& b, const XMFLOAT4& pl)
@@ -418,7 +425,8 @@ void TerrainGpuCullSystem::DispatchFrustumCull(ID3D12GraphicsCommandList* cmd, c
 	const XMMATRIX vp = XMMatrixMultiply(view, proj);
 	const XMMATRIX invView = XMMatrixInverse(nullptr, view);
 	TerrainFrustumCullCB cb{};
-	ExtractFrustumPlanes(vp, cb.Planes);
+	if (!ExtractFrustumPlanes(vp, cb.Planes))
+		return; // 特異 VP — カリングをスキップ（前フレームを維持）
 	XMStoreFloat4(&cb.CameraPos, invView.r[3]);
 	cb.CullParams = XMFLOAT4(
 		static_cast<float>(m_chunkCount),

@@ -33,6 +33,8 @@ void ProfilerWindow::Draw(bool* pOpen)
 		ImGui::Text("GPU PostProcess: %.2f ms", latest.gpuPostProcessMs);
 		ImGui::Text("GPU Tree upload+cull (CS): %.2f ms", latest.gpuTreeUploadCullMs);
 		ImGui::Text("GPU Tree draw (ExecuteIndirect): %.2f ms", latest.gpuTreeDrawMs);
+		ImGui::Text("GPU Shadow Pass: (mainCL - toggle to measure)");
+		ImGui::Text("GPU Atmosphere: %.2f ms", latest.gpuAtmosphereMs);
 		ImGui::Text("GPU (sum of tagged passes): %.2f ms", latest.gpuTaggedPassesSumMs);
 		ImGui::TextDisabled("    (上記以外のキュー処理・ドライバオーバーヘッドは含みません)");
 		ImGui::Text("Total Draw Calls: %u", latest.render.totalDrawCalls);

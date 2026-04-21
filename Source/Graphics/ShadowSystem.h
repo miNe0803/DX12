@@ -17,7 +17,7 @@ class ShadowSystem
 {
 public:
 	static constexpr UINT kCascadeCount = 4;
-	static constexpr UINT kShadowMapSize = 2048;
+	static constexpr UINT kShadowMapSize = 512; // PCF 4-tap + テンポラル分散で品質維持
 
 	bool Init(ID3D12Device* device, DescriptorHeap* sceneHeap);
 	void Shutdown();
@@ -119,6 +119,16 @@ private:
 	bool CreateShadowCullBuffers(ID3D12Device* device, UINT maxInstances);
 
 	bool m_valid = false;
+
+	// シャドウキャッシング: 木は静的なので毎フレーム再描画しない
+	bool m_treeShadowCacheDirty = true;
+	DirectX::XMFLOAT3 m_cachedCameraPos = {};
+	DirectX::XMFLOAT3 m_cachedLightDir = {};
+public:
+	bool IsTreeShadowCacheDirty(const DirectX::XMFLOAT3& camPos, const DirectX::XMFLOAT3& lightDir) const;
+	void MarkTreeShadowCacheClean(const DirectX::XMFLOAT3& camPos, const DirectX::XMFLOAT3& lightDir);
+	void InvalidateTreeShadowCache() { m_treeShadowCacheDirty = true; }
+private:
 
 	ComPtr<ID3D12Resource> m_shadowMap;
 	ComPtr<ID3D12DescriptorHeap> m_dsvHeap;

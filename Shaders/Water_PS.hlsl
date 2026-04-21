@@ -57,10 +57,9 @@ static const float kShadowBias = 0.002;
 
 float SampleShadowPCF(float3 worldPos, float viewDepth)
 {
-    uint cascade = 3;
-    if      (viewDepth < CascadeSplits.x) cascade = 0;
-    else if (viewDepth < CascadeSplits.y) cascade = 1;
-    else if (viewDepth < CascadeSplits.z) cascade = 2;
+    if (viewDepth >= CascadeSplits.x)
+        return 1.0;
+    uint cascade = 0;
 
     float4 lc = mul(float4(worldPos, 1.0), LightVP[cascade]);
     float3 pc = lc.xyz / lc.w;
@@ -70,7 +69,7 @@ float SampleShadowPCF(float3 worldPos, float viewDepth)
 
     float cmp = pc.z - kShadowBias;
     float shadow = 0;
-    float ts = 1.0 / 2048.0;
+    float ts = 1.0 / 512.0;
     [unroll] for (int y = -1; y <= 1; ++y)
     [unroll] for (int x = -1; x <= 1; ++x)
         shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2(x,y)*ts, (float)cascade), cmp);

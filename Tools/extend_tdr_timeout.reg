@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+; Extend GPU TDR (Timeout Detection and Recovery) timeout from 2 seconds to 30 seconds.
+; This is standard practice for GPU-intensive game development.
+; REQUIRES REBOOT to take effect.
+;
+; To revert: delete TdrDelay and TdrDdiDelay keys, or run revert_tdr_timeout.reg
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\GraphicsDrivers]
+"TdrDelay"=dword:0000001e
+"TdrDdiDelay"=dword:0000001e

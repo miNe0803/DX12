@@ -346,8 +346,8 @@ void RenderSystem::DrawMain(
 	const bool parallelPbrRecord = pbrResourcesOk && cmdListPbrRecord0 && cmdListPbrRecord1 && sharedSrvHeapForPbr
 		&& mainPassRtvCpu.ptr != 0 && mainPassDsvCpu.ptr != 0;
 
-	std::vector<DrawSortItem> queue;
-	queue.reserve(256);
+	static std::vector<DrawSortItem> queue;
+	queue.clear(); // static で再利用 — 毎フレームの heap alloc を回避
 
 	const SceneConstants* sceneC = sceneConstantsCB ? sceneConstantsCB->GetPtr<SceneConstants>() : nullptr;
 	const DirectX::XMMATRIX viewM = sceneC ? sceneC->View : DirectX::XMMatrixIdentity();
@@ -367,7 +367,7 @@ void RenderSystem::DrawMain(
 		if (lod.CurrentLODLevel == 3)
 		{
 			if (registry.all_of<PlayerComponent>(entity))
-				DebugLog("[Player][Draw] SKIP entity=%u (LOD culled level=3)\n", static_cast<unsigned>(entity));
+				//DebugLog("[Player][Draw] SKIP entity=%u (LOD culled level=3)\n", static_cast<unsigned>(entity));
 			continue;
 		}
 
@@ -381,10 +381,10 @@ void RenderSystem::DrawMain(
 		{
 			if (isPlayer)
 			{
-				DebugLog("[Player][Draw] SKIP entity=%u (no VB/IB) vb=%p ib=%p\n",
-					static_cast<unsigned>(entity),
-					static_cast<void*>(mesh.pVB),
-					static_cast<void*>(mesh.pIB));
+				//DebugLog("[Player][Draw] SKIP entity=%u (no VB/IB) vb=%p ib=%p\n",
+				//	static_cast<unsigned>(entity),
+				//	static_cast<void*>(mesh.pVB),
+				//	static_cast<void*>(mesh.pIB));
 			}
 			continue;
 		}
@@ -397,7 +397,7 @@ void RenderSystem::DrawMain(
 			if (!perDrawTransformCB || !perDrawTransformCB->GetPtr())
 			{
 				if (isPlayer)
-					DebugLog("[Player][Draw] SKIP terrain entity=%u (no per-draw CB)\n", static_cast<unsigned>(entity));
+					//DebugLog("[Player][Draw] SKIP terrain entity=%u (no per-draw CB)\n", static_cast<unsigned>(entity));
 				continue;
 			}
 		}
@@ -420,9 +420,9 @@ void RenderSystem::DrawMain(
 			{
 				if (isPlayer)
 				{
-					DebugLog("[Player][Draw] SKIP entity=%u (PBR resources or material) material=%p\n",
-						static_cast<unsigned>(entity),
-						static_cast<void*>(mesh.MaterialHandle));
+					//DebugLog("[Player][Draw] SKIP entity=%u (PBR resources or material) material=%p\n",
+					//	static_cast<unsigned>(entity),
+					//	static_cast<void*>(mesh.MaterialHandle));
 				}
 				continue;
 			}
@@ -594,9 +594,8 @@ void RenderSystem::DrawMain(
 	bool pbrBatchContainsPlayer = false;
 	ID3D12PipelineState* pbrBatchPso = nullptr;
 
-	std::vector<PbrDrawBatch> pbrBatches;
-	if (parallelPbrRecord)
-		pbrBatches.reserve(128);
+	static std::vector<PbrDrawBatch> pbrBatches;
+	pbrBatches.clear(); // static で再利用
 
 	auto flushPbrBatchLegacy = [&]()
 	{
@@ -655,7 +654,7 @@ void RenderSystem::DrawMain(
 
 			if (terrainDrawSlot >= kPerDrawTransformSlotCount)
 			{
-				DebugLog("[Render] Transform CB slots exhausted (max=%zu)\n", kPerDrawTransformSlotCount);
+				//DebugLog("[Render] Transform CB slots exhausted (max=%zu)\n", kPerDrawTransformSlotCount);
 				continue;
 			}
 			Transform* pTransform = reinterpret_cast<Transform*>(cbBase + terrainDrawSlot * sizeof(Transform));
@@ -694,11 +693,11 @@ void RenderSystem::DrawMain(
 
 			if (isPlayer)
 			{
-				DebugLog("[Player][Draw] OK entity=%u DrawIndexed indices=%u lod=%d pos=(%.3f,%.3f,%.3f)\n",
-					static_cast<unsigned>(it.entity),
-					mesh.IndexCount,
-					lod.CurrentLODLevel,
-					transform.Position.x, transform.Position.y, transform.Position.z);
+				//DebugLog("[Player][Draw] OK entity=%u DrawIndexed indices=%u lod=%d pos=(%.3f,%.3f,%.3f)\n",
+			//	static_cast<unsigned>(it.entity),
+			//	mesh.IndexCount,
+			//	lod.CurrentLODLevel,
+			//	transform.Position.x, transform.Position.y, transform.Position.z);
 			}
 			continue;
 		}
@@ -757,7 +756,7 @@ void RenderSystem::DrawMain(
 
 		if (writeCursor >= sliceEnd)
 		{
-			DebugLog("[Render] PBR instance ring slice full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
+			//DebugLog("[Render] PBR instance ring slice full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
 			continue;
 		}
 
@@ -775,14 +774,14 @@ void RenderSystem::DrawMain(
 				++statPlayerSub;
 		}
 
-		if (isPlayer)
-		{
-			DebugLog("[Player][Draw] OK entity=%u instanced indices=%u lod=%d pos=(%.3f,%.3f,%.3f)\n",
-				static_cast<unsigned>(it.entity),
-				mesh.IndexCount,
-				lod.CurrentLODLevel,
-				transform.Position.x, transform.Position.y, transform.Position.z);
-		}
+		//if (isPlayer)
+		//{
+		//	DebugLog("[Player][Draw] OK entity=%u instanced indices=%u lod=%d pos=(%.3f,%.3f,%.3f)\n",
+		//		static_cast<unsigned>(it.entity),
+		//		mesh.IndexCount,
+		//		lod.CurrentLODLevel,
+		//		transform.Position.x, transform.Position.y, transform.Position.z);
+		//}
 	}
 
 	if (parallelPbrRecord)
@@ -1001,7 +1000,7 @@ void RenderSystem::DrawNprPasses(
 			return false;
 		if (writeCursor >= sliceEnd)
 		{
-			DebugLog("[Render] NPR instance ring full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
+			//DebugLog("[Render] NPR instance ring full (max=%zu per frame)\n", kMaxPbrInstancesPerFrame);
 			return false;
 		}
 		const bool playerPix = EntityIsPlayerFamilyMesh(registry, entity);

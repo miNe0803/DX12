@@ -104,8 +104,7 @@ void DebugUI::Draw()
 							treeCull->GetTreeLodDistanceTuning(tLod1, tLod2);
 							bool treeLodChg = false;
 							treeLodChg |= ImGui::DragFloat("Tree LOD1 start (m, XZ)", &tLod1, 0.25f, 0.01f, 5000.f);
-							// LOD2 メッシュ未実装: CS はこの値で「全滅」しない。将来 LOD2 分岐・デバッグ用。
-							treeLodChg |= ImGui::DragFloat("Tree LOD2 start (m, XZ, future/debug)", &tLod2, 10.f, 1.f, 2000000.f);
+							treeLodChg |= ImGui::DragFloat("Tree LOD2 start (m, XZ)", &tLod2, 10.f, 1.f, 2000000.f);
 							if (treeLodChg)
 								treeCull->SetTreeLodDistanceTuning(tLod1, tLod2);
 

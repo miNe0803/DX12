@@ -71,10 +71,9 @@ void Camera::Update(float dt) {
     // 2) 回転行列を生成
     XMMATRIX rotation = XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0);
 
-    // 前方向ベクトル（ローカル +Z）
-    XMVECTOR forward = XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), rotation);
-    // 右方向ベクトル = Up × Forward
-    XMVECTOR right = XMVector3Normalize(XMVector3Cross(m_up, forward));
+    // 回転行列から直接ベクトルを取得（外積不要 → ギンバルロック回避）
+    XMVECTOR forward = XMVector3Normalize(rotation.r[2]); // ローカル +Z
+    XMVECTOR right   = XMVector3Normalize(rotation.r[0]); // ローカル +X
 
     // 3) 移動処理（WASD）
     if (GetAsyncKeyState('W') & 0x8000) m_position += forward * m_moveSpeed * dt;
@@ -85,29 +84,29 @@ void Camera::Update(float dt) {
     // 4) 注視点の更新
     m_targetPos = m_position + forward;
 
-    static float logAccumSec = 0.0f;
-    logAccumSec += dt;
-    if (logAccumSec >= 0.5f)
-    {
-        XMFLOAT3 p{};
-        XMFLOAT3 pPrev{};
-        XMStoreFloat3(&p, m_position);
-        XMStoreFloat3(&pPrev, prevPos);
+    //static float logAccumSec = 0.0f;
+    //logAccumSec += dt;
+    //if (logAccumSec >= 0.5f)
+    //{
+    //    XMFLOAT3 p{};
+    //    XMFLOAT3 pPrev{};
+    //    XMStoreFloat3(&p, m_position);
+    //    XMStoreFloat3(&pPrev, prevPos);
 
-        const float dx = p.x - pPrev.x;
-        const float dy = p.y - pPrev.y;
-        const float dz = p.z - pPrev.z;
-        const float distPerFrame = sqrtf(dx * dx + dy * dy + dz * dz);
-        const float distXZPerFrame = sqrtf(dx * dx + dz * dz);
-        const float speedMps = (dt > 1e-6f) ? (distPerFrame / dt) : 0.0f;
+    //    const float dx = p.x - pPrev.x;
+    //    const float dy = p.y - pPrev.y;
+    //    const float dz = p.z - pPrev.z;
+    //    const float distPerFrame = sqrtf(dx * dx + dy * dy + dz * dz);
+    //    const float distXZPerFrame = sqrtf(dx * dx + dz * dz);
+    //    const float speedMps = (dt > 1e-6f) ? (distPerFrame / dt) : 0.0f;
 
-        DebugLog(
-            "[Camera] Pos=(%.2f, %.2f, %.2f) Move/frame=%.3fm (XZ=%.3fm) Speed=%.2fm/s dt=%.4f\n",
-            p.x, p.y, p.z,
-            distPerFrame, distXZPerFrame,
-            speedMps, dt);
-        logAccumSec = 0.0f;
-    }
+    //    DebugLog(
+    //        "[Camera] Pos=(%.2f, %.2f, %.2f) Move/frame=%.3fm (XZ=%.3fm) Speed=%.2fm/s dt=%.4f\n",
+    //        p.x, p.y, p.z,
+    //        distPerFrame, distXZPerFrame,
+    //        speedMps, dt);
+    //    logAccumSec = 0.0f;
+    //}
 }
 
 void Camera::LookAt(const XMVECTOR& worldTarget)
@@ -132,10 +131,10 @@ void Camera::LookAt(const XMVECTOR& worldTarget)
 }
 
 XMMATRIX Camera::GetViewMatrix() const {
-    return XMMatrixLookAtLH(
-        m_position,
-        m_position + XMVector3TransformNormal(XMVectorSet(0, 0, 1, 0), XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0)),
-        m_up);
+    XMMATRIX rotation = XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0);
+    XMVECTOR forward = XMVector3Normalize(rotation.r[2]);
+    XMVECTOR up      = XMVector3Normalize(rotation.r[1]);
+    return XMMatrixLookAtLH(m_position, m_position + forward, up);
 }
 
 XMMATRIX Camera::GetProjectionMatrix(float aspect) const {

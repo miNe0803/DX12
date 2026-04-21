@@ -53,6 +53,10 @@ float3 CornerFromAabb(float3 bmin, float3 bmax, int i)
 
 bool AabbOutsidePlane(float3 bmin, float3 bmax, float4 pl)
 {
+	// 退化した平面（法線長≈0）→ 安全にカリング
+	if (dot(pl.xyz, pl.xyz) < 1e-10)
+		return true;
+
 	bool allPositive = true;
 	[unroll]
 	for (int c = 0; c < 8; ++c)

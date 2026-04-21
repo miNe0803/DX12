@@ -96,8 +96,14 @@ namespace
 	// Gribb-Hartmann for row vectors extracts from COLUMNS of VP (= rows of VP^T).
 	// Negate so positive half-space = outside, matching shader's d > r*|n| test.
 	// DX12 uses 0-to-1 depth range so near plane = column2 (not col3+col2).
-	inline void ExtractFrustumPlanesForTreeGpu(FXMMATRIX vp, XMFLOAT4 outPlanes[6])
+	inline bool ExtractFrustumPlanesForTreeGpu(FXMMATRIX vp, XMFLOAT4 outPlanes[6])
 	{
+		// VP 行列が特異（カメラ真上/真下等）なら抽出を中止して false を返す
+		XMVECTOR det;
+		(void)XMMatrixInverse(&det, vp);
+		if (XMVectorGetX(XMVectorAbs(det)) < 1e-10f)
+			return false;
+
 		const XMMATRIX vpT = XMMatrixTranspose(vp);
 		const XMVECTOR c0 = vpT.r[0];
 		const XMVECTOR c1 = vpT.r[1];
@@ -117,8 +123,9 @@ namespace
 			if (fLen > 1e-8f)
 				XMStoreFloat4(&outPlanes[i], XMVectorDivide(raw[i], len));
 			else
-				outPlanes[i] = XMFLOAT4(0, 0, 0, 0);
+				outPlanes[i] = XMFLOAT4(0, 1, 0, 1e8f); // 全カリング: 全てを外側と判定
 		}
+		return true;
 	}
 
 	bool LoadCsBlob(const wchar_t* pathPrimary, const wchar_t* pathAlt, ComPtr<ID3DBlob>& outBlob)
@@ -659,61 +666,62 @@ bool TreeGpuCullSystem::DispatchCull(
 	TreeCullCB cb{};
 	cb.CameraPos = XMFLOAT4(cameraWorldPos.x, cameraWorldPos.y, cameraWorldPos.z, 1.f);
 	cb.Params = XMFLOAT4(static_cast<float>(m_instanceCount), 0.f, 0.f, 0.f);
-	ExtractFrustumPlanesForTreeGpu(vp, cb.FrustumPlanes);
+	if (!ExtractFrustumPlanesForTreeGpu(vp, cb.FrustumPlanes))
+		return false; // 特異 VP — カリングをスキップ（前フレームを維持）
 	cb.View = scene->View;
 	cb.Proj = scene->Proj;
 
-	// Diagnostic: CPU-side frustum test for first tree instance
-	{
-		static int s_diagCount = 0;
-		if (s_diagCount < 3 && m_instanceCount > 0)
-		{
-			++s_diagCount;
-			void* pDiag = nullptr;
-			if (SUCCEEDED(m_treeInfoUpload->Map(0, nullptr, &pDiag)) && pDiag)
-			{
-				const TreeInfoGpu* info0 = reinterpret_cast<const TreeInfoGpu*>(pDiag);
-				const XMFLOAT3 c(info0->centerRadius.x, info0->centerRadius.y, info0->centerRadius.z);
-				const float r = info0->centerRadius.w;
-				DebugLog("[TreeGpuCull][Diag] inst0 center=(%.2f,%.2f,%.2f) r=%.2f\n", c.x, c.y, c.z, r);
-				for (int p = 0; p < 6; ++p)
-				{
-					const XMFLOAT4& pl = cb.FrustumPlanes[p];
-					const float len = sqrtf(pl.x * pl.x + pl.y * pl.y + pl.z * pl.z);
-					const float d = pl.x * c.x + pl.y * c.y + pl.z * c.z + pl.w;
-					const bool outside = (len > 1e-5f) && (d > r * len);
-					DebugLog("  plane[%d] n=(%.4f,%.4f,%.4f) w=%.4f len=%.4f d=%.4f d/len=%.4f outside=%s\n",
-						p, pl.x, pl.y, pl.z, pl.w, len, d, (len > 1e-5f ? d / len : 0.f),
-						outside ? "YES" : "no");
-				}
-				const float radius = CullSphereRadiusFromMergedTreeBounds();
-				const ModelBounds& mb = TreeVegetation::GetMergedLocalBounds();
-				DebugLog("[TreeGpuCull][Diag] mergedBounds=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) radius=%.2f\n",
-					mb.Min.x, mb.Min.y, mb.Min.z, mb.Max.x, mb.Max.y, mb.Max.z, radius);
+	// Diagnostic: CPU-side frustum test for first tree instance (disabled for perf)
+	//{
+	//	static int s_diagCount = 0;
+	//	if (s_diagCount < 3 && m_instanceCount > 0)
+	//	{
+	//		++s_diagCount;
+	//		void* pDiag = nullptr;
+	//		if (SUCCEEDED(m_treeInfoUpload->Map(0, nullptr, &pDiag)) && pDiag)
+	//		{
+	//			const TreeInfoGpu* info0 = reinterpret_cast<const TreeInfoGpu*>(pDiag);
+	//			const XMFLOAT3 c(info0->centerRadius.x, info0->centerRadius.y, info0->centerRadius.z);
+	//			const float r = info0->centerRadius.w;
+	//			DebugLog("[TreeGpuCull][Diag] inst0 center=(%.2f,%.2f,%.2f) r=%.2f\n", c.x, c.y, c.z, r);
+	//			for (int p = 0; p < 6; ++p)
+	//			{
+	//				const XMFLOAT4& pl = cb.FrustumPlanes[p];
+	//				const float len = sqrtf(pl.x * pl.x + pl.y * pl.y + pl.z * pl.z);
+	//				const float d = pl.x * c.x + pl.y * c.y + pl.z * c.z + pl.w;
+	//				const bool outside = (len > 1e-5f) && (d > r * len);
+	//				DebugLog("  plane[%d] n=(%.4f,%.4f,%.4f) w=%.4f len=%.4f d=%.4f d/len=%.4f outside=%s\n",
+	//					p, pl.x, pl.y, pl.z, pl.w, len, d, (len > 1e-5f ? d / len : 0.f),
+	//					outside ? "YES" : "no");
+	//			}
+	//			const float radius = CullSphereRadiusFromMergedTreeBounds();
+	//			const ModelBounds& mb = TreeVegetation::GetMergedLocalBounds();
+	//			DebugLog("[TreeGpuCull][Diag] mergedBounds=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) radius=%.2f\n",
+	//				mb.Min.x, mb.Min.y, mb.Min.z, mb.Max.x, mb.Max.y, mb.Max.z, radius);
 
-				// Test a synthetic point 1000m behind the camera
-				const XMFLOAT3 fwd(cb.CameraPos.x + 1000.f * (-0.7f), cb.CameraPos.y, cb.CameraPos.z + 1000.f * (-0.7f));
-				const XMFLOAT3 behind(cb.CameraPos.x - 1000.f * (-0.7f), cb.CameraPos.y, cb.CameraPos.z - 1000.f * (-0.7f));
-				for (int test = 0; test < 2; ++test)
-				{
-					const XMFLOAT3& tp = (test == 0) ? fwd : behind;
-					int outsideCount = 0;
-					for (int p2 = 0; p2 < 6; ++p2)
-					{
-						const XMFLOAT4& pl = cb.FrustumPlanes[p2];
-						const float len2 = sqrtf(pl.x*pl.x + pl.y*pl.y + pl.z*pl.z);
-						const float d2 = pl.x*tp.x + pl.y*tp.y + pl.z*tp.z + pl.w;
-						if (len2 > 1e-5f && d2 > 10.f * len2) ++outsideCount;
-					}
-					DebugLog("[TreeGpuCull][Diag] testPt %s (%.0f,%.0f,%.0f) outsidePlanes=%d → %s\n",
-						test == 0 ? "FRONT" : "BEHIND", tp.x, tp.y, tp.z, outsideCount,
-						outsideCount > 0 ? "CULLED" : "NOT_CULLED");
-				}
-
-				m_treeInfoUpload->Unmap(0, nullptr);
-			}
-		}
-	}
+	//			// Test a synthetic point 1000m behind the camera
+	//			const XMFLOAT3 fwd(cb.CameraPos.x + 1000.f * (-0.7f), cb.CameraPos.y, cb.CameraPos.z + 1000.f * (-0.7f));
+	//			const XMFLOAT3 behind(cb.CameraPos.x - 1000.f * (-0.7f), cb.CameraPos.y, cb.CameraPos.z - 1000.f * (-0.7f));
+	//			for (int test = 0; test < 2; ++test)
+	//			{
+	//				const XMFLOAT3& tp = (test == 0) ? fwd : behind;
+	//				int outsideCount = 0;
+	//				for (int p2 = 0; p2 < 6; ++p2)
+	//				{
+	//					const XMFLOAT4& pl = cb.FrustumPlanes[p2];
+	//					const float len2 = sqrtf(pl.x*pl.x + pl.y*pl.y + pl.z*pl.z);
+	//					const float d2 = pl.x*tp.x + pl.y*tp.y + pl.z*tp.z + pl.w;
+	//					if (len2 > 1e-5f && d2 > 10.f * len2) ++outsideCount;
+	//				}
+	//				DebugLog("[TreeGpuCull][Diag] testPt %s (%.0f,%.0f,%.0f) outsidePlanes=%d -> %s\n",
+	//					test == 0 ? "FRONT" : "BEHIND", tp.x, tp.y, tp.z, outsideCount,
+	//					outsideCount > 0 ? "CULLED" : "NOT_CULLED");
+	//			}
+	//
+	//			m_treeInfoUpload->Unmap(0, nullptr);
+	//		}
+	//	}
+	//}
 	cb.HiZParams = XMFLOAT4(m_hizEnabled ? 1.f : 0.f, static_cast<float>(m_hizWidth), static_cast<float>(m_hizHeight), static_cast<float>(m_hizMipCount));
 	cb.HiZTuning = XMFLOAT4(150.0f, 0.01f, 96.0f, 0.0f);
 	cb.IndexCountsTrunk = XMUINT4(indexCountByPartByLod[0][0], indexCountByPartByLod[0][1], indexCountByPartByLod[0][2], 0u);
@@ -752,33 +760,35 @@ bool TreeGpuCullSystem::DispatchCull(
 		}
 		m_indirectResetUpload->Unmap(0, nullptr);
 
+		// バリアをバッチ化: 個別発行(27回)→一括発行(1回)
+		{
+			D3D12_RESOURCE_BARRIER bb[kBatchCount * 2]; // args + counters
+			UINT nBarriers = 0;
+			for (int bi = 0; bi < kBatchCount; ++bi)
+			{
+				if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
+				{
+					bb[nBarriers++] = CD3DX12_RESOURCE_BARRIER::Transition(
+						m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_COPY_DEST);
+					m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
+				}
+				if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
+				{
+					bb[nBarriers++] = CD3DX12_RESOURCE_BARRIER::Transition(
+						m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_DEST);
+					m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
+				}
+			}
+			if (nBarriers > 0)
+				cmd->ResourceBarrier(nBarriers, bb);
+		}
 		for (int bi = 0; bi < kBatchCount; ++bi)
 		{
-			if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
-			{
-				CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
-					m_indirectArgsDefault[bi].Get(),
-					m_indirectState[bi],
-					D3D12_RESOURCE_STATE_COPY_DEST);
-				cmd->ResourceBarrier(1, &b);
-				m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
-			}
 			cmd->CopyBufferRegion(m_indirectArgsDefault[bi].Get(), 0,
 				m_indirectResetUpload.Get(), static_cast<UINT64>(bi) * sizeof(TreeIndirectCmdGpu),
 				sizeof(TreeIndirectCmdGpu));
+			cmd->CopyBufferRegion(m_counterDefault[bi].Get(), 0, m_counterResetUpload.Get(), 0, sizeof(uint32_t));
 		}
-	}
-
-	// Reset per-batch counters to 0.
-	for (int bi = 0; bi < kBatchCount; ++bi)
-	{
-		if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
-		{
-			CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_DEST);
-			cmd->ResourceBarrier(1, &b);
-			m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
-		}
-		cmd->CopyBufferRegion(m_counterDefault[bi].Get(), 0, m_counterResetUpload.Get(), 0, sizeof(uint32_t));
 	}
 
 	// Transition args + visible + counters to UAV for the cull shader.
@@ -840,23 +850,28 @@ bool TreeGpuCullSystem::DispatchCull(
 	// In debug force mode, keep instanceCount=1 to validate draw path end-to-end.
 	if (!kTreeDebugForceOneInstancePerBatch)
 	{
-		for (int bi = 0; bi < kBatchCount; ++bi)
+		// バリアをバッチ化: counter→COPY_SOURCE, args→COPY_DEST を一括
 		{
-			D3D12_RESOURCE_BARRIER bb[2] = {};
+			D3D12_RESOURCE_BARRIER bb[kBatchCount * 2];
 			UINT nbar = 0;
-			if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+			for (int bi = 0; bi < kBatchCount; ++bi)
 			{
-				bb[nbar++] = CD3DX12_RESOURCE_BARRIER::Transition(m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
-				m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
-			}
-			if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
-			{
-				bb[nbar++] = CD3DX12_RESOURCE_BARRIER::Transition(m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_COPY_DEST);
-				m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
+				if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+				{
+					bb[nbar++] = CD3DX12_RESOURCE_BARRIER::Transition(m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
+					m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+				}
+				if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_DEST)
+				{
+					bb[nbar++] = CD3DX12_RESOURCE_BARRIER::Transition(m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_COPY_DEST);
+					m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_DEST;
+				}
 			}
 			if (nbar > 0)
 				cmd->ResourceBarrier(nbar, bb);
-
+		}
+		for (int bi = 0; bi < kBatchCount; ++bi)
+		{
 			cmd->CopyBufferRegion(
 				m_indirectArgsDefault[bi].Get(),
 				offsetof(TreeIndirectCmdGpu, draw) + offsetof(D3D12_DRAW_INDEXED_ARGUMENTS, InstanceCount),
@@ -883,13 +898,13 @@ bool TreeGpuCullSystem::DispatchCull(
 				m_lastReadbackLod0 = sumLod[0];
 				m_lastReadbackLod1 = sumLod[1];
 				m_lastReadbackLod2 = sumLod[2];
-				static int s_logCount = 0;
-				if (s_logCount < 10)
-				{
-					DebugLog("[TreeGpuCull][CounterReadback] LOD0=%u LOD1=%u LOD2=%u (total=%u)\n",
-						sumLod[0], sumLod[1], sumLod[2], sumLod[0] + sumLod[1] + sumLod[2]);
-					++s_logCount;
-				}
+				//static int s_logCount = 0;
+				//if (s_logCount < 10)
+				//{
+				//	DebugLog("[TreeGpuCull][CounterReadback] LOD0=%u LOD1=%u LOD2=%u (total=%u)\n",
+				//		sumLod[0], sumLod[1], sumLod[2], sumLod[0] + sumLod[1] + sumLod[2]);
+				//	++s_logCount;
+				//}
 				D3D12_RANGE noWrite = { 0, 0 };
 				m_counterReadback->Unmap(0, &noWrite);
 			}
@@ -900,54 +915,64 @@ bool TreeGpuCullSystem::DispatchCull(
 				D3D12_RANGE argsRange = { 0, static_cast<SIZE_T>(kTreeIndirectStrideBytes) * kBatchCount };
 				if (SUCCEEDED(m_indirectArgsReadback->Map(0, &argsRange, &pArgs)) && pArgs)
 				{
-					static int s_argsLog = 0;
-					if (s_argsLog < 10)
+					// バッチ単位 InstanceCount を保存（描画スキップ判定に使用）
+					const auto* base = reinterpret_cast<const uint8_t*>(pArgs);
+					for (int bi = 0; bi < kBatchCount; ++bi)
 					{
-						const auto* base = reinterpret_cast<const uint8_t*>(pArgs);
-						for (int sp = 0; sp < kSpeciesCount; ++sp)
-						{
-							for (int lod = 0; lod < kLodCount; ++lod)
-							{
-								const int bi = BatchIndex(sp, lod, 0);
-								const auto* args = reinterpret_cast<const D3D12_DRAW_INDEXED_ARGUMENTS*>(
-									base + static_cast<size_t>(bi) * kTreeIndirectStrideBytes);
-								if (args->InstanceCount > 0)
-								{
-									DebugLog("[TreeGpuCull][ArgsReadback] sp=%d lod=%d: IdxCount=%u InstCount=%u startIdx=%u baseVtx=%d startInst=%u\n",
-										sp, lod, args->IndexCountPerInstance, args->InstanceCount,
-										args->StartIndexLocation, args->BaseVertexLocation, args->StartInstanceLocation);
-								}
-							}
-						}
-						++s_argsLog;
+						const auto* args = reinterpret_cast<const D3D12_DRAW_INDEXED_ARGUMENTS*>(
+							base + static_cast<size_t>(bi) * kTreeIndirectStrideBytes);
+						m_lastBatchInstanceCount[bi] = args->InstanceCount;
 					}
+					//static int s_argsLog = 0;
+					//if (s_argsLog < 10)
+					//{
+					//	const auto* base = reinterpret_cast<const uint8_t*>(pArgs);
+					//	for (int sp = 0; sp < kSpeciesCount; ++sp)
+					//	{
+					//		for (int lod = 0; lod < kLodCount; ++lod)
+					//		{
+					//			const int bi = BatchIndex(sp, lod, 0);
+					//			const auto* args = reinterpret_cast<const D3D12_DRAW_INDEXED_ARGUMENTS*>(
+					//				base + static_cast<size_t>(bi) * kTreeIndirectStrideBytes);
+					//			if (args->InstanceCount > 0)
+					//			{
+					//				DebugLog("[TreeGpuCull][ArgsReadback] sp=%d lod=%d: IdxCount=%u InstCount=%u startIdx=%u baseVtx=%d startInst=%u\n",
+					//					sp, lod, args->IndexCountPerInstance, args->InstanceCount,
+					//					args->StartIndexLocation, args->BaseVertexLocation, args->StartInstanceLocation);
+					//			}
+					//		}
+					//	}
+					//	++s_argsLog;
+					//}
 					D3D12_RANGE noWrite = { 0, 0 };
 					m_indirectArgsReadback->Unmap(0, &noWrite);
 				}
 			}
 		}
 
-		for (int bi = 0; bi < kBatchCount; ++bi)
+		// Readback バリアを一括
 		{
-			D3D12_RESOURCE_BARRIER rb = CD3DX12_RESOURCE_BARRIER::Transition(
-				m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
-			if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+			D3D12_RESOURCE_BARRIER rb[kBatchCount * 2];
+			UINT nrb = 0;
+			for (int bi = 0; bi < kBatchCount; ++bi)
 			{
-				cmd->ResourceBarrier(1, &rb);
-				m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+				if (m_counterState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+				{
+					rb[nrb++] = CD3DX12_RESOURCE_BARRIER::Transition(m_counterDefault[bi].Get(), m_counterState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
+					m_counterState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+				}
+				if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
+				{
+					rb[nrb++] = CD3DX12_RESOURCE_BARRIER::Transition(m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
+					m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+				}
 			}
-			cmd->CopyBufferRegion(m_counterReadback.Get(), sizeof(uint32_t) * bi, m_counterDefault[bi].Get(), 0, sizeof(uint32_t));
+			if (nrb > 0)
+				cmd->ResourceBarrier(nrb, rb);
 		}
-
 		for (int bi = 0; bi < kBatchCount; ++bi)
 		{
-			if (m_indirectState[bi] != D3D12_RESOURCE_STATE_COPY_SOURCE)
-			{
-				D3D12_RESOURCE_BARRIER rb = CD3DX12_RESOURCE_BARRIER::Transition(
-					m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_COPY_SOURCE);
-				cmd->ResourceBarrier(1, &rb);
-				m_indirectState[bi] = D3D12_RESOURCE_STATE_COPY_SOURCE;
-			}
+			cmd->CopyBufferRegion(m_counterReadback.Get(), sizeof(uint32_t) * bi, m_counterDefault[bi].Get(), 0, sizeof(uint32_t));
 			cmd->CopyBufferRegion(m_indirectArgsReadback.Get(),
 				static_cast<UINT64>(bi) * kTreeIndirectStrideBytes,
 				m_indirectArgsDefault[bi].Get(), 0, kTreeIndirectStrideBytes);
@@ -983,6 +1008,7 @@ void TreeGpuCullSystem::DrawIndirectLods(
 	}
 
 	m_debugLastGpuVisibleCount = 0;
+	ID3D12PipelineState* lastPso = nullptr; // PSO 変更トラッキング
 	// NOTE: GPU-only pipeline; previous-frame readback counters are not used.
 	uint32_t dbgEligible = 0;
 	uint32_t dbgSkipIdx0 = 0;
@@ -999,8 +1025,8 @@ void TreeGpuCullSystem::DrawIndirectLods(
 		indexCountByPartByLod[0][0] == indexCountByPartByLod[1][0] &&
 		indexCountByPartByLod[1][0] == indexCountByPartByLod[2][0];
 
-	// --- LOD0 depth prepass: write Z only, no pixel shader ---
-	const bool doLod0DepthPrepass = psoLod0DepthPrepass && psoLod0DepthPrepass->IsValid();
+	// LOD0 depth prepass スキップ: 7本×3621idx は軽すぎて PSO 切替コスト(~1ms) の方が重い
+	const bool doLod0DepthPrepass = false;
 	if (doLod0DepthPrepass)
 	{
 		for (int species = 0; species < kSpeciesCount; ++species)
@@ -1009,6 +1035,10 @@ void TreeGpuCullSystem::DrawIndirectLods(
 			const int part = 0;
 			if (m_debugSkipLod0)
 				break;
+
+			const int batchPrepass = BatchIndex(species, lod, part);
+			if (m_lastBatchInstanceCount[batchPrepass] == 0 && m_counterReadbackPending)
+				continue;
 
 			const uint32_t idxCount = indexCountByPartByLod[part][lod];
 			VertexBuffer* vb = vbByPartByLod[part][lod];
@@ -1058,13 +1088,35 @@ void TreeGpuCullSystem::DrawIndirectLods(
 		}
 	}
 
+	// 描画前: 全バッチの INDIRECT_ARGUMENT + SRV 遷移を一括（ループ内の個別バリアを排除）
+	{
+		D3D12_RESOURCE_BARRIER preDrawBarriers[kBatchCount * 2];
+		UINT nPreDraw = 0;
+		for (int bi = 0; bi < kBatchCount; ++bi)
+		{
+			if (m_indirectState[bi] != D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)
+			{
+				preDrawBarriers[nPreDraw++] = CD3DX12_RESOURCE_BARRIER::Transition(
+					m_indirectArgsDefault[bi].Get(), m_indirectState[bi], D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+				m_indirectState[bi] = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+			}
+			if (m_visibleState[bi] != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+			{
+				preDrawBarriers[nPreDraw++] = CD3DX12_RESOURCE_BARRIER::Transition(
+					m_visibleIndexDefault[bi].Get(), m_visibleState[bi], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+				m_visibleState[bi] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+			}
+		}
+		if (nPreDraw > 0)
+			cmd->ResourceBarrier(nPreDraw, preDrawBarriers);
+	}
+
 	for (int species = 0; species < kSpeciesCount; ++species)
 	{
 		for (int lod = 0; lod < kLodCount; ++lod)
 		{
 			for (int part = 0; part < kPartCount; ++part)
 			{
-				// LOD1/LOD2 are imposter batches (part0 only). part1/2 have no CS output.
 				if (lod >= 1 && part != 0)
 					continue;
 				if (lod == 0 && mergedLod0Triple && (part == 1 || part == 2))
@@ -1089,46 +1141,39 @@ void TreeGpuCullSystem::DrawIndirectLods(
 				if (!vb) { ++dbgSkipVb0; continue; }
 				if (!ib) { ++dbgSkipIb0; continue; }
 				if (mat.ptr == 0) { ++dbgSkipMat0; continue; }
-				++dbgEligible;
 
 				const int batch = BatchIndex(species, lod, part);
 
-				// Barriers:
-				// - indirect args: UAV -> INDIRECT_ARGUMENT
-				// - visible index: UAV -> NON_PIXEL_SHADER_RESOURCE (TreeIndirectVS reads this)
-				if (m_indirectState[batch] != D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT
-					|| m_visibleState[batch] != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-				{
-					D3D12_RESOURCE_BARRIER bb[2] = {};
-					UINT bi = 0;
-					if (m_indirectState[batch] != D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)
-						bb[bi++] = CD3DX12_RESOURCE_BARRIER::Transition(m_indirectArgsDefault[batch].Get(), m_indirectState[batch], D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-					if (m_visibleState[batch] != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
-						bb[bi++] = CD3DX12_RESOURCE_BARRIER::Transition(m_visibleIndexDefault[batch].Get(), m_visibleState[batch], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-					if (bi > 0)
-						cmd->ResourceBarrier(bi, bb);
-					m_indirectState[batch] = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
-					m_visibleState[batch] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-				}
+				// 前フレームで InstanceCount==0 のバッチはスキップ
+				if (m_lastBatchInstanceCount[batch] == 0 && m_counterReadbackPending)
+					continue;
+
+				++dbgEligible;
+				// バリアは描画ループ前に一括発行済み
 
 				ID3D12PipelineState* psoPick = nullptr;
 				if (useImposterLod1)
 					psoPick = psoImposterLod1->Get();
-				else if (part == 1) // 葉のみ alpha-cut（マージ LOD0 part0 は上で不透明 PBR）
+				else if (part == 1)
 					psoPick = (psoLeavesAlphaCut && psoLeavesAlphaCut->IsValid()) ? psoLeavesAlphaCut->Get() : (psoOpaque ? psoOpaque->Get() : nullptr);
 				else
 					psoPick = psoOpaque ? psoOpaque->Get() : nullptr;
 				if (!psoPick)
 					continue;
 
-				cmd->SetPipelineState(psoPick);
-				cmd->SetGraphicsRootSignature(pbrRootSig->Get());
-				cmd->SetGraphicsRootConstantBufferView(0, sceneCbGpu);
-				cmd->SetGraphicsRootConstantBufferView(1, materialCbGpu);
-				// Root SRVs (space1):
-				// - t0: instance data buffer (all instances)
-				// - t1: visible index buffer for this (species,lod,part) batch
-				cmd->SetGraphicsRootShaderResourceView(2, m_instanceDataDefault->GetGPUVirtualAddress());
+				if (psoPick != lastPso)
+				{
+					cmd->SetPipelineState(psoPick);
+					cmd->SetGraphicsRootSignature(pbrRootSig->Get());
+					cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+					cmd->SetGraphicsRootConstantBufferView(0, sceneCbGpu);
+					cmd->SetGraphicsRootConstantBufferView(1, materialCbGpu);
+					cmd->SetGraphicsRootShaderResourceView(2, m_instanceDataDefault->GetGPUVirtualAddress());
+					if (iblTable.ptr != 0)
+						cmd->SetGraphicsRootDescriptorTable(4, iblTable);
+					lastPso = psoPick;
+				}
+				// バッチ固有: visible index + material のみ更新
 				cmd->SetGraphicsRootShaderResourceView(5, m_visibleIndexDefault[batch]->GetGPUVirtualAddress());
 				uint32_t treeVisConstants[8];
 				if (useImposterLod1)
@@ -1146,12 +1191,9 @@ void TreeGpuCullSystem::DrawIndirectLods(
 					PackTreeVisibleRootConstants(treeVisConstants, 0u, XMFLOAT3(0.f, 0.f, 0.f), 0.f, 0.f);
 				cmd->SetGraphicsRoot32BitConstants(6, 8, treeVisConstants, 0);
 				cmd->SetGraphicsRootDescriptorTable(3, mat);
-				if (iblTable.ptr != 0)
-					cmd->SetGraphicsRootDescriptorTable(4, iblTable);
 
 				D3D12_VERTEX_BUFFER_VIEW vbView = vb->View();
 				D3D12_INDEX_BUFFER_VIEW ibView = ib->View();
-				cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 				cmd->IASetVertexBuffers(0, 1, &vbView);
 				cmd->IASetIndexBuffer(&ibView);
 
@@ -1172,36 +1214,30 @@ void TreeGpuCullSystem::DrawIndirectLods(
 						0);
 				}
 				++dbgExecuteCalls;
-
-				// Back to UAV for next frame cull
-				if (m_indirectState[batch] != D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-					|| m_visibleState[batch] != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-				{
-					D3D12_RESOURCE_BARRIER ab[2] = {};
-					UINT ai = 0;
-					if (m_indirectState[batch] != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-						ab[ai++] = CD3DX12_RESOURCE_BARRIER::Transition(m_indirectArgsDefault[batch].Get(), m_indirectState[batch], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-					if (m_visibleState[batch] != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-						ab[ai++] = CD3DX12_RESOURCE_BARRIER::Transition(m_visibleIndexDefault[batch].Get(), m_visibleState[batch], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-					if (ai > 0)
-						cmd->ResourceBarrier(ai, ab);
-					m_indirectState[batch] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-					m_visibleState[batch] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-				}
+				// UAV 復元は全バッチ描画後に一括で行う（下のループ）
 			}
 		}
 	}
 
-	if (dbgExecuteCalls == 0)
+	m_lastDrawIndirectBatchCount = dbgExecuteCalls;
+
+	// UAV 復元は不要 — 次フレームの DispatchCull が自分で遷移する
+	// 描画後のパイプラインフラッシュを排除（RTX 4070 で ~5ms 節約見込み）
+	// ステートだけ更新（実際のバリアは発行しない）
 	{
-		DebugLog("[Trees][Indirect] exec=0 eligible=%u skips(idx=%u vb=%u ib=%u mat=%u) instCount=%u\n",
-			dbgEligible, dbgSkipIdx0, dbgSkipVb0, dbgSkipIb0, dbgSkipMat0, m_instanceCount);
+		// ステートは INDIRECT_ARGUMENT/SRV のまま。DispatchCull の冒頭で COPY_DEST に遷移される。
 	}
-	else
-	{
-		DebugLog("[Trees][Indirect] exec=%u eligible=%u instCount=%u\n",
-			dbgExecuteCalls, dbgEligible, m_instanceCount);
-	}
+
+	//if (dbgExecuteCalls == 0)
+	//{
+	//	DebugLog("[Trees][Indirect] exec=0 eligible=%u skips(idx=%u vb=%u ib=%u mat=%u) instCount=%u\n",
+	//		dbgEligible, dbgSkipIdx0, dbgSkipVb0, dbgSkipIb0, dbgSkipMat0, m_instanceCount);
+	//}
+	//else
+	//{
+	//	DebugLog("[Trees][Indirect] exec=%u eligible=%u instCount=%u\n",
+	//		dbgExecuteCalls, dbgEligible, m_instanceCount);
+	//}
 	m_lastDrawIndirectBatchCount = dbgExecuteCalls;
 }
 

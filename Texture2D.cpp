@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cstring>
 
-#pragma comment(lib, "DirectXTex.lib")
+// DirectXTex linking handled in vcxproj per-configuration (vcpkg provides /MD Debug and Release)
 
 namespace {
 	std::mutex g_texMutex;

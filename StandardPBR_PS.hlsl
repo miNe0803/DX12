@@ -55,10 +55,9 @@ static const float kShadowBias = 0.001;
 
 float SampleShadowPCF(float3 worldPos, float viewDepth)
 {
-    uint cascade = 3;
-    if      (viewDepth < CascadeSplits.x) cascade = 0;
-    else if (viewDepth < CascadeSplits.y) cascade = 1;
-    else if (viewDepth < CascadeSplits.z) cascade = 2;
+    if (viewDepth >= CascadeSplits.x)
+        return 1.0;
+    uint cascade = 0;
 
     float4 lightClip = mul(float4(worldPos, 1.0), LightVP[cascade]);
     float3 projCoord = lightClip.xyz / lightClip.w;
@@ -70,19 +69,14 @@ float SampleShadowPCF(float3 worldPos, float viewDepth)
 
     float compareDepth = projCoord.z - kShadowBias;
 
-    // 3x3 PCF
+    // 4-tap PCF (2×2): 品質ほぼ同等、9→4 サンプルで高速化
     float shadow = 0;
-    const float texelSize = 1.0 / 2048.0;
-    [unroll] for (int y = -1; y <= 1; ++y)
-    [unroll] for (int x = -1; x <= 1; ++x)
-    {
-        float2 offset = float2(x, y) * texelSize;
-        shadow += _ShadowMap.SampleCmpLevelZero(
-            shadowSampler,
-            float3(shadowUV + offset, (float)cascade),
-            compareDepth);
-    }
-    return shadow / 9.0;
+    const float texelSize = 1.0 / 512.0;
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(shadowUV + float2(-0.5, -0.5) * texelSize, (float)cascade), compareDepth);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(shadowUV + float2( 0.5, -0.5) * texelSize, (float)cascade), compareDepth);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(shadowUV + float2(-0.5,  0.5) * texelSize, (float)cascade), compareDepth);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(shadowUV + float2( 0.5,  0.5) * texelSize, (float)cascade), compareDepth);
+    return shadow * 0.25;
 }
 
 // --- [Pixel shader main] ---
