@@ -1765,7 +1765,14 @@ void Scene::Update()
 			XMMATRIX lightView = XMMatrixLookToLH(XMVectorZero(), lightDir, up);
 			XMVECTOR vsmDet;
 			XMMATRIX vsmInvVP = XMMatrixInverse(&vsmDet, viewMat * projMat);
-			s_vsm->UpdateConstants(lightView, vsmInvVP, shadowCamPosF3, -800.0f, 800.0f);
+			// 診断 DX12_VSM_CAMOFS: VSMの描画カメラを実カメラからXにオフセット。
+			// 「フレームN-1のアトラスをフレームNのカメラでサンプル＝移動ラグ」を静止画で再現し、
+			// レジデンシー不足(移動先の必要ページが古アトラスに無い→崩れ)を切り分けるための実験フラグ。
+			static float s_vsmCamOfs = [] {
+				char e[16]; return GetEnvironmentVariableA("DX12_VSM_CAMOFS", e, sizeof(e)) > 0 ? (float)atof(e) : 0.0f;
+			}();
+			XMFLOAT3 vsmCamPos = shadowCamPosF3; vsmCamPos.x -= s_vsmCamOfs;
+			s_vsm->UpdateConstants(lightView, vsmInvVP, vsmCamPos, -800.0f, 800.0f);
 		}
 	}
 
