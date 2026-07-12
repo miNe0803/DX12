@@ -44,6 +44,17 @@ public:
 	void SetTerrainCheapNearPreserveMeters(float meters) { m_terrainCheapNearPreserveMeters = meters; }
 	float GetTerrainCheapNearPreserveMeters() const { return m_terrainCheapNearPreserveMeters; }
 
+	// VSM (Virtual Shadow Maps) ランタイムトグル（Debug UI 用。既定は環境変数 DX12_VSM で初期化）。
+	// SetVsmEnabled(true) は有効化直後にアトラスを強制再描画する。
+	void SetVsmEnabled(bool enabled);
+	bool GetVsmEnabled() const;
+	bool VsmAvailable() const;                 // VSM システムが Init 済みか（UIの活性判定）
+	void SetVsmAtlasDebug(bool on);
+	bool GetVsmAtlasDebug() const;
+	void SetVsmShadowDebug(bool on);
+	bool GetVsmShadowDebug() const;
+	uint32_t GetVsmLastPairCount() const;      // 直近フレームの (caster,page) ペア数（診断）
+
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);
 

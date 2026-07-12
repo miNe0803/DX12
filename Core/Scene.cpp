@@ -70,6 +70,11 @@ static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM�
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
+// VSM ランタイムトグル（ImGui / Debug UI で操作。既定は環境変数 DX12_VSM / DX12_VSM_ATLAS / DX12_VSM_SHADOW）
+static bool s_vsmEnabled = false;      // 太陽影を VSM でサンプル（OFF=従来CSM）
+static bool s_vsmAtlasDebug = false;   // 物理アトラスをフルスクリーン表示（検証）
+static bool s_vsmShadowDebug = false;  // VSM 影係数をフルスクリーン表示（検証）
+static bool s_vsmGateInit = false;     // 環境変数からの初期化を1回だけ行う
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -1569,6 +1574,21 @@ ShadowSystem* Scene::GetShadowSystem() const
 	return s_shadow;
 }
 
+// ---- VSM ランタイムトグル（Debug UI）----
+void Scene::SetVsmEnabled(bool enabled)
+{
+	if (enabled && !s_vsmEnabled) s_vsmAtlasReady = false;  // 有効化直後にアトラス強制再描画
+	s_vsmEnabled = enabled;
+	s_vsmGateInit = true;   // 以後 env で上書きしない（UI の選択を尊重）
+}
+bool Scene::GetVsmEnabled() const { return s_vsmEnabled; }
+bool Scene::VsmAvailable() const { return s_vsm && s_vsm->IsValid(); }
+void Scene::SetVsmAtlasDebug(bool on) { s_vsmAtlasDebug = on; s_vsmGateInit = true; }
+bool Scene::GetVsmAtlasDebug() const { return s_vsmAtlasDebug; }
+void Scene::SetVsmShadowDebug(bool on) { s_vsmShadowDebug = on; s_vsmGateInit = true; }
+bool Scene::GetVsmShadowDebug() const { return s_vsmShadowDebug; }
+uint32_t Scene::GetVsmLastPairCount() const { return s_vsm ? s_vsm->LastPairCount() : 0u; }
+
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
 	return s_atmosphereParams;
@@ -2189,15 +2209,11 @@ void Scene::Draw()
 			townViewProj = g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(aspect);
 			XMStoreFloat3(&townCamPos, g_Camera->GetPosition());
 		}
-		// V4: VSM 太陽シャドウを町へバインド（DX12_VSM 時のみ CSM を置換）。アトラスは前フレーム分を参照。
-		{
-			static char s_vsmTownEv[8];
-			static const bool s_vsmTown = (GetEnvironmentVariableA("DX12_VSM", s_vsmTownEv, sizeof(s_vsmTownEv)) > 0);
-			if (s_vsm && s_vsm->IsValid())
-				s_town->SetVsmBindings(s_vsm->GetRenderedConstantsAddress(),   // V5b Stage0: 描画時の中心で引く→移動の揺れ消
-					s_vsm->GetPageTable()->GetGPUVirtualAddress(),
-					s_vsm->GetAtlasSrvGpu(), s_vsmTown && s_vsmAtlasReady);   // アトラス準備後のみ（フレーム1ガード）
-		}
+		// V4: VSM 太陽シャドウを町へバインド（s_vsmEnabled 時のみ CSM を置換）。アトラスは前フレーム分を参照。
+		if (s_vsm && s_vsm->IsValid())
+			s_town->SetVsmBindings(s_vsm->GetRenderedConstantsAddress(),   // V5b Stage0: 描画時の中心で引く→移動の揺れ消
+				s_vsm->GetPageTable()->GetGPUVirtualAddress(),
+				s_vsm->GetAtlasSrvGpu(), s_vsmEnabled && s_vsmAtlasReady);   // ランタイムトグル + アトラス準備後のみ
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),
 			envHandle,
@@ -2589,36 +2605,35 @@ void Scene::Draw()
 	}
 
 	// ---- VSM本体: ページ要求→割当→ページ描画（V5a: 静止時は保持アトラス再利用でスキップ）----
-	// 既定OFF（V4町統合未のため画面に効かない）。DX12_VSM=1 で有効化。DX12_VSM_ATLAS/DX12_VSM_SHADOW で可視化。
-	if (s_vsm && s_vsm->IsValid())
+	// ON/OFF は ImGui/Debug UI（s_vsmEnabled）。既定値は環境変数 DX12_VSM から初期化（1回のみ）。
+	if (!s_vsmGateInit)
 	{
-		static char s_vsmEv[8];
-		static const bool s_vsmRender = (GetEnvironmentVariableA("DX12_VSM", s_vsmEv, sizeof(s_vsmEv)) > 0);
-		if (s_vsmRender)
+		char ev[8];
+		s_vsmEnabled     = GetEnvironmentVariableA("DX12_VSM",        ev, sizeof(ev)) > 0;
+		s_vsmAtlasDebug  = GetEnvironmentVariableA("DX12_VSM_ATLAS",  ev, sizeof(ev)) > 0;
+		s_vsmShadowDebug = GetEnvironmentVariableA("DX12_VSM_SHADOW", ev, sizeof(ev)) > 0;
+		s_vsmGateInit = true;
+	}
+	if (s_vsm && s_vsm->IsValid() && s_vsmEnabled)
+	{
+		// V5a: カメラ/太陽が動いたフレーム、または未準備(有効化直後)のみ再描画（描画キャッシュ）。
+		if (s_vsm->NeedsRender() || !s_vsmAtlasReady)
 		{
-			// V5a: カメラ/太陽が動いたフレームのみ再描画（描画はキャッシュ, サンプルは毎フレーム）。
-			if (s_vsm->NeedsRender())
-			{
-				s_vsm->BeginRenderStates(postCommandList);    // V4: atlas/pageTable → working
-				s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
-				s_vsm->Allocate(postCommandList);
-				s_vsm->BuildPageParams(postCommandList);
-				s_vsm->BuildCasterBinning(postCommandList);   // V3c-m2: (caster,page) ペアリスト構築
-				if (!s_vsmRenderBatches.empty())              // V3c-m3: 各ページへキャスタ深度を描画
-					s_vsm->RenderPages(postCommandList, s_vsmRenderBatches.data(), (uint32_t)s_vsmRenderBatches.size());
-				s_vsm->EndRenderStates(postCommandList);      // V4: → PIXEL_SHADER_RESOURCE(resting)。町がサンプル可
-				s_vsmAtlasReady = true;
-			}
-			// 可視化/サンプルは毎フレーム（保持アトラスを参照＝V5キャッシュのアーキテクチャ）
-			static char s_vsmAtlasEv[8];
-			static const bool s_showAtlas = (GetEnvironmentVariableA("DX12_VSM_ATLAS", s_vsmAtlasEv, sizeof(s_vsmAtlasEv)) > 0);
-			if (s_showAtlas)
-				s_vsm->RenderAtlasDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle());
-			static char s_vsmShadowEv[8];
-			static const bool s_showVsmShadow = (GetEnvironmentVariableA("DX12_VSM_SHADOW", s_vsmShadowEv, sizeof(s_vsmShadowEv)) > 0);
-			if (s_showVsmShadow)
-				s_vsm->RenderShadowDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle(), g_Engine->GetDepthStencilResource());
+			s_vsm->BeginRenderStates(postCommandList);    // V4: atlas/pageTable → working
+			s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
+			s_vsm->Allocate(postCommandList);
+			s_vsm->BuildPageParams(postCommandList);
+			s_vsm->BuildCasterBinning(postCommandList);   // V3c-m2: (caster,page) ペアリスト構築
+			if (!s_vsmRenderBatches.empty())              // V3c-m3: 各ページへキャスタ深度を描画
+				s_vsm->RenderPages(postCommandList, s_vsmRenderBatches.data(), (uint32_t)s_vsmRenderBatches.size());
+			s_vsm->EndRenderStates(postCommandList);      // V4: → PIXEL_SHADER_RESOURCE(resting)。町がサンプル可
+			s_vsmAtlasReady = true;
 		}
+		// 可視化/サンプルは毎フレーム（保持アトラスを参照＝V5キャッシュのアーキテクチャ）
+		if (s_vsmAtlasDebug)
+			s_vsm->RenderAtlasDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle());
+		if (s_vsmShadowDebug)
+			s_vsm->RenderShadowDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle(), g_Engine->GetDepthStencilResource());
 	}
 
 	// ---- GI G0: GTAO（スクリーン空間AO）を HDR に乗算適用（bloom/tonemap 前）----

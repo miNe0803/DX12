@@ -179,6 +179,38 @@ void DebugUI::Draw()
 			ImGui::EndTabItem();
 		}
 
+		if (ImGui::BeginTabItem("VSM / Shadows"))
+		{
+			if (g_Scene)
+			{
+				if (g_Scene->VsmAvailable())
+				{
+					bool vsmOn = g_Scene->GetVsmEnabled();
+					if (ImGui::Checkbox("VSM sun shadows (replaces CSM)", &vsmOn))
+						g_Scene->SetVsmEnabled(vsmOn);
+					ImGui::TextDisabled("OFF=従来CSM影 / ON=Virtual Shadow Maps（ワールドロック, 移動で揺れにくい）");
+					if (vsmOn)
+					{
+						ImGui::Text("(caster,page) pairs this frame: %u", g_Scene->GetVsmLastPairCount());
+						ImGui::Separator();
+						ImGui::TextUnformatted("--- 検証ビュー（HDR を上書き表示）---");
+						bool atlas = g_Scene->GetVsmAtlasDebug();
+						if (ImGui::Checkbox("Show physical atlas", &atlas))
+							g_Scene->SetVsmAtlasDebug(atlas);
+						bool shadowDbg = g_Scene->GetVsmShadowDebug();
+						if (ImGui::Checkbox("Show VSM shadow factor (screen-space)", &shadowDbg))
+							g_Scene->SetVsmShadowDebug(shadowDbg);
+						ImGui::TextDisabled("移動時はまだ全再描画のため FPS 低下（V5b キャッシュ未実装）。");
+					}
+				}
+				else
+				{
+					ImGui::TextDisabled("VSM system not initialized.");
+				}
+			}
+			ImGui::EndTabItem();
+		}
+
 		if (ImGui::BeginTabItem("Terrain / Hi-Z"))
 		{
 			if (g_Scene)
