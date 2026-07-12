@@ -53,7 +53,10 @@ public:
 	bool GetVsmAtlasDebug() const;
 	void SetVsmShadowDebug(bool on);
 	bool GetVsmShadowDebug() const;
+	void SetVsmCache(bool on);                 // V5b 永続キャッシュ（移動時は新規ページのみ描画＝軽量）
+	bool GetVsmCache() const;
 	uint32_t GetVsmLastPairCount() const;      // 直近フレームの (caster,page) ペア数（診断）
+	uint32_t GetVsmResidentPages() const;      // V5b: 常駐ページ高水位（cap 4096）
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

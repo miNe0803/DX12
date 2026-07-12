@@ -326,6 +326,27 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_physToVirtual)))) return false;
     }
+    // V5b 永続キャッシュ: dirty page table（今フレーム新規のみ, binning へ流す）
+    {
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer((UINT64)kTotalVirtualPages * sizeof(uint32_t),
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_dirtyPageTable)))) return false;
+    }
+    // V5b: PageTable を 0xFFFF(=kInvalidPage) で初期化するアップロード元（リセット時にコピー）。
+    {
+        auto up = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer((UINT64)kTotalVirtualPages * sizeof(uint32_t));
+        if (FAILED(device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_pageTableInit)))) return false;
+        void* p = nullptr; D3D12_RANGE none{ 0, 0 };
+        if (SUCCEEDED(m_pageTableInit->Map(0, &none, &p)) && p)
+        {
+            uint32_t* d = reinterpret_cast<uint32_t*>(p);
+            for (uint32_t i = 0; i < kTotalVirtualPages; ++i) d[i] = kInvalidPage;   // 0xFFFF
+            m_pageTableInit->Unmap(0, nullptr);
+        }
+    }
     // カウンタ読戻し
     auto rbp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
     auto rbd = CD3DX12_RESOURCE_DESC::Buffer(sizeof(uint32_t));
@@ -333,9 +354,9 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_counterReadback[i])))) return false;
 
-    // ヒープ [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV
+    // ヒープ [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV,[4]=DirtyPageTable UAV
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 4;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 5;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_allocHeap)))) return false;
     m_allocStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -355,6 +376,7 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
     mkUav(m_pageTable.Get(), kTotalVirtualPages);
     mkUav(m_physToVirtual.Get(), kPhysicalPages);
     mkUav(m_counter.Get(), 1);
+    mkUav(m_dirtyPageTable.Get(), kTotalVirtualPages);   // u3 (cache)
     return true;
 }
 
@@ -364,7 +386,7 @@ bool VsmSystem::CreateAllocPipeline(ID3D12Device* device)
     params[0].InitAsConstants(4, 0);   // b0: gTotalVirtual, gPhysCap, pad, pad
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     params[1].InitAsDescriptorTable(1, &srvR);
-    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0);  // u0,u1,u2
+    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 4, 0);  // u0,u1,u2,u3(cache dirty)
     params[2].InitAsDescriptorTable(1, &uavR);
     D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 3; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
@@ -390,7 +412,17 @@ void VsmSystem::Allocate(ID3D12GraphicsCommandList* cmd)
     if (!m_valid) return;
     GPU_CMD_BEGIN_EVENT(cmd, 200, 140, 100, L"VSM: page-alloc");
 
-    // カウンタを 0 クリア（ゼロバッファ先頭4Bをコピー）
+    // 永続キャッシュのリセット（有効化/太陽変化時に一度）: PageTable←0xFFFF, Counter←0, アトラス全クリア。
+    // MarkPages 後・Allocate CS 前のこの位置なら atlas=DEPTH_WRITE, pageTable=UAV で安全。
+    if (m_cacheMode && m_cacheNeedsReset)
+    {
+        ResetCacheGpu(cmd);
+        m_cacheNeedsReset = false;
+    }
+
+    // カウンタを 0 クリア（ゼロバッファ先頭4Bをコピー）。
+    // ※永続キャッシュ時はクリアしない（Counter は物理割当の高水位＝リセット時のみ 0 に戻す）。
+    if (!m_cacheMode)
     {
         auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -409,7 +441,7 @@ void VsmSystem::Allocate(ID3D12GraphicsCommandList* cmd)
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetComputeRootSignature(m_allocRootSig.Get());
     cmd->SetPipelineState(m_allocPso.Get());
-    uint32_t consts[4] = { kTotalVirtualPages, kPhysicalPages, 0, 0 };
+    uint32_t consts[4] = { kTotalVirtualPages, kPhysicalPages, m_cacheMode ? 1u : 0u, 0 };
     cmd->SetComputeRoot32BitConstants(0, 4, consts, 0);
     D3D12_GPU_DESCRIPTOR_HANDLE gbase = m_allocHeap->GetGPUDescriptorHandleForHeapStart();
     cmd->SetComputeRootDescriptorTable(1, gbase);                          // t0 Request SRV
@@ -666,8 +698,9 @@ void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
     if (!m_valid || !m_casterVA || m_casterCount == 0 || m_binModelCount == 0) return;
     GPU_CMD_BEGIN_EVENT(cmd, 220, 180, 80, L"VSM: caster binning");
 
-    // pageTable を SRV へ（Allocate 後は UAV）
-    auto ptToSrv = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+    // binning が root SRV で読むページテーブル（cache=dirty, 非cache=全常駐）を SRV へ（Allocate 後は UAV）。
+    ID3D12Resource* binTable = (m_cacheMode ? m_dirtyPageTable : m_pageTable).Get();
+    auto ptToSrv = CD3DX12_RESOURCE_BARRIER::Transition(binTable,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cmd->ResourceBarrier(1, &ptToSrv);
 
@@ -676,7 +709,10 @@ void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
     ZeroBuffer(cmd, m_globalCounter.Get(), sizeof(uint32_t));
 
     const uint32_t consts[4] = { m_casterCount, m_binModelCount, kPhysicalPages, kMaxPairs };
-    const D3D12_GPU_VIRTUAL_ADDRESS pageTableVA = m_pageTable->GetGPUVirtualAddress();
+    // 永続キャッシュ時は「今フレーム新規ページのみ」の dirty table を binning へ流す＝新規ページだけ描画。
+    // 非キャッシュ時は従来通り全常駐ページ(=毎フレーム再割当)を流す。（count/scatter シェーダは無改変）
+    const D3D12_GPU_VIRTUAL_ADDRESS pageTableVA =
+        (m_cacheMode ? m_dirtyPageTable : m_pageTable)->GetGPUVirtualAddress();
 
     // --- m2b: count ---
     cmd->SetComputeRootSignature(m_binCountRS.Get());
@@ -736,8 +772,8 @@ void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
         auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_drawArgs.Get()); cmd->ResourceBarrier(1, &u);
     }
 
-    // pageTable を UAV へ復帰（C3: 次フレーム Allocate 用）
-    auto ptBack = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+    // binTable を UAV へ復帰（C3: 次フレーム Allocate 用）
+    auto ptBack = CD3DX12_RESOURCE_BARRIER::Transition(binTable,
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->ResourceBarrier(1, &ptBack);
 
@@ -883,7 +919,11 @@ void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* b
 
     // アトラス（常時 DEPTH_WRITE）へ深度描画
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_atlasDsvHeap->GetCPUDescriptorHandleForHeapStart();
-    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    // 非キャッシュ: 毎フレーム全クリア（全ページ再描画）。
+    // 永続キャッシュ: クリアしない（新規physのタイルはリセット時の全クリア以降未使用＝pristine=1.0、
+    //   既存ページはキャッシュ内容を保持）。全クリアはリセット時 ResetCacheGpu が一度だけ行う。
+    if (!m_cacheMode)
+        cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
     const UINT dim = kAtlasPagesPerRow * kPageSize;   // 8192
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)dim, (float)dim, 0.0f, 1.0f };
@@ -926,6 +966,47 @@ void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* b
     post[3] = CD3DX12_RESOURCE_BARRIER::Transition(m_drawArgs.Get(),
         D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->ResourceBarrier(4, post);
+    GPU_CMD_END_EVENT(cmd);
+}
+
+void VsmSystem::SetCacheMode(bool on)
+{
+    if (on == m_cacheMode) return;
+    m_cacheMode = on;
+    m_cacheNeedsReset = true;   // モード切替時は次回描画で初期化（PageTable/Counter/アトラス）
+}
+
+// 永続キャッシュのリセット: PageTable←0xFFFF, Counter←0, アトラス全クリア。
+// BeginRenderStates 後（atlas=DEPTH_WRITE, pageTable=UAV）に MarkPages より前で一度だけ呼ぶ。
+void VsmSystem::ResetCacheGpu(ID3D12GraphicsCommandList* cmd)
+{
+    if (!m_valid) return;
+    GPU_CMD_BEGIN_EVENT(cmd, 220, 120, 120, L"VSM: cache reset");
+    const UINT64 ptBytes = (UINT64)kTotalVirtualPages * sizeof(uint32_t);
+
+    // PageTable ← 0xFFFF（UAV→COPY_DEST→UAV）
+    {
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_pageTable.Get(), 0, m_pageTableInit.Get(), 0, ptBytes);
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+    // Counter ← 0（UAV→COPY_DEST→UAV）
+    {
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_counter.Get(), 0, m_zeroUpload.Get(), 0, sizeof(uint32_t));
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+    // アトラス全クリア（1.0）。以降キャッシュ時は RenderPages でクリアしない。
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_atlasDsvHeap->GetCPUDescriptorHandleForHeapStart();
+    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     GPU_CMD_END_EVENT(cmd);
 }
 

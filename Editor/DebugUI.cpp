@@ -189,10 +189,17 @@ void DebugUI::Draw()
 					if (ImGui::Checkbox("VSM sun shadows (replaces CSM) [WIP]", &vsmOn))
 						g_Scene->SetVsmEnabled(vsmOn);
 					ImGui::TextDisabled("OFF=従来CSM影（既定・安定）。");
-					ImGui::TextDisabled("ON=VSM【開発中/V5b未完】: 移動で重く、カメラ位置により崩れる場合あり。");
+					ImGui::TextDisabled("ON=VSM【開発中】: 世界固定の高精細影。移動を軽くするには下の Cache を ON。");
 					if (vsmOn)
 					{
+						bool cache = g_Scene->GetVsmCache();
+						if (ImGui::Checkbox("Persistent cache (V5b): 移動時は新規ページのみ描画", &cache))
+							g_Scene->SetVsmCache(cache);
+						ImGui::TextDisabled(cache
+							? "ON=静的な町はページ世界固定→一度描けば再利用。移動でも軽量（推奨）。"
+							: "OFF=毎フレーム全ページ再描画（移動で重い。検証用）。");
 						ImGui::Text("(caster,page) pairs this frame: %u", g_Scene->GetVsmLastPairCount());
+						ImGui::Text("resident pages (cache): %u / 4096", g_Scene->GetVsmResidentPages());
 						ImGui::Separator();
 						ImGui::TextUnformatted("--- 検証ビュー（HDR を上書き表示）---");
 						bool atlas = g_Scene->GetVsmAtlasDebug();
@@ -201,7 +208,7 @@ void DebugUI::Draw()
 						bool shadowDbg = g_Scene->GetVsmShadowDebug();
 						if (ImGui::Checkbox("Show VSM shadow factor (screen-space)", &shadowDbg))
 							g_Scene->SetVsmShadowDebug(shadowDbg);
-						ImGui::TextDisabled("移動時はまだ全再描画のため FPS 低下（V5b キャッシュ未実装）。");
+						ImGui::TextDisabled("※shadow factor 表示は現在CB基準のため移動中は誤差（町本体は正しい）。");
 					}
 				}
 				else

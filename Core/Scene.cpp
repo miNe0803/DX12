@@ -75,6 +75,7 @@ static bool s_vsmEnabled = false;      // 太陽影を VSM でサンプル（OFF
 static bool s_vsmAtlasDebug = false;   // 物理アトラスをフルスクリーン表示（検証）
 static bool s_vsmShadowDebug = false;  // VSM 影係数をフルスクリーン表示（検証）
 static bool s_vsmForceRender = false;  // 診断: V5aキャッシュ無効化（毎フレーム再描画→ログ更新）DX12_VSM_NOCACHE
+static bool s_vsmCache = false;        // V5b 永続キャッシュ（移動時は新規ページのみ描画）DX12_VSM_CACHE
 static bool s_vsmGateInit = false;     // 環境変数からの初期化を1回だけ行う
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
@@ -1578,7 +1579,11 @@ ShadowSystem* Scene::GetShadowSystem() const
 // ---- VSM ランタイムトグル（Debug UI）----
 void Scene::SetVsmEnabled(bool enabled)
 {
-	if (enabled && !s_vsmEnabled) s_vsmAtlasReady = false;  // 有効化直後にアトラス強制再描画
+	if (enabled && !s_vsmEnabled)
+	{
+		s_vsmAtlasReady = false;                       // 有効化直後にアトラス強制再描画
+		if (s_vsm && s_vsm->IsValid()) s_vsm->RequestCacheReset();  // キャッシュも作り直し（stale回避）
+	}
 	s_vsmEnabled = enabled;
 	s_vsmGateInit = true;   // 以後 env で上書きしない（UI の選択を尊重）
 }
@@ -1588,7 +1593,10 @@ void Scene::SetVsmAtlasDebug(bool on) { s_vsmAtlasDebug = on; s_vsmGateInit = tr
 bool Scene::GetVsmAtlasDebug() const { return s_vsmAtlasDebug; }
 void Scene::SetVsmShadowDebug(bool on) { s_vsmShadowDebug = on; s_vsmGateInit = true; }
 bool Scene::GetVsmShadowDebug() const { return s_vsmShadowDebug; }
+void Scene::SetVsmCache(bool on) { s_vsmCache = on; s_vsmGateInit = true; }   // 次フレームの SetCacheMode で反映（切替時に内部リセット）
+bool Scene::GetVsmCache() const { return s_vsmCache; }
 uint32_t Scene::GetVsmLastPairCount() const { return s_vsm ? s_vsm->LastPairCount() : 0u; }
+uint32_t Scene::GetVsmResidentPages() const { return s_vsm ? s_vsm->LastResidentPages() : 0u; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -2621,8 +2629,11 @@ void Scene::Draw()
 		s_vsmAtlasDebug  = GetEnvironmentVariableA("DX12_VSM_ATLAS",  ev, sizeof(ev)) > 0;
 		s_vsmShadowDebug = GetEnvironmentVariableA("DX12_VSM_SHADOW", ev, sizeof(ev)) > 0;
 		s_vsmForceRender = GetEnvironmentVariableA("DX12_VSM_NOCACHE", ev, sizeof(ev)) > 0;
+		s_vsmCache       = GetEnvironmentVariableA("DX12_VSM_CACHE",   ev, sizeof(ev)) > 0;
 		s_vsmGateInit = true;
 	}
+	if (s_vsm && s_vsm->IsValid())
+		s_vsm->SetCacheMode(s_vsmCache);   // 永続キャッシュ mode（初回/切替時に内部でリセット予約）
 	if (s_vsm && s_vsm->IsValid() && s_vsmEnabled)
 	{
 		// V5a: カメラ/太陽が動いたフレーム、または未準備(有効化直後)のみ再描画（描画キャッシュ）。

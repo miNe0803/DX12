@@ -48,6 +48,15 @@ public:
     // MarkPages〜RenderPages をスキップし保持アトラスを再利用（サンプルは毎フレーム可）。
     bool NeedsRender() const { return m_needsRender; }
 
+    // V5b 永続キャッシュ（DX12_VSM_CACHE）。ON にすると: 静的な町はページが世界固定＝一度描けば永久有効
+    // なので、カメラ移動時も「新規に要求されたページ(=クリップマップに新しく入る先端)」だけを描画する
+    // （非要求ページの PageTable/アトラスは保持）。全ページ毎フレーム再描画(=移動時198ms)を回避。
+    // 有効化/太陽変化時は次回描画で一度だけリセット（PageTable←0xFFFF, Counter←0, アトラス全クリア）。
+    void SetCacheMode(bool on);
+    bool GetCacheMode() const { return m_cacheMode; }
+    void RequestCacheReset() { m_cacheNeedsReset = true; }   // 太陽変化・視点ワープ時など
+    uint32_t LastResidentPages() const { return m_lastAllocCount; }   // cache時=常駐高水位
+
     // V2: シーン深度から必要な仮想ページを要求バッファへマーク（要求をクリア→CS→読み戻し検証）。
     // depthResource は DEPTH_WRITE 状態で渡す。
     void MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthResource);
@@ -173,12 +182,19 @@ private:
     ComPtr<ID3D12Resource> m_counter;                  // [0]=割当数
     ComPtr<ID3D12Resource> m_physToVirtual;            // phys -> vp
     ComPtr<ID3D12Resource> m_counterReadback[kCbFrames];
-    ComPtr<ID3D12DescriptorHeap> m_allocHeap;          // [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV
+    ComPtr<ID3D12DescriptorHeap> m_allocHeap;          // [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV,[4]=DirtyPageTable UAV
     UINT m_allocStride = 0;
     ComPtr<ID3D12RootSignature> m_allocRootSig;
     ComPtr<ID3D12PipelineState> m_allocPso;
     uint32_t m_allocFrame = 0;
     uint32_t m_lastAllocCount = 0;
+
+    // V5b 永続キャッシュ
+    bool m_cacheMode = false;         // DX12_VSM_CACHE / Scene::SetVsm... 経由
+    bool m_cacheNeedsReset = true;    // 次回描画で PageTable/Counter/アトラスを初期化
+    ComPtr<ID3D12Resource> m_dirtyPageTable;      // vp->phys（今フレーム新規のみ, 他0xFFFF）binning へ流す
+    ComPtr<ID3D12Resource> m_pageTableInit;       // 0xFFFF 埋めアップロード（リセット時 PageTable へコピー）
+    void ResetCacheGpu(ID3D12GraphicsCommandList* cmd);   // PageTable←0xFFFF, Counter←0, アトラス全クリア
 
     // V3c-m1: per-page 描画パラメータ
     ComPtr<ID3D12Resource> m_pageCenterExtent;   // float4/page: cx,cy,extent,level
