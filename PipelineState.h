@@ -16,6 +16,9 @@ public:
 	void SetVS(std::wstring filePath);
 	void SetPS(std::wstring filePath);
 	void SetCullMode(D3D12_CULL_MODE mode);
+	void SetDepthBias(int bias, float slopeScaled = 0.0f, float clamp = 0.0f);
+	// 深度テスト無効化（DSV 未バインドのパス用）。DSVFormat も UNKNOWN にする。
+	void SetDepthEnable(bool enable);
 	void SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask);
 	void SetDepthFunc(D3D12_COMPARISON_FUNC func);
 	void SetNumRenderTargets(UINT numRenderTargets);

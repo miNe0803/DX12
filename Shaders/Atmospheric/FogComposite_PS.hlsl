@@ -93,7 +93,8 @@ float4 main(PSInput input) : SV_TARGET
     float dist = min(length(worldPos - CameraPos.xyz), maxDist);
     float heightFactor = exp(-FogParams.z * max(worldPos.y - FogParams.w, 0));
     float fogAmount = 1.0 - exp(-FogParams.x * dist * heightFactor);
-    fogAmount = saturate(fogAmount);
+    // UE FogMaxOpacity（SunDirection.w）でヘイズを頭打ちに＝濃くても薄い霞に見える（UEの肝）
+    fogAmount = min(saturate(fogAmount), SunDirection.w);
 
     // Inscattering colour: sun-facing gets warm tint
     float3 viewDir = normalize(worldPos - CameraPos.xyz);

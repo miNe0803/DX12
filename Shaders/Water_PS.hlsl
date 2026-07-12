@@ -1,11 +1,6 @@
 // ============================================================
-// Water Pixel Shader
-// Renders realistic water surfaces using:
-// - Dual-layer scrolling normal maps
-// - Fresnel reflection/refraction
-// - Beer's Law depth absorption
-// - Shore foam
-// - Sun specular highlight
+// Water Pixel Shader (Terrain Root Signature 対応版)
+// 川マスクで透明度制御、IBL 反射、Beer's Law 疑似深度
 // ============================================================
 
 struct VSOutput
@@ -16,35 +11,43 @@ struct VSOutput
     float3 normal   : NORMAL;
 };
 
-cbuffer SceneCB : register(b0)
+// terrain ルートシグに合わせる
+cbuffer Transform : register(b0)
 {
+    matrix World;
     matrix View;
     matrix Proj;
-    float4 CameraWorld;
-    float4 SunDirection;
-    float4 SunColor;
-    matrix InvViewProj;
 };
 
-cbuffer WaterCB : register(b1)
+cbuffer TerrainParams : register(b1)
 {
-    float4 WaterParams;     // x=time, y=waterSurfaceY, z=foamWidth, w=specPower
-    float4 AbsorptionCoeff; // RGB absorption (Beer's Law), w=absorptionScale
-    float4 WaterColor;      // shallow water tint
-    float4 NormalScroll1;   // xy=direction, z=speed, w=uvScale
-    float4 NormalScroll2;   // xy=direction, z=speed, w=uvScale
+    float4 LayerColor[6];
+    float4 CameraPos;    // .w = time
+    float4 DebugParams;
+    float4 SunDirection;
+    float4 SunColor;
 };
 
 SamplerState smp : register(s0);
 
-// Textures (will be bindless indices in final pipeline; for now use explicit slots)
-Texture2D _WaterNormal1 : register(t0); // seamless water normal map A
-Texture2D _WaterNormal2 : register(t1); // seamless water normal map B
-Texture2D _SceneColor   : register(t2); // opaque pass result (for refraction)
-Texture2D _SceneDepth   : register(t3); // main depth buffer as R32_FLOAT
-TextureCube _EnvMap      : register(t4); // IBL environment for reflection fallback
+// テレインと同じスロット (t0-t8)
+Texture2D _TreeMask    : register(t0);
+Texture2D _NatureMask  : register(t1);
+Texture2D _GroundDiff  : register(t2);
+Texture2D _GroundDisp  : register(t3);  // 水面法線として使用
+Texture2D _RiversMask  : register(t4);
+Texture2D _SnowMask    : register(t5);
+TextureCube _PrefilterEnv  : register(t6);
+TextureCube _IrradianceMap : register(t7);
+Texture2D _BrdfLut         : register(t8);
 
-// Shadow (reuse from main pass)
+// 拡張テレインテクスチャ (t9-t12)
+Texture2D _RiversDirection : register(t9);   // RG: 川の流れ方向 (B=128 中立)
+Texture2D _WaterColorTint  : register(t10);  // RGB: Gaea が出した本物の水色
+Texture2D _FreshWaterMask  : register(t11);  // 湿地マスク
+Texture2D _InhibitorsMask  : register(t12);  // 植生抑制マスク (未使用、地形側で参照)
+
+// Shadow (space2)
 Texture2DArray _ShadowMap : register(t0, space2);
 SamplerComparisonState shadowSampler : register(s1, space2);
 cbuffer ShadowCB : register(b1, space2)
@@ -55,99 +58,156 @@ cbuffer ShadowCB : register(b1, space2)
 
 static const float kShadowBias = 0.002;
 
+// 川マスクの 5x5 ガウスぼかし (TerrainVS と同じカーネル)
+float SmoothRiverMask(float2 uv)
+{
+    const float t = 1.0 / 512.0;
+    float v = 0.0;
+    v += _RiversMask.Sample(smp, uv).r * 4.0;
+    v += _RiversMask.Sample(smp, uv + float2( t,  0)).r * 2.0;
+    v += _RiversMask.Sample(smp, uv + float2(-t,  0)).r * 2.0;
+    v += _RiversMask.Sample(smp, uv + float2( 0,  t)).r * 2.0;
+    v += _RiversMask.Sample(smp, uv + float2( 0, -t)).r * 2.0;
+    v += _RiversMask.Sample(smp, uv + float2( t,  t)).r;
+    v += _RiversMask.Sample(smp, uv + float2(-t,  t)).r;
+    v += _RiversMask.Sample(smp, uv + float2( t, -t)).r;
+    v += _RiversMask.Sample(smp, uv + float2(-t, -t)).r;
+    v += _RiversMask.Sample(smp, uv + float2( 2*t, 0)).r;
+    v += _RiversMask.Sample(smp, uv + float2(-2*t, 0)).r;
+    v += _RiversMask.Sample(smp, uv + float2( 0,  2*t)).r;
+    v += _RiversMask.Sample(smp, uv + float2( 0, -2*t)).r;
+    return v / 20.0;
+}
+
 float SampleShadowPCF(float3 worldPos, float viewDepth)
 {
     if (viewDepth >= CascadeSplits.x)
         return 1.0;
     uint cascade = 0;
-
     float4 lc = mul(float4(worldPos, 1.0), LightVP[cascade]);
     float3 pc = lc.xyz / lc.w;
     float2 suv = pc.xy * 0.5 + 0.5;
     suv.y = 1.0 - suv.y;
     if (suv.x < 0 || suv.x > 1 || suv.y < 0 || suv.y > 1) return 1.0;
-
     float cmp = pc.z - kShadowBias;
-    float shadow = 0;
     float ts = 1.0 / 512.0;
-    [unroll] for (int y = -1; y <= 1; ++y)
-    [unroll] for (int x = -1; x <= 1; ++x)
-        shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2(x,y)*ts, (float)cascade), cmp);
-    return shadow / 9.0;
-}
-
-float3 ReconstructWorldPos(float2 screenUV, float depth)
-{
-    float2 ndc = screenUV * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
+    float shadow = 0;
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2(-0.5,-0.5)*ts, (float)cascade), cmp);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2( 0.5,-0.5)*ts, (float)cascade), cmp);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2(-0.5, 0.5)*ts, (float)cascade), cmp);
+    shadow += _ShadowMap.SampleCmpLevelZero(shadowSampler, float3(suv + float2( 0.5, 0.5)*ts, (float)cascade), cmp);
+    return shadow * 0.25;
 }
 
 float4 main(VSOutput input) : SV_TARGET
 {
-    float time = WaterParams.x;
-    float foamWidth = WaterParams.z;
-    float specPower = WaterParams.w;
+    // *** デバッグ: Water (川) パスは純赤 ***
+    return float4(1.0, 0.0, 0.0, 1.0);
 
-    // --- 1. Dual-layer scrolling normals ---
-    float2 uv1 = input.uv * NormalScroll1.w + NormalScroll1.xy * NormalScroll1.z * time;
-    float2 uv2 = input.uv * NormalScroll2.w + NormalScroll2.xy * NormalScroll2.z * time;
-    float3 n1 = _WaterNormal1.Sample(smp, uv1).xyz * 2.0 - 1.0;
-    float3 n2 = _WaterNormal2.Sample(smp, uv2).xyz * 2.0 - 1.0;
-    float3 waterNormal = normalize(float3(n1.xy + n2.xy, n1.z));
+    // ---- 1) 川マスクをぼかして判定 (TerrainVS と整合) ----
+    float riverSmooth = SmoothRiverMask(input.uv);
+    if (riverSmooth < 0.20)
+        discard;
+    // 水深 0..1 正規化 (岸辺=0, 中心=1)
+    float riverDepth = riverSmooth;
+    float waterDepth01 = saturate((riverSmooth - 0.20) / 0.80);
 
-    // Blend with geometric normal
-    float3 N = normalize(input.normal);
-    float3 T = normalize(cross(N, float3(0, 0, 1)));
-    float3 B = cross(N, T);
-    float3x3 TBN = float3x3(T, B, N);
-    float3 worldNormal = normalize(mul(waterNormal, TBN));
+    // ---- 2) 時間アニメーション ----
+    float time = CameraPos.w;
+    float wrappedTime = fmod(time, 500.0);
 
-    float3 V = normalize(CameraWorld.xyz - input.worldPos);
-    float NdotV = saturate(dot(worldNormal, V));
+    // ---- 3) 川の流れ方向: Rivers_Direction.png (Gaea生成) を直接使用 ----
+    // RG チャンネルが [0,1] にエンコードされた 2D 流れベクトル (0.5,0.5 = 静止)
+    float2 dirRG = _RiversDirection.Sample(smp, input.uv).rg;
+    float2 dirVec = dirRG * 2.0 - 1.0; // [-1,1] にデコード
+    // ベクトルが極小なら勾配ベースのフォールバック
+    float2 flowDir;
+    if (length(dirVec) > 0.05)
+    {
+        flowDir = normalize(dirVec);
+    }
+    else
+    {
+        const float texelUV = 1.0 / 512.0;
+        float mR = _RiversMask.Sample(smp, input.uv + float2( texelUV, 0)).r;
+        float mL = _RiversMask.Sample(smp, input.uv + float2(-texelUV, 0)).r;
+        float mU = _RiversMask.Sample(smp, input.uv + float2(0,  texelUV)).r;
+        float mD = _RiversMask.Sample(smp, input.uv + float2(0, -texelUV)).r;
+        float2 grad = float2(mR - mL, mU - mD);
+        flowDir = (length(grad) > 1e-4) ? normalize(float2(-grad.y, grad.x)) : float2(1, 0);
+    }
 
-    // --- 2. Fresnel ---
-    float F0 = 0.02; // water IOR 1.33
+    // ---- 4) 手続き的なリップル法線 (岩 disp は使わない、クリーンな水面) ----
+    // 流れ方向に沿ってスクロールする 3 つの正弦波を重ね、自然な小さなさざ波を作る
+    float2 wp = input.worldPos.xz;
+    float t1 = wrappedTime * 0.50;
+    float t2 = wrappedTime * 0.85;
+    float t3 = wrappedTime * 1.30;
+    float2 d1 = flowDir;
+    float2 d2 = float2(-flowDir.y, flowDir.x); // 流れ垂直
+    float2 d3 = normalize(flowDir + float2(-flowDir.y, flowDir.x) * 0.5);
+    float wave1 = sin(dot(wp, d1) * 0.55 + t1);
+    float wave2 = sin(dot(wp, d2) * 0.90 + t2) * 0.60;
+    float wave3 = sin(dot(wp, d3) * 1.40 + t3) * 0.30;
+    // 法線勾配 (波の傾き) - 控えめに
+    float2 waveGrad = float2(
+        cos(dot(wp, d1) * 0.55 + t1) * 0.55 * d1.x +
+        cos(dot(wp, d2) * 0.90 + t2) * 0.90 * 0.60 * d2.x,
+        cos(dot(wp, d1) * 0.55 + t1) * 0.55 * d1.y +
+        cos(dot(wp, d2) * 0.90 + t2) * 0.90 * 0.60 * d2.y) * 0.05;
+    float3 waterNormal = normalize(float3(waveGrad.x, 1.0, waveGrad.y));
+    // 後段のフォーム判定で使う「波の高さ」サロゲート
+    float wA = (wave1 + wave2 + wave3) * 0.5 + 0.5; // 0..1 化
+
+    // ---- 5) PBR 反射計算 ----
+    float3 V = normalize(CameraPos.xyz - input.worldPos);
+    float NdotV = saturate(dot(waterNormal, V));
+
+    // Fresnel (Schlick, F0 = 0.02 for water)
+    const float F0 = 0.02;
     float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // --- 3. Reflection ---
-    float3 R = reflect(-V, worldNormal);
-    float3 reflection = _EnvMap.SampleLevel(smp, R, 0.0).rgb;
-    // TODO: replace with DXR RT reflection texture when Step 6 is integrated
+    // IBL reflection
+    float3 R = reflect(-V, waterNormal);
+    float3 reflection = _PrefilterEnv.SampleLevel(smp, R, 0.5).rgb;
 
-    // --- 4. Refraction (Beer's Law depth absorption) ---
-    float2 screenUV = input.svpos.xy / float2(1920.0, 1080.0); // TODO: pass screen dimensions
-    float sceneDepthRaw = _SceneDepth.Sample(smp, screenUV).r;
-    float3 sceneWorldPos = ReconstructWorldPos(screenUV, sceneDepthRaw);
-    float waterDepth = max(0.0, input.worldPos.y - sceneWorldPos.y);
+    // ---- 6) クリアな水深色: 浅瀬→深部のハッキリしたグラデーション ----
+    // 浅瀬: 透明感のある淡いエメラルド (川底の色がうっすら混ざる)
+    // 深部: 飽和した深いシアン青 (光が届かない)
+    float3 shallowColor = float3(0.55, 0.82, 0.78);   // 浅瀬: 明るいエメラルド
+    float3 midColor     = float3(0.20, 0.55, 0.65);   // 中間: ターコイズ
+    float3 deepColor    = float3(0.04, 0.16, 0.28);   // 深部: 紺
+    // 滑らかな 3 段グラデーション
+    float3 waterBase;
+    if (waterDepth01 < 0.5)
+        waterBase = lerp(shallowColor, midColor, waterDepth01 * 2.0);
+    else
+        waterBase = lerp(midColor, deepColor, (waterDepth01 - 0.5) * 2.0);
+    // Gaea が生成した水色を控えめにブレンド (主役は手続き深度色)
+    float3 gaeaWaterColor = saturate(_WaterColorTint.Sample(smp, input.uv).rgb * 4.0);
+    waterBase = lerp(waterBase, gaeaWaterColor, 0.20);
 
-    // Distort refraction UV by water normal
-    float2 refractionUV = screenUV + worldNormal.xz * 0.02 * saturate(waterDepth);
-    float3 refractionColor = _SceneColor.Sample(smp, refractionUV).rgb;
+    // ---- 7) 合成 ----
+    float3 waterColor = lerp(waterBase, reflection, fresnel);
 
-    // Beer's Law absorption
-    float3 absorption = exp(-waterDepth * AbsorptionCoeff.xyz * AbsorptionCoeff.w);
-    float3 refraction = lerp(WaterColor.rgb, refractionColor, absorption);
-
-    // --- 5. Combine reflection + refraction ---
-    float3 waterColor = lerp(refraction, reflection, fresnel);
-
-    // --- 6. Sun specular ---
+    // ---- 8) 太陽スペキュラ ----
     float3 L = normalize(SunDirection.xyz);
     float3 H = normalize(L + V);
-    float NdotH = max(dot(worldNormal, H), 0.0);
-    float sunSpec = pow(NdotH, specPower) * fresnel;
+    float NdotH = saturate(dot(waterNormal, H));
+    float sunSpec = pow(NdotH, 128.0) * fresnel * 2.0;
 
     float4 viewPos = mul(float4(input.worldPos, 1.0), View);
     float shadowFactor = SampleShadowPCF(input.worldPos, viewPos.z);
     waterColor += SunColor.rgb * sunSpec * shadowFactor;
 
-    // --- 7. Shore foam ---
-    float foam = saturate(1.0 - waterDepth / foamWidth);
-    foam *= foam; // sharper falloff
-    waterColor = lerp(waterColor, float3(0.9, 0.95, 1.0), foam * 0.6);
+    // ---- 9) 岸辺フォーム (riverSmooth 0.20-0.40 の浅瀬で強調) - 控えめに ----
+    float foam = smoothstep(0.40, 0.20, riverSmooth);
+    float foamWave = smoothstep(0.45, 0.75, wA);
+    waterColor = lerp(waterColor, float3(0.92, 0.96, 1.0), foam * foamWave * 0.35);
 
-    return float4(waterColor, 1.0);
+    // ---- 10) 半透明度（ほぼ不透明）----
+    // 浅瀬=85%、深部=97% に揃え、奥の木が透けて見えないように
+    float alpha = lerp(0.85, 0.97, waterDepth01);
+
+    return float4(waterColor * alpha, alpha); // プリマルチプライドアルファ
 }

@@ -1,51 +1,62 @@
 #include "VertexBuffer.h"
 #include "Engine.h"
 #include <d3dx12.h>
+#include <cstring>
+
+// data ã‚’ DEFAULT ãƒ’ãƒ¼ãƒ—(VRAM)ã¸ã€‚ã‚¹ãƒ†ãƒ¼ã‚¸ãƒ³ã‚° UPLOAD -> CopyBufferRegion ->
+// GENERIC_READ é·ç§»ã‚’ã€å†åˆ©ç”¨ã‚³ãƒãƒ³ãƒ‰ãƒªã‚¹ãƒˆã§å³æ™‚å®Ÿè¡Œã—ã¦å¾…æ©Ÿã™ã‚‹ã€‚
+ComPtr<ID3D12Resource> GpuUploadToDefault(const void* data, size_t size)
+{
+	auto dev = g_Engine ? g_Engine->Device() : nullptr;
+	if (!dev || size == 0) return nullptr;
+
+	ComPtr<ID3D12Resource> def;
+	auto rd = CD3DX12_RESOURCE_DESC::Buffer(size);
+	auto hpD = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	if (FAILED(dev->CreateCommittedResource(&hpD, D3D12_HEAP_FLAG_NONE, &rd,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&def))))
+		return nullptr;
+
+	ComPtr<ID3D12Resource> up;
+	auto hpU = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	if (FAILED(dev->CreateCommittedResource(&hpU, D3D12_HEAP_FLAG_NONE, &rd,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&up))))
+		return nullptr;
+	if (data)
+	{
+		void* p = nullptr;
+		if (SUCCEEDED(up->Map(0, nullptr, &p))) { std::memcpy(p, data, size); up->Unmap(0, nullptr); }
+	}
+
+	// å†åˆ©ç”¨ã™ã‚‹å°‚ç”¨ã‚³ãƒ”ãƒ¼ç”¨ã‚³ãƒãƒ³ãƒ‰ãƒªã‚¹ãƒˆï¼ˆãƒ¡ã‚¤ãƒ³ã‚¹ãƒ¬ãƒƒãƒ‰å‰æï¼‰
+	static ComPtr<ID3D12CommandAllocator> s_alloc;
+	static ComPtr<ID3D12GraphicsCommandList> s_list;
+	if (!s_alloc) dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s_alloc));
+	if (!s_list)  dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s_alloc.Get(), nullptr, IID_PPV_ARGS(&s_list));
+	else { s_alloc->Reset(); s_list->Reset(s_alloc.Get(), nullptr); }
+
+	s_list->CopyBufferRegion(def.Get(), 0, up.Get(), 0, size);
+	auto bar = CD3DX12_RESOURCE_BARRIER::Transition(def.Get(),
+		D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+	s_list->ResourceBarrier(1, &bar);
+	s_list->Close();
+	ID3D12CommandList* lists[] = { s_list.Get() };
+	g_Engine->Queue()->ExecuteCommandLists(1, lists);
+	g_Engine->WaitForGpuIdle();   // ã‚³ãƒ”ãƒ¼å®Œäº† -> ã‚¹ãƒ†ãƒ¼ã‚¸ãƒ³ã‚°(up)ã‚’ç ´æ£„ã—ã¦ã‚‚å®‰å…¨
+	return def;
+}
 
 VertexBuffer::VertexBuffer(size_t size, size_t stride, const void* pInitData)
 {
-
-	auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD); 	// ƒq[ƒvƒvƒƒpƒeƒB
-	auto desc = CD3DX12_RESOURCE_DESC::Buffer(size); 	// ƒŠƒ\[ƒX‚Ìİ’è
-
-	// ƒŠƒ\[ƒX‚ğ¶¬
-	auto hr = g_Engine->Device()->CreateCommittedResource(
-		&prop,
-		D3D12_HEAP_FLAG_NONE,
-		&desc,
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(m_pBuffer.GetAddressOf()));
-
-	if (FAILED(hr))
+	m_pBuffer = GpuUploadToDefault(pInitData, size);
+	if (!m_pBuffer)
 	{
-		printf("’¸“_ƒoƒbƒtƒ@ƒŠƒ\[ƒX‚Ì¶¬‚É¸”s");
+		printf("VertexBuffer: VRAM upload failed\n");
 		return;
 	}
-
-	// ’¸“_ƒoƒbƒtƒ@ƒrƒ…[‚Ìİ’è
 	m_View.BufferLocation = m_pBuffer->GetGPUVirtualAddress();
 	m_View.SizeInBytes = static_cast<UINT>(size);
 	m_View.StrideInBytes = static_cast<UINT>(stride);
-
-	// ƒ}ƒbƒsƒ“ƒO‚·‚é
-	if (pInitData != nullptr)
-	{
-		void* ptr = nullptr;
-		hr = m_pBuffer->Map(0, nullptr, &ptr);
-		if (FAILED(hr))
-		{
-			printf("’¸“_ƒoƒbƒtƒ@ƒ}ƒbƒsƒ“ƒO‚É¸”s");
-			return;
-		}
-
-		// ’¸“_ƒf[ƒ^‚ğƒ}ƒbƒsƒ“ƒOæ‚Éİ’è
-		memcpy(ptr, pInitData, size);
-
-		// ƒ}ƒbƒsƒ“ƒO‰ğœ
-		m_pBuffer->Unmap(0, nullptr);
-	}
-
 	m_IsValid = true;
 }
 

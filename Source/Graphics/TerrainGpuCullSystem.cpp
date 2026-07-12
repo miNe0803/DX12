@@ -17,6 +17,9 @@
 
 using namespace DirectX;
 
+// Scene.cpp に定義された拡張テレインマスク GPU ハンドル取得 (t9-t12 用)
+extern D3D12_GPU_DESCRIPTOR_HANDLE Scene_GetTerrainExtraMaskGpu();
+
 namespace
 {
 	struct TerrainChunkGpu
@@ -603,6 +606,12 @@ void TerrainGpuCullSystem::DrawIndirect(
 		cmd->SetGraphicsRootDescriptorTable(5, shadowMapSrvGpu);
 	if (shadowCBGpu != 0)
 		cmd->SetGraphicsRootConstantBufferView(6, shadowCBGpu);
+	// 拡張テレインマスク (t9-t12) — Color パスのみ。Depth Prepass は使用しない (PS 無し)。
+	{
+		D3D12_GPU_DESCRIPTOR_HANDLE extraMaskGpu = ::Scene_GetTerrainExtraMaskGpu();
+		if (extraMaskGpu.ptr != 0)
+			cmd->SetGraphicsRootDescriptorTable(7, extraMaskGpu);
+	}
 
 	D3D12_VERTEX_BUFFER_VIEW vbView = vb->View();
 	D3D12_INDEX_BUFFER_VIEW ibView = ib->View();

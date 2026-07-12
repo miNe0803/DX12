@@ -20,11 +20,17 @@ Texture2D _TreeMask    : register(t0);
 Texture2D _NatureMask  : register(t1);
 Texture2D _GroundDiff  : register(t2);
 Texture2D _GroundDisp  : register(t3);
-Texture2D _RiversMask  : register(t4); // Rivers_Rivers.png
+Texture2D _RiversMask  : register(t4); // WaterColor_Mask_main.png (主要川マスク, シェーダ内ぼかし)
 Texture2D _SnowMask    : register(t5); // Snow_Snow.png
 TextureCube _PrefilterEnv  : register(t6);
 TextureCube _IrradianceMap : register(t7);
 Texture2D _BrdfLut         : register(t8);
+
+// 拡張テレインテクスチャ (t9-t12) — Gaea が出力した補助マスクを総動員
+Texture2D _RiversDirection : register(t9);   // RG: 川の流れ方向
+Texture2D _WaterColorTint  : register(t10);  // RGB: 川/湿地の本物の水色
+Texture2D _FreshWaterMask  : register(t11);  // 湿地・水際のマスク (川岸を緑/苔で潤す)
+Texture2D _InhibitorsMask  : register(t12);  // 植生抑制マスク (岩肌・痩せ地; 草を生やさない領域)
 
 cbuffer TerrainParams : register(b1)
 {
@@ -81,6 +87,27 @@ float3 BlendTreeLayers(float3 mask, float3 ground, float3 tree0, float3 tree1, f
     return (tree0 * mask.r + tree1 * mask.g + tree2 * mask.b) / weightSum;
 }
 
+// 川マスクの 5x5 ガウスぼかし (TerrainVS / Water_PS と同じカーネル)
+float SmoothRiverMaskTP(float2 uv)
+{
+    const float t = 1.0 / 512.0;
+    float v = 0.0;
+    v += _RiversMask.SampleLevel(smp, uv, 0).r * 4.0;
+    v += _RiversMask.SampleLevel(smp, uv + float2( t,  0), 0).r * 2.0;
+    v += _RiversMask.SampleLevel(smp, uv + float2(-t,  0), 0).r * 2.0;
+    v += _RiversMask.SampleLevel(smp, uv + float2( 0,  t), 0).r * 2.0;
+    v += _RiversMask.SampleLevel(smp, uv + float2( 0, -t), 0).r * 2.0;
+    v += _RiversMask.SampleLevel(smp, uv + float2( t,  t), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2(-t,  t), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2( t, -t), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2(-t, -t), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2( 2*t, 0), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2(-2*t, 0), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2( 0,  2*t), 0).r;
+    v += _RiversMask.SampleLevel(smp, uv + float2( 0, -2*t), 0).r;
+    return v / 20.0;
+}
+
 float4 main(VSOutput input) : SV_TARGET
 {
     //return float4(1,0,1,1); // マゼンタテスト: テレイン範囲確認用。コメント解除で有効化
@@ -112,9 +139,12 @@ float4 main(VSOutput input) : SV_TARGET
     float distToCam = distance(CameraPos.xyz, input.worldPos);
 
     // Sample water/snow masks BEFORE cheapPath
-    float riverRaw = saturate(_RiversMask.SampleLevel(smp, uv, 0).r);
-    float waterMask = (riverRaw > 0.5) ? riverRaw : 0.0;
+    // Rivers_Rivers をぼかして滑らかな勾配にする (TerrainVS / Water_PS と整合)
+    float riverDepthRaw = saturate(SmoothRiverMaskTP(uv));
+    float waterMask = 0.0; // 水面は別パス(Water_PS)で描画。地形は水底として表示
     float snowMask = saturate(_SnowMask.SampleLevel(smp, uv, 0).r);
+    // 川底マスク (水が覆う領域; Water_PS の discard 閾値 0.20 と整合)
+    float riverbedMask = smoothstep(0.20, 0.50, riverDepthRaw);
 
     // 診断: cheapPath 無効化で円形境界が消えるか確認
     bool useCheapPath = false;
@@ -147,6 +177,9 @@ float4 main(VSOutput input) : SV_TARGET
     if (kTerrainDebugStage == 2)
         return float4(c, 1.0f);
 
+    // 川底には雪・樹木は乗らない (水が覆う領域)
+    snowMask *= (1.0 - riverbedMask);
+
     // Snow
     if (snowMask > 0.01f)
     {
@@ -161,25 +194,63 @@ float4 main(VSOutput input) : SV_TARGET
         c += pow(max(dot(N, H), 0), 128.0) * snowMask * 0.25 * float3(1.0, 0.98, 0.95);
     }
 
+    // 川底 (水没する地形): 濡れて暗く、わずかに青緑へシフト
+    if (riverbedMask > 0.0)
+    {
+        float3 wetTint = float3(0.55, 0.70, 0.80);
+        float3 wetAlbedo = c * wetTint * 0.6; // 濡れて暗く、色相シフト
+        c = lerp(c, wetAlbedo, riverbedMask);
+    }
+
+    // ---- 湿地 (FreshWater): 川岸の苔・湿った緑のティント ----
+    float freshWater = saturate(_FreshWaterMask.SampleLevel(smp, uv, 0).r);
+    if (freshWater > 0.05)
+    {
+        // 値が大きい = 水が近い = 苔・湿地・濡れた草の色
+        float3 mossyGreen = float3(0.32, 0.42, 0.22) * (0.55 + 0.45 * ndotl * shadowFactor);
+        c = lerp(c, mossyGreen, freshWater * 0.55 * (1.0 - riverbedMask));
+    }
+
+    // ---- INHIBITORS: 痩せ地・岩肌のマスク。彩度を下げて荒涼感を演出 ----
+    float inhibitor = saturate(_InhibitorsMask.SampleLevel(smp, uv, 0).r);
+    if (inhibitor > 0.05)
+    {
+        // 彩度低下 + 暗化 + 微赤 (錆/酸化を示唆)
+        float gray = dot(c, float3(0.299, 0.587, 0.114));
+        float3 desat = lerp(c, float3(gray, gray, gray) * float3(1.05, 0.96, 0.90), 0.65);
+        c = lerp(c, desat, inhibitor * 0.50);
+    }
+
     // Water: 物理ベース水面（水深 + 流れ + フォーム + PBR反射）
     if (waterMask > 0.0f)
     {
         const float time = CameraPos.w;
         const float wrappedTime = fmod(time, 500.0);
 
-        // ---- 1) 水深計算（river mask 強度から推定）----
-        // riverRaw 0.5=岸辺(浅い)、1.0=中心(深い)
-        float waterDepth = saturate((riverRaw - 0.5) * 2.0); // 0=岸辺, 1=深い
+        // ---- 1) 水深計算（Rivers_Depth は既に深度勾配）----
+        float waterDepth = saturate(riverDepthRaw); // 0=岸辺, 1=深い
         float depthMeters = waterDepth * 3.0; // 疑似メートル
 
-        // ---- 2) フロー: 3 レイヤーの波（異なる方向・スケール・速度）----
-        float2 flowDir1 = float2(0.7, 0.3);   // 主流れ
-        float2 flowDir2 = float2(-0.4, 0.6);  // 副流れ
-        float2 flowDir3 = float2(0.2, -0.8);  // 細波
+        // ---- 2) フロー方向を川マスクの勾配から算出（上流→下流の自然な流れ）----
+        const float texelUV = 1.0 / 512.0;
+        float mR = _RiversMask.Sample(smp, uv + float2( texelUV, 0)).r;
+        float mL = _RiversMask.Sample(smp, uv + float2(-texelUV, 0)).r;
+        float mU = _RiversMask.Sample(smp, uv + float2(0,  texelUV)).r;
+        float mD = _RiversMask.Sample(smp, uv + float2(0, -texelUV)).r;
+        // 川幅の勾配: 細い方が上流、太い方が下流。勾配ベクトルを流れ方向に変換
+        float2 gradRiver = float2(mR - mL, mU - mD);
+        float gradLen = length(gradRiver);
+        // 勾配の垂直方向が川に沿った流れ方向
+        float2 flowTangent = (gradLen > 1e-4) ? normalize(float2(-gradRiver.y, gradRiver.x)) : float2(1, 0);
 
-        float2 waveUV1 = uv * 4.0 + flowDir1 * wrappedTime * 0.015;
-        float2 waveUV2 = uv * 10.0 + flowDir2 * wrappedTime * 0.025;
-        float2 waveUV3 = uv * 20.0 + flowDir3 * wrappedTime * 0.04;
+        // 3 レイヤーの波（主流れに沿って + 変化）
+        float2 flowDir1 = flowTangent;
+        float2 flowDir2 = normalize(flowTangent + float2(-0.3, 0.5));
+        float2 flowDir3 = normalize(flowTangent + float2(0.4, -0.3));
+
+        float2 waveUV1 = uv * 4.0 + flowDir1 * wrappedTime * 0.02;
+        float2 waveUV2 = uv * 10.0 + flowDir2 * wrappedTime * 0.04;
+        float2 waveUV3 = uv * 20.0 + flowDir3 * wrappedTime * 0.08;
 
         float w1 = _GroundDisp.Sample(smp, waveUV1).r;
         float w2 = _GroundDisp.Sample(smp, waveUV2).r;
@@ -247,8 +318,8 @@ float4 main(VSOutput input) : SV_TARGET
         float3 waterColor = scatteredLight + directSpec + indirectSpec + indirectDiffuse;
 
         // ---- 7) 岸辺のフォーム（白い泡）----
-        // 岸辺 (riverRaw 0.5-0.65) + 波が高い所にフォーム
-        float shoreFoam = smoothstep(0.65, 0.5, riverRaw) * smoothstep(0.3, 0.7, w1);
+        // 岸辺 (浅瀬 depth 0.05-0.25) + 波が高い所にフォーム
+        float shoreFoam = smoothstep(0.25, 0.05, riverDepthRaw) * smoothstep(0.3, 0.7, w1);
         float3 foamColor = float3(0.9, 0.95, 1.0);
         waterColor = lerp(waterColor, foamColor, shoreFoam * 0.7);
 

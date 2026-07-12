@@ -1,6 +1,7 @@
 #include "PipelineState.h"
 #include "Engine.h"
 #include "Core/GpuDebugLabels.h"
+#include "DebugLog.h"
 #include <d3dx12.h>
 #include <d3dcompiler.h>
 #include <unordered_map>
@@ -118,7 +119,7 @@ void PipelineState::SetVS(std::wstring filePath)
 	m_pVsBlob = LoadShaderBlobCached(m_vsPath);
 	if (!m_pVsBlob)
 	{
-		printf("VS load failed\n");
+		DebugLog("[PSO] VS load failed: %ls\n", m_vsPath.c_str());
 		return;
 	}
 
@@ -131,7 +132,7 @@ void PipelineState::SetPS(std::wstring filePath)
 	m_pPSBlob = LoadShaderBlobCached(m_psPath);
 	if (!m_pPSBlob)
 	{
-		printf("PS load failed\n");
+		DebugLog("[PSO] PS load failed: %ls\n", m_psPath.c_str());
 		return;
 	}
 
@@ -141,6 +142,23 @@ void PipelineState::SetPS(std::wstring filePath)
 void PipelineState::SetCullMode(D3D12_CULL_MODE mode)
 {
 	desc.RasterizerState.CullMode = mode;
+}
+
+void PipelineState::SetDepthBias(int bias, float slopeScaled, float clamp)
+{
+	desc.RasterizerState.DepthBias = bias;
+	desc.RasterizerState.SlopeScaledDepthBias = slopeScaled;
+	desc.RasterizerState.DepthBiasClamp = clamp;
+}
+
+void PipelineState::SetDepthEnable(bool enable)
+{
+	desc.DepthStencilState.DepthEnable = enable ? TRUE : FALSE;
+	if (!enable)
+	{
+		desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+		desc.DSVFormat = DXGI_FORMAT_UNKNOWN;   // DSV 未バインドと整合
+	}
 }
 
 void PipelineState::SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK mask)
@@ -187,7 +205,9 @@ void PipelineState::Create()
 	const bool needPs = (desc.NumRenderTargets > 0);
 	if (m_pVsBlob.Get() == nullptr || (needPs && m_pPSBlob.Get() == nullptr))
 	{
-		printf("PipelineState: shader not loaded\n");
+		DebugLog("[PSO] shader not loaded: VS=%ls (%s) PS=%ls (%s)\n",
+			m_vsPath.c_str(), m_pVsBlob.Get() ? "ok" : "NULL",
+			m_psPath.c_str(), m_pPSBlob.Get() ? "ok" : "NULL");
 		return;
 	}
 	const std::string key = BuildPsoCacheKey(desc, m_vsPath, m_psPath);
@@ -201,7 +221,15 @@ void PipelineState::Create()
 	auto hr = g_Engine->Device()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(m_pPipelineState.ReleaseAndGetAddressOf()));
 	if (FAILED(hr))
 	{
-		printf("PipelineState create failed\n");
+		DebugLog("[PSO] create FAILED: hr=0x%08X VS=%ls PS=%ls NumRT=%u RTV0=%d DSV=%d Cull=%d DF=%d DWM=%d BE=%d\n",
+			static_cast<unsigned>(hr),
+			m_vsPath.c_str(), m_psPath.c_str(),
+			desc.NumRenderTargets,
+			(int)desc.RTVFormats[0], (int)desc.DSVFormat,
+			(int)desc.RasterizerState.CullMode,
+			(int)desc.DepthStencilState.DepthFunc,
+			(int)desc.DepthStencilState.DepthWriteMask,
+			(int)desc.BlendState.RenderTarget[0].BlendEnable);
 		return;
 	}
 

@@ -1,4 +1,4 @@
-#include "Scene.h"
+﻿#include "Scene.h"
 #include "Engine.h"
 #include "App.h"
 #include <d3dx12.h>
@@ -29,12 +29,16 @@
 #include "Systems/CameraSystem.h"
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
+#include "Town/TownScene.h"
 #include "Graphics/TerrainGenerator.h"
 #include "Graphics/TerrainGpuCullSystem.h"
 #include "Graphics/HiZSystem.h"
 #include "Graphics/TreeGpuCullSystem.h"
 #include "Graphics/ShadowSystem.h"
 #include "Graphics/AtmosphereSystem.h"
+#include "Graphics/SsrSystem.h"
+#include "Graphics/GtaoSystem.h"
+#include "Graphics/VsmSystem.h"
 #include "Graphics/TreeVegetation.h"
 #include "Graphics/TreeImposterBake.h"
 #include "ComPtr.h"
@@ -60,6 +64,10 @@ static TreeGpuCullSystem* s_treeGpuCull = nullptr;
 static ShadowSystem* s_shadow = nullptr;
 static AtmosphereSystem* s_atmosphere = nullptr;
 static AtmosphereParams s_atmosphereParams;
+static SsrSystem* s_ssr = nullptr;
+static GtaoSystem* s_gtao = nullptr;
+static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM影を置換予定）
+static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -72,6 +80,7 @@ DescriptorHeap* descriptorHeap = nullptr;
 Scene* g_Scene = nullptr;
 ConstantBuffer* constantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 ConstantBuffer* sceneConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {};
+ConstantBuffer* reflectionConstantBuffer[Engine::FRAME_BUFFER_COUNT] = {}; // 平面反射: ミラーカメラCB
 ConstantBuffer* pbrPropertyBuffer[Engine::FRAME_BUFFER_COUNT] = {};
 
 RootSignature* rootSignature = nullptr;
@@ -81,6 +90,10 @@ PipelineState* nprTransparentPipelineState = nullptr;
 RootSignature* terrainRootSignature = nullptr;
 PipelineState* terrainDepthPrepassPipelineState = nullptr;
 PipelineState* terrainPipelineState = nullptr;
+PipelineState* waterPipelineState = nullptr;
+PipelineState* oceanPipelineState = nullptr;
+VertexBuffer*  s_oceanVB = nullptr;
+IndexBuffer*   s_oceanIB = nullptr;
 PipelineState* treeOpaquePipelineState = nullptr;
 PipelineState* treeLod1PipelineState = nullptr;
 PipelineState* treeLod2PipelineState = nullptr;
@@ -124,10 +137,67 @@ namespace {
 	ComPtr<ID3D12Resource> s_irradianceCubemap;
 	ComPtr<ID3D12Resource> s_prefilterCubemap;
 	ComPtr<ID3D12Resource> s_brdfLut;
+
+	// ---- 平面反射（水たまり）: 半解像度の反射カラー+深度 + 専用 RTV/DSV ヒープ ----
+	ComPtr<ID3D12Resource> s_reflColor;              // R16G16B16A16_FLOAT (rgb=町, a=被覆)
+	ComPtr<ID3D12Resource> s_reflDepth;              // R32_TYPELESS
+	ComPtr<ID3D12DescriptorHeap> s_reflRtvHeap;      // 1 slot
+	ComPtr<ID3D12DescriptorHeap> s_reflDsvHeap;      // 1 slot
+	UINT  s_reflW = 0, s_reflH = 0;
+	float s_reflPlaneY = 0.0f;                       // 水面（ミラー）平面 Y（毎フレーム更新）
+	bool  s_reflValid = false;                       // ターゲット作成済み
+
+	// 半解像度の反射カラー/深度と RTV/DSV ヒープを作成（Engine のヒープは満杯なので専用ヒープ）。
+	bool CreatePlanarReflectionTargets(ID3D12Device* dev, UINT w, UINT h)
+	{
+		if (!dev || w == 0 || h == 0) return false;
+		s_reflW = w; s_reflH = h;
+		// カラー（a=0 でクリア → 町PS が a=1 出力 → 被覆マスクになる）
+		{
+			auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+			auto rd = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT, w, h, 1, 1, 1, 0,
+				D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+			D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			cv.Color[0] = cv.Color[1] = cv.Color[2] = cv.Color[3] = 0.0f;
+			if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&s_reflColor)))) return false;
+		}
+		// 深度（R32_TYPELESS → D32_FLOAT DSV）
+		{
+			auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+			auto rd = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R32_TYPELESS, w, h, 1, 1, 1, 0,
+				D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+			D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+			if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+				D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&s_reflDepth)))) return false;
+		}
+		// RTV ヒープ + RTV
+		{
+			D3D12_DESCRIPTOR_HEAP_DESC hd = {}; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = 1;
+			if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&s_reflRtvHeap)))) return false;
+			D3D12_RENDER_TARGET_VIEW_DESC rv = {}; rv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+			dev->CreateRenderTargetView(s_reflColor.Get(), &rv, s_reflRtvHeap->GetCPUDescriptorHandleForHeapStart());
+		}
+		// DSV ヒープ + DSV
+		{
+			D3D12_DESCRIPTOR_HEAP_DESC hd = {}; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 1;
+			if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&s_reflDsvHeap)))) return false;
+			D3D12_DEPTH_STENCIL_VIEW_DESC dv = {}; dv.Format = DXGI_FORMAT_D32_FLOAT;
+			dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+			dev->CreateDepthStencilView(s_reflDepth.Get(), &dv, s_reflDsvHeap->GetCPUDescriptorHandleForHeapStart());
+		}
+		return true;
+	}
+
 	PostProcessSystem* s_postProcess = nullptr;
 	DescriptorHandle* s_hdrSrvHandle = nullptr;
 	DescriptorHandle* s_envCubemapHandle = nullptr;
 	DescriptorHandle* s_terrainMaskHandle = nullptr;
+	// 拡張テレインテクスチャ (t9-t12): Rivers_Direction, WaterColor_Color, Trees2_FreshWater, INHIBITORS_Out
+	DescriptorHandle* s_terrainExtraMaskHandle = nullptr;
+	// 公開アクセサ用 GPU ハンドル (RenderSystem から参照)
+	D3D12_GPU_DESCRIPTOR_HANDLE s_terrainExtraMaskGpuPub = {};
 	DescriptorHandle* s_hizPyramidSrvHandle = nullptr;
 	DescriptorHandle* s_treeImposterMatTableStart[3] = { nullptr, nullptr, nullptr };
 	D3D12_GPU_DESCRIPTOR_HANDLE s_treeImposterMatGpu[3] = {};
@@ -296,6 +366,10 @@ Scene::~Scene()
 	if (g_Engine)
 		g_Engine->WaitForGpuIdle();
 
+	// [TOWN] 町シーン ( descriptorHeap を参照するため、その解放より前に )
+	delete s_town;
+	s_town = nullptr;
+
 	for (auto e : m_registry.view<MeshRendererComponent>())
 	{
 		auto& mr = m_registry.get<MeshRendererComponent>(e);
@@ -328,6 +402,8 @@ Scene::~Scene()
 		constantBuffer[i] = nullptr;
 		delete sceneConstantBuffer[i];
 		sceneConstantBuffer[i] = nullptr;
+		delete reflectionConstantBuffer[i];
+		reflectionConstantBuffer[i] = nullptr;
 		delete pbrPropertyBuffer[i];
 		pbrPropertyBuffer[i] = nullptr;
 		delete terrainConstantBuffer[i];
@@ -346,6 +422,11 @@ Scene::~Scene()
 	s_treeGpuCull = nullptr;
 	if (s_shadow) { s_shadow->Shutdown(); delete s_shadow; s_shadow = nullptr; }
 	if (s_atmosphere) { s_atmosphere->Shutdown(); delete s_atmosphere; s_atmosphere = nullptr; }
+	if (s_ssr) { s_ssr->Shutdown(); delete s_ssr; s_ssr = nullptr; }
+	if (s_gtao) { s_gtao->Shutdown(); delete s_gtao; s_gtao = nullptr; }
+	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
+	s_reflValid = false;
+	s_reflColor.Reset(); s_reflDepth.Reset(); s_reflRtvHeap.Reset(); s_reflDsvHeap.Reset();
 
 	s_hdrSrvHandle = nullptr;
 	s_envCubemapHandle = nullptr;
@@ -721,6 +802,10 @@ bool Scene::InitCameraAndFrameBuffers()
 		if (!sceneConstantBuffer[i]->IsValid())
 			return false;
 
+		reflectionConstantBuffer[i] = new ConstantBuffer(sizeof(SceneConstants));
+		if (!reflectionConstantBuffer[i]->IsValid())
+			return false;
+
 		pbrPropertyBuffer[i] = new ConstantBuffer(sizeof(PBRConstants));
 		if (!pbrPropertyBuffer[i]->IsValid())
 			return false;
@@ -807,7 +892,9 @@ bool Scene::InitTerrain()
 		L"assets\\terrain\\nature_mask.png",
 		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_diff_4k.jpg",
 		L"assets\\terrain\\Ground\\textures\\coast_sand_rocks_02_disp_4k.png",
-		L"assets\\terrain\\Rivers_Rivers.png",
+		// Gaea: 主要河川マスク (WaterColor_Mɑsk.png をASCII名でコピー)。Rivers_Depth は全画素0 で使用不可、
+		// Rivers_Rivers は毛細血管まで含み密すぎるため、この主要河川マスクを採用。シェーダ内で多点ぼかして滑らか化。
+		L"assets\\terrain\\WaterColor_Mask_main.png",
 		L"assets\\terrain\\Snow_Snow.png",
 	};
 	// t0-t5: tree_mask, nature_mask, ground_diff, ground_disp, rivers, snow
@@ -826,6 +913,29 @@ bool Scene::InitTerrain()
 		if (!s_terrainMaskHandle)
 			s_terrainMaskHandle = h;
 	}
+
+	// ---- 拡張テレインマスク (t9-t12) ----
+	// Gaea が出力した残りの有効テクスチャを総動員してリッチな見た目に。
+	static const wchar_t* terrainExtraTexturePaths[] = {
+		L"assets\\terrain\\Rivers_Direction.png",   // RG: 川の流れ方向 (B=128 中立)
+		L"assets\\terrain\\WaterColor_Color.png",   // RGB: 川/湿地の真の水色
+		L"assets\\terrain\\Trees2_FreshWater.png",  // 湿地マスク (川岸の濡れた土)
+		L"assets\\terrain\\INHIBITORS_Out.png",     // 植生抑制マスク (岩肌・痩せ地)
+	};
+	Texture2D* terrainExtraTex[4] = {
+		loadTextureOrFallback(terrainExtraTexturePaths[0], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainExtraTexturePaths[1], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainExtraTexturePaths[2], Texture2D::GetBlack()),
+		loadTextureOrFallback(terrainExtraTexturePaths[3], Texture2D::GetBlack()),
+	};
+	s_terrainExtraMaskHandle = nullptr;
+	for (Texture2D* tex : terrainExtraTex)
+	{
+		DescriptorHandle* h = descriptorHeap->Register(tex);
+		if (!s_terrainExtraMaskHandle)
+			s_terrainExtraMaskHandle = h;
+	}
+	s_terrainExtraMaskGpuPub = s_terrainExtraMaskHandle ? s_terrainExtraMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 
 	terrainRootSignature = new RootSignature(true);
 	terrainDepthPrepassPipelineState = new PipelineState();
@@ -850,6 +960,48 @@ bool Scene::InitTerrain()
 		terrainPipelineState->SetDepthFunc(D3D12_COMPARISON_FUNC_EQUAL);
 	}
 	terrainPipelineState->Create();
+
+	// ---- Water PSO (半透明水面プレーン用) ----
+	waterPipelineState = new PipelineState();
+	waterPipelineState->SetInputLayout(Vertex::InputLayout);
+	waterPipelineState->SetRootSignature(terrainRootSignature->Get());
+	waterPipelineState->SetVS(L"Water_VS.cso");
+	waterPipelineState->SetPS(L"Water_PS.cso");
+	waterPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	waterPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO); // 水面は深度読み取り専用
+	waterPipelineState->SetDepthFunc(D3D12_COMPARISON_FUNC_LESS_EQUAL); // 川底と同深度でも通す
+	waterPipelineState->SetAlphaBlendPremultiplied();
+	waterPipelineState->Create();
+	DebugLog("[Water] PSO create: ptr=%p valid=%d\n",
+		(void*)waterPipelineState, waterPipelineState ? (int)waterPipelineState->IsValid() : -1);
+
+	// ---- Ocean PSO (地形メッシュ外側まで水を伸ばす巨大プレーン用) ----
+	oceanPipelineState = new PipelineState();
+	oceanPipelineState->SetInputLayout(Vertex::InputLayout);
+	oceanPipelineState->SetRootSignature(terrainRootSignature->Get());
+	oceanPipelineState->SetVS(L"Ocean_VS.cso");
+	oceanPipelineState->SetPS(L"Ocean_PS.cso");
+	oceanPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	oceanPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO);
+	oceanPipelineState->SetDepthFunc(D3D12_COMPARISON_FUNC_LESS_EQUAL);
+	oceanPipelineState->SetAlphaBlendPremultiplied();
+	oceanPipelineState->Create();
+	DebugLog("[Ocean] PSO create: ptr=%p valid=%d\n",
+		(void*)oceanPipelineState, oceanPipelineState ? (int)oceanPipelineState->IsValid() : -1);
+
+	// ---- Ocean VB/IB: 4 頂点の超巨大クワッド (XZ ± 50km) ----
+	{
+		const float K = 50000.0f; // ±50km
+		Vertex oceanVerts[4] = {};
+		oceanVerts[0].Position = DirectX::XMFLOAT3(-K, 0.0f, -K); oceanVerts[0].UV = DirectX::XMFLOAT2(0, 0); oceanVerts[0].Normal = DirectX::XMFLOAT3(0,1,0);
+		oceanVerts[1].Position = DirectX::XMFLOAT3(+K, 0.0f, -K); oceanVerts[1].UV = DirectX::XMFLOAT2(1, 0); oceanVerts[1].Normal = DirectX::XMFLOAT3(0,1,0);
+		oceanVerts[2].Position = DirectX::XMFLOAT3(-K, 0.0f, +K); oceanVerts[2].UV = DirectX::XMFLOAT2(0, 1); oceanVerts[2].Normal = DirectX::XMFLOAT3(0,1,0);
+		oceanVerts[3].Position = DirectX::XMFLOAT3(+K, 0.0f, +K); oceanVerts[3].UV = DirectX::XMFLOAT2(1, 1); oceanVerts[3].Normal = DirectX::XMFLOAT3(0,1,0);
+		uint32_t oceanIdx[6] = { 0, 2, 1, 1, 2, 3 };
+		s_oceanVB = new VertexBuffer(sizeof(oceanVerts), sizeof(Vertex), oceanVerts);
+		s_oceanIB = new IndexBuffer(sizeof(oceanIdx), oceanIdx);
+		DebugLog("[Ocean] VB=%p IB=%p\n", (void*)s_oceanVB, (void*)s_oceanIB);
+	}
 
 	for (size_t i = 0; i < Engine::FRAME_BUFFER_COUNT; i++)
 	{
@@ -1157,7 +1309,7 @@ bool Scene::InitPostProcess()
 	s_postProcessSettings.bloomIntensity = 0.38f;
 	s_postProcessSettings.threshold = 1.15f;
 	s_postProcessSettings.bloomKnee = 0.55f;
-	s_postProcessSettings.exposure = 0.88f;
+	s_postProcessSettings.exposure = 1.0f;   // 0.88→1.0: 全体の軽い暗さを解消
 	s_postProcessSettings.blurSize = 2.0f;
 	s_postProcessSettings.nprPostExposure = 1.0f;
 	s_postProcessSettings.nprPostGamma = 2.2f;
@@ -1213,30 +1365,35 @@ bool Scene::Init()
 	//		return false;
 	//}
 
-	if (!InitTerrain())
-		return false;
+	// [TOWN] 地形・水・海・木・プレイヤー(hibana)は町シーンへ置き換えるため無効化。
+	//        地形インフラ(root sig / PSO / 共有VB/IB / マスク)は生成されず null のまま。
+	//        DrawMain は useTerrain=false、水/海パスは terrain バッファ null で no-op になる。
+	// if (!InitTerrain())
+	// 	return false;
 	if (g_Camera)
 	{
-		const float groundY = TerrainSystem::GetHeight(m_registry, 0.0f, 0.0f);
-		g_Camera->SetPosition(XMVectorSet(0.0f, groundY + 2.0f, 0.0f, 0.0f));
+		// 町原点上空・通り方向を見る自由飛行の初期位置（Phase 1 で実際の範囲に合わせ調整）。
+		g_Camera->SetPosition(XMVectorSet(0.0f, 30.0f, -60.0f, 0.0f));
 	}
 
-	constexpr float kPlayerScaleMultiplier = 0.1f;
-	{
-		ModelSpawnOptions player = {};
-		player.position = { 0.0f, 0.0f, 0.0f };
-		player.uniformScale = kPlayerScaleMultiplier;
-		player.rotationY = 0.0f;
-		player.foot = ModelSpawnOptions::FootPlacement::SnapFeetToTerrain;
-		player.addPlayerComponent = true;
-		player.addNprTag = true;
-		if (!SpawnModelEntities(L"assets\\hibana\\hibana.pmx", player))
-			return false;
-	}
+	// [TOWN] プレイヤーモデル(hibana.pmx)の生成は無効化。
+	//constexpr float kPlayerScaleMultiplier = 0.1f;
+	//{
+	//	ModelSpawnOptions player = {};
+	//	player.position = { 0.0f, 0.0f, 0.0f };
+	//	player.uniformScale = kPlayerScaleMultiplier;
+	//	player.rotationY = 0.0f;
+	//	player.foot = ModelSpawnOptions::FootPlacement::SnapFeetToTerrain;
+	//	player.addPlayerComponent = true;
+	//	player.addNprTag = true;
+	//	if (!SpawnModelEntities(L"assets\\hibana\\hibana.pmx", player))
+	//		return false;
+	//}
 
 	if (!InitMainPipeline())
 		return false;
-	TreeVegetation::Initialize(m_registry, descriptorHeap, m_ownedVertexBuffers, m_ownedIndexBuffers);
+	// [TOWN] 植生(木)の初期化は無効化。
+	// TreeVegetation::Initialize(m_registry, descriptorHeap, m_ownedVertexBuffers, m_ownedIndexBuffers);
 	if (!InitSkyboxAndIBL())
 		return false;
 
@@ -1282,10 +1439,95 @@ bool Scene::Init()
 			hizSrvDesc.Texture2D.MipLevels = s_hiz->GetMipCount();
 			s_hizPyramidSrvHandle = descriptorHeap->RegisterResource(s_hiz->GetPyramidResource(), hizSrvDesc);
 		}
+
+		// SSR（濡れた水たまり反射）
+		s_ssr = new SsrSystem();
+		if (!s_ssr->Init(g_Engine->Device(), w, h))
+		{
+			delete s_ssr;
+			s_ssr = nullptr;
+		}
+
+		// GI G0: GTAO（スクリーン空間AO）
+		s_gtao = new GtaoSystem();
+		if (!s_gtao->Init(g_Engine->Device(), w, h))
+		{
+			delete s_gtao;
+			s_gtao = nullptr;
+		}
+
+		// VSM本体 V1: 物理プール＋ページテーブル＋アドレッシング（土台。描画/サンプルは V3/V4）
+		s_vsm = new VsmSystem();
+		if (!s_vsm->Init(g_Engine->Device(), descriptorHeap, w, h))
+		{
+			delete s_vsm;
+			s_vsm = nullptr;
+		}
+
+		// 平面反射ターゲット（フル解像度）: 水たまりが町の鏡像をサンプルする（後段でぼかす）
+		s_reflValid = CreatePlanarReflectionTargets(g_Engine->Device(), w, h);
 	}
 
 	// Tree GPU cull: LOD0 は非同期のため、メッシュ確定後に TryEnsureTreeGpuCullInit() で確保。
 	TryEnsureTreeGpuCullInit();
+
+	// [TOWN] Unreal T3D 町シーンを初期化 ( IBL/影の後 = s_envCubemapHandle / s_shadow が有効 )
+	{
+		s_town = new TownScene();
+		TownConfig townCfg; // Phase 1 既定 ( maxActors=150 )
+		if (!s_town->Init(g_Engine->Device(), descriptorHeap, townCfg))
+		{
+			DebugLog("[Town] Init failed — 町シーンは表示されません\n");
+			delete s_town;
+			s_town = nullptr;
+		}
+		else if (g_Camera)
+		{
+			// 町の境界中心を見る初期カメラ（上空やや手前から俯瞰）。LookAt で yaw/pitch を設定。
+			XMFLOAT3 mn = s_town->BoundsMin(), mx = s_town->BoundsMax();
+			XMFLOAT3 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f);
+			// 建物が実際に集まっている重心（≈原点）に注視。なければ全体の中心。
+			XMFLOAT3 t = s_town->HasBuildingCenter() ? s_town->BuildingCenter() : c;
+			// Camera::LookAt は垂直方向が反転している（forward.y = -y/dist、mouse の上下反転仕様）ため、
+			// ターゲット Y をカメラ面で鏡像化して補正 → 実際に注視点を見下ろす。
+			// 注視点の近く・低高度（街路レベル）に配置。WASD/矢印で自由移動可。
+			// 既定は横断歩道のある街路を俯瞰（デカールが平らに見える良い初期ビュー）。
+			// 環境変数 DX12_TOWN_OVERVIEW=1 で町の重心を遠望する俯瞰に切替。
+			XMFLOAT3 cw; char ovEv[8]; char drEv[8]; char pdEv[8];
+			bool wantOverview = (GetEnvironmentVariableA("DX12_TOWN_OVERVIEW", ovEv, sizeof(ovEv)) > 0);
+			XMFLOAT3 dr;
+			if (GetEnvironmentVariableA("DX12_LOOK_PUDDLE", pdEv, sizeof(pdEv)) > 0 && s_town->FirstCrosswalkWorld(cw))
+			{
+				// 水たまりを浅い視線角で見る（SSRが建物/木を映す検証用）。低く・遠くから見下ろし。
+				// LookAt は垂直反転仕様のため注視点 Y を鏡像化（2*camY - targetY）。
+				const float camY = cw.y + 3.0f;
+				g_Camera->SetPosition(XMVectorSet(cw.x, camY, cw.z - 22.0f, 0.0f));
+				g_Camera->LookAt(XMVectorSet(cw.x, 2.0f * camY - cw.y, cw.z, 0.0f));
+			}
+			else if (GetEnvironmentVariableA("DX12_LOOK_DRIPS", drEv, sizeof(drEv)) > 0 && s_town->FirstDripWorld(dr))
+			{
+				// 壁/awning 水滴デカールを間近で確認（検証用）。少し離れて水平に見る。
+				g_Camera->SetPosition(XMVectorSet(dr.x, dr.y + 1.0f, dr.z - 12.0f, 0.0f));
+				g_Camera->LookAt(XMVectorSet(dr.x, dr.y, dr.z, 0.0f));
+			}
+			else if (!wantOverview && s_town->FirstCrosswalkWorld(cw))
+			{
+				// 横断歩道デカールを間近で俯瞰（街路レベル）。高さ/手前距離はここで調整可。
+				const float camY = cw.y + 12.0f;   // 注視点からの高さ (m)
+				const float camBack = 14.0f;       // 注視点から手前への距離 (m)
+				g_Camera->SetPosition(XMVectorSet(cw.x, camY, cw.z - camBack, 0.0f));
+				g_Camera->LookAt(XMVectorSet(cw.x, 2.0f * camY - cw.y, cw.z, 0.0f));
+			}
+			else
+			{
+				// 町の重心付近を遠望する俯瞰。高さ/距離はここで調整可。
+				const float camY = t.y + 35.0f;    // 注視点からの高さ (m)
+				const float camBack = 75.0f;       // 注視点から手前への距離 (m)
+				g_Camera->SetPosition(XMVectorSet(t.x, camY, t.z - camBack, 0.0f));
+				g_Camera->LookAt(XMVectorSet(t.x, 2.0f * camY - t.y, t.z, 0.0f));
+			}
+		}
+	}
 
 	return true;
 }
@@ -1412,7 +1654,8 @@ void Scene::Update()
 	sc->View = XMMatrixTranspose(viewMat);
 	sc->Proj = XMMatrixTranspose(projMat);
 	XMStoreFloat4(&sc->CameraWorld, g_Camera->GetPosition());
-	sc->CameraWorld.w = 1.f;
+	static float s_sceneTimeSec = 0.0f; s_sceneTimeSec += 1.0f / 60.0f; // 葉の風アニメ用の経過時間
+	sc->CameraWorld.w = s_sceneTimeSec;
 
 	// Sun direction from azimuth/elevation (AtmosphereParams)
 	float azRad = XMConvertToRadians(s_atmosphereParams.sunAzimuth);
@@ -1439,11 +1682,53 @@ void Scene::Update()
 		sc->InvViewProj = XMMatrixTranspose(invVp);
 	}
 
+	// ---- 平面反射用ミラーカメラCB（水面 y=s_reflPlaneY で反射）----
+	// ミラーは View にだけ畳み込む（worldPos/法線は真のワールドのまま＝影/IBL が正しい）。
+	// CameraWorld は反射した視点位置に（TownPS の視線依存項が正しく反射像を陰影付けするため）。
+	if (reflectionConstantBuffer[currentIndex] && s_town)
+	{
+		XMFLOAT3 cw;
+		s_reflPlaneY = s_town->FirstCrosswalkWorld(cw) ? cw.y : 0.0f;
+		if (auto* rc = reflectionConstantBuffer[currentIndex]->GetPtr<SceneConstants>())
+		{
+			*rc = *sc;                                             // Sun/クラスタ等を継承
+			XMMATRIX mirror   = XMMatrixReflect(XMVectorSet(0.0f, 1.0f, 0.0f, -s_reflPlaneY));
+			XMMATRIX reflView = mirror * viewMat;                  // row-vector: p*mirror*view
+			XMMATRIX reflVP   = reflView * projMat;
+			rc->View = XMMatrixTranspose(reflView);
+			rc->Proj = XMMatrixTranspose(projMat);                 // Proj はメインと同一
+			XMVECTOR rdet; XMMATRIX rinv = XMMatrixInverse(&rdet, reflVP);
+			if (XMVectorGetX(XMVectorAbs(rdet)) < 1e-10f) rinv = XMMatrixIdentity();
+			rc->InvViewProj = XMMatrixTranspose(rinv);
+			XMVECTOR eye = g_Camera->GetPosition();
+			XMVECTOR reflEye = XMVectorSetY(eye, 2.0f * s_reflPlaneY - XMVectorGetY(eye));
+			XMStoreFloat4(&rc->CameraWorld, reflEye);
+			rc->CameraWorld.w = 1.0f;
+		}
+	}
+
 	if (s_shadow && s_shadow->IsValid())
 	{
 		XMFLOAT3 sunDirF3;
 		XMStoreFloat3(&sunDirF3, sunDir);
-		s_shadow->UpdateCascades(viewMat, projMat, sunDirF3, 0.1f, 500.0f);
+		// 影の動的距離。500m は 4 カスケードに対し広すぎ→cascade0 のテクセルが ~4cm と粗く、
+		// カメラ移動時のエイリアス・ちらつきの主因だった。UE5 の DynamicShadowDistance 同様に
+		// 歩行範囲(~160m)へ絞ると cascade0 は ~1.3cm と 3倍以上緻密＝クッキリ＆安定。
+		XMFLOAT3 shadowCamPosF3; XMStoreFloat3(&shadowCamPosF3, g_Camera->GetPosition());
+		s_shadow->UpdateCascades(viewMat, projMat, sunDirF3, shadowCamPosF3, 0.1f, 160.0f);
+
+		// VSM本体 V1: クリップマップ定数を更新（光空間クリップマップ。描画/サンプルは V3/V4 で有効化）。
+		if (s_vsm && s_vsm->IsValid())
+		{
+			XMVECTOR sunV = XMLoadFloat3(&sunDirF3);            // 光へ向かう方向
+			XMVECTOR lightDir = XMVector3Normalize(XMVectorNegate(sunV)); // 光の進行方向
+			XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+			if (fabsf(XMVectorGetY(lightDir)) > 0.99f) up = XMVectorSet(0, 0, 1, 0);
+			XMMATRIX lightView = XMMatrixLookToLH(XMVectorZero(), lightDir, up);
+			XMVECTOR vsmDet;
+			XMMATRIX vsmInvVP = XMMatrixInverse(&vsmDet, viewMat * projMat);
+			s_vsm->UpdateConstants(lightView, vsmInvVP, shadowCamPosF3, -800.0f, 800.0f);
+		}
 	}
 
 	// Terrain DrawMain reads SceneConstants; keep slot0 in sync for any legacy readers.
@@ -1618,6 +1903,14 @@ void Scene::Draw()
 				commandList->DrawIndexedInstanced(mr.IndexCount, 1, mr.StartIndexLocation, 0, 0);
 			}
 
+			// 町の影キャスト（全4カスケード。TownPS が viewDepth でカスケードを選択して
+			// サンプルするため、~38m 以遠にも影が出る）。キャスタは camera 距離でカリング（回転不変）。
+			if (s_town)
+			{
+				XMFLOAT3 shadowCamPos; XMStoreFloat3(&shadowCamPos, g_Camera->GetPosition());
+				s_town->DrawDepth(commandList, lightVP, s_shadow, shadowCamPos, s_shadow->GetCascadeSplit(cascade));
+			}
+
 			// Tree shadows — LOD0 フルメッシュ
 			if (wantTreeShadows && cascade < static_cast<UINT>(s_atmosphereParams.treeShadowCascades))
 			{
@@ -1689,6 +1982,67 @@ void Scene::Draw()
 	}
 
 	D3D12_GPU_DESCRIPTOR_HANDLE envHandle = s_envCubemapHandle ? s_envCubemapHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+
+	// ---- [TOWN] 平面反射パス: 町の不透明ジオメトリを水面平面でミラーして半解像度 RT へ。
+	//      水たまり解決パス(SsrSystem)が自分の画面UVでこの反射像をサンプルする（角度非依存）。----
+	if (s_reflValid && s_reflColor && s_town && g_Camera && reflectionConstantBuffer[currentIndex])
+	{
+		GPU_CMD_BEGIN_EVENT(commandList, 90, 150, 210, L"Town Planar Reflection");
+		ID3D12Resource* reflRes = s_reflColor.Get();
+		auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(reflRes,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		commandList->ResourceBarrier(1, &toRT);
+
+		TownReflectionPass rp;
+		rp.rtv = s_reflRtvHeap->GetCPUDescriptorHandleForHeapStart();
+		rp.dsv = s_reflDsvHeap->GetCPUDescriptorHandleForHeapStart();
+		rp.vp = { 0.0f, 0.0f, (float)s_reflW, (float)s_reflH, 0.0f, 1.0f };
+		rp.scissor = { 0, 0, (LONG)s_reflW, (LONG)s_reflH };
+
+		commandList->OMSetRenderTargets(1, &rp.rtv, FALSE, &rp.dsv);
+		commandList->RSSetViewports(1, &rp.vp);
+		commandList->RSSetScissorRects(1, &rp.scissor);
+		const float kReflClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // a=0 → 被覆なし（クリア値と一致必須）
+		commandList->ClearRenderTargetView(rp.rtv, kReflClear, 0, nullptr);
+		commandList->ClearDepthStencilView(rp.dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+		float aspect = (float)g_Engine->GetFrameBufferWidth() / (float)g_Engine->GetFrameBufferHeight();
+		XMMATRIX viewMat = g_Camera->GetViewMatrix();
+		XMMATRIX projMat = g_Camera->GetProjectionMatrix(aspect);
+		XMMATRIX reflVP = XMMatrixReflect(XMVectorSet(0.0f, 1.0f, 0.0f, -s_reflPlaneY)) * viewMat * projMat;
+		XMVECTOR eye = g_Camera->GetPosition();
+		XMFLOAT3 reflCam; XMStoreFloat3(&reflCam, XMVectorSetY(eye, 2.0f * s_reflPlaneY - XMVectorGetY(eye)));
+
+		s_town->Draw(commandList,
+			reflectionConstantBuffer[currentIndex]->GetAddress(),
+			envHandle,
+			(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowMapSrvGpu() : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 },
+			(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowCBAddress() : 0,
+			reflVP, reflCam, &rp);
+
+		// 反射RTの「空」部分（建物以外＝深度=遠）へ、ミラーした本物のスカイボックス（雲）を描く。
+		// これで水面が平坦なグラデでなく実際の空を映す＝「濡れた水鏡」に見える。
+		if (s_skyboxRenderer && s_skyboxRenderer->IsValid())
+		{
+			commandList->OMSetRenderTargets(1, &rp.rtv, FALSE, &rp.dsv);
+			commandList->RSSetViewports(1, &rp.vp);
+			commandList->RSSetScissorRects(1, &rp.scissor);
+			commandList->SetDescriptorHeaps(1, &materialHeap);
+			XMMATRIX reflView = XMMatrixReflect(XMVectorSet(0.0f, 1.0f, 0.0f, -s_reflPlaneY)) * viewMat;
+			s_skyboxRenderer->Draw(commandList, reflView, projMat);
+		}
+
+		auto toSRV = CD3DX12_RESOURCE_BARRIER::Transition(reflRes,
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		commandList->ResourceBarrier(1, &toSRV);
+
+		// メイン HDR RT + フル解像度ビューポートへ復帰（後続の DrawMain / 町本描画のため）
+		commandList->OMSetRenderTargets(1, &hdrRtvHandle, FALSE, &dsvHandle);
+		commandList->RSSetViewports(1, &g_Engine->GetViewport());
+		commandList->RSSetScissorRects(1, &g_Engine->GetScissorRect());
+		GPU_CMD_END_EVENT(commandList);
+	}
+
 	D3D12_GPU_DESCRIPTOR_HANDLE terrainMaskGPU = s_terrainMaskHandle ? s_terrainMaskHandle->HandleGPU : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
 	TerrainGpuCullSystem* terrainCullForDraw = kDisableTerrainGpuCullForDebug ? nullptr : s_terrainGpuCull;
 	if (terrainCullForDraw)
@@ -1803,6 +2157,98 @@ void Scene::Draw()
 		(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowCBAddress() : 0);
 	GPU_CMD_END_EVENT(commandList);
 	Profiler::GpuMarkDrawMainEnd(commandList);
+
+	// ---- [TOWN] Unreal T3D 町シーン描画（メイン HDR へ、skybox の前）----
+	static char s_townOffEv[8];
+	static const bool s_townOff = (GetEnvironmentVariableA("DX12_TOWN_OFF", s_townOffEv, sizeof(s_townOffEv)) > 0);
+	if (s_town && !s_townOff)
+	{
+		GPU_CMD_BEGIN_EVENT(commandList, 200, 160, 80, L"Town Scene");
+		XMMATRIX townViewProj = XMMatrixIdentity();
+		XMFLOAT3 townCamPos(0, 0, 0);
+		if (g_Camera)
+		{
+			float aspect = (float)g_Engine->GetFrameBufferWidth() / (float)g_Engine->GetFrameBufferHeight();
+			townViewProj = g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(aspect);
+			XMStoreFloat3(&townCamPos, g_Camera->GetPosition());
+		}
+		s_town->Draw(commandList,
+			sceneConstantBuffer[currentIndex]->GetAddress(),
+			envHandle,
+			(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowMapSrvGpu() : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 },
+			(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowCBAddress() : 0,
+			townViewProj, townCamPos);
+		GPU_CMD_END_EVENT(commandList);
+	}
+
+	// ---- Water Pass: 水面プレーン（テレインメッシュを Y=水位に固定して描画）----
+	if (waterPipelineState && waterPipelineState->IsValid() && m_terrainSharedVB && m_terrainSharedIB
+		&& terrainConstantBuffer[currentIndex] && s_terrainMaskHandle)
+	{
+		GPU_CMD_BEGIN_EVENT(commandList, 60, 120, 200, L"Water Pass");
+		commandList->SetPipelineState(waterPipelineState->Get());
+		commandList->SetGraphicsRootSignature(terrainRootSignature->Get());
+		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+		// CB: Transform + TerrainParams
+		auto* waterTransform = constantBuffer[currentIndex]->GetPtr<Transform>();
+		if (waterTransform)
+		{
+			commandList->SetGraphicsRootConstantBufferView(0, constantBuffer[currentIndex]->GetAddress());
+		}
+		commandList->SetGraphicsRootConstantBufferView(1, terrainConstantBuffer[currentIndex]->GetAddress());
+		commandList->SetGraphicsRootDescriptorTable(2, terrainMaskGPU); // terrain textures (t0-t5)
+		if (envHandle.ptr != 0)
+			commandList->SetGraphicsRootDescriptorTable(3, envHandle); // IBL (t6-t8)
+		// Shadow map at slots 5, 6
+		if (s_shadow && s_shadow->IsValid())
+		{
+			commandList->SetGraphicsRootDescriptorTable(5, s_shadow->GetShadowMapSrvGpu());
+			commandList->SetGraphicsRootConstantBufferView(6, s_shadow->GetShadowCBAddress());
+		}
+		// 拡張テレインテクスチャ (t9-t12): Rivers_Direction, WaterColor_Color, FreshWater, INHIBITORS
+		if (s_terrainExtraMaskHandle)
+			commandList->SetGraphicsRootDescriptorTable(7, s_terrainExtraMaskHandle->HandleGPU);
+
+		// テレイン VB/IB を使用（VS で Y を水位に固定）
+		auto vbView = m_terrainSharedVB->View();
+		auto ibView = m_terrainSharedIB->View();
+		commandList->IASetVertexBuffers(0, 1, &vbView);
+		commandList->IASetIndexBuffer(&ibView);
+		// IB フォーマットに応じてインデックス数を計算
+		UINT idxStride = (ibView.Format == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
+		UINT idxCount = ibView.SizeInBytes / idxStride;
+		commandList->DrawIndexedInstanced(idxCount, 1, 0, 0, 0);
+		GPU_CMD_END_EVENT(commandList);
+	}
+
+	// ---- Ocean Pass: 地形メッシュの外側まで水を伸ばすための独立した巨大プレーン ----
+	if (oceanPipelineState && oceanPipelineState->IsValid()
+		&& s_oceanVB && s_oceanIB && terrainConstantBuffer[currentIndex] && s_terrainMaskHandle)
+	{
+		GPU_CMD_BEGIN_EVENT(commandList, 30, 80, 180, L"Ocean Pass");
+		commandList->SetPipelineState(oceanPipelineState->Get());
+		commandList->SetGraphicsRootSignature(terrainRootSignature->Get());
+		commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		commandList->SetGraphicsRootConstantBufferView(0, constantBuffer[currentIndex]->GetAddress());
+		commandList->SetGraphicsRootConstantBufferView(1, terrainConstantBuffer[currentIndex]->GetAddress());
+		commandList->SetGraphicsRootDescriptorTable(2, terrainMaskGPU);
+		if (envHandle.ptr != 0)
+			commandList->SetGraphicsRootDescriptorTable(3, envHandle);
+		if (s_shadow && s_shadow->IsValid())
+		{
+			commandList->SetGraphicsRootDescriptorTable(5, s_shadow->GetShadowMapSrvGpu());
+			commandList->SetGraphicsRootConstantBufferView(6, s_shadow->GetShadowCBAddress());
+		}
+		if (s_terrainExtraMaskHandle)
+			commandList->SetGraphicsRootDescriptorTable(7, s_terrainExtraMaskHandle->HandleGPU);
+		auto oVb = s_oceanVB->View();
+		auto oIb = s_oceanIB->View();
+		commandList->IASetVertexBuffers(0, 1, &oVb);
+		commandList->IASetIndexBuffer(&oIb);
+		commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
+		GPU_CMD_END_EVENT(commandList);
+	}
 
 	// Tree ExecuteIndirect draw (species×LOD×part) — マテ・VB 束ね（Dispatch はポストCLで Draw と連結）
 	// NOTE: streamed instances が 0 のフレームで ExecuteIndirect を呼ぶと、未初期化の counter/args を参照して暴走し得る
@@ -2116,6 +2562,71 @@ void Scene::Draw()
 		Profiler::GpuMarkHiZBuildEnd(postCommandList);
 	}
 
+	// ---- VSM本体 V2/V3a: ページ要求 → 物理割当（描画=V3c/サンプル=V4）----
+	if (s_vsm && s_vsm->IsValid())
+	{
+		s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
+		s_vsm->Allocate(postCommandList);
+		s_vsm->BuildPageParams(postCommandList);
+	}
+
+	// ---- GI G0: GTAO（スクリーン空間AO）を HDR に乗算適用（bloom/tonemap 前）----
+	{
+		char gtaoEnv[8];
+		bool gtaoOff = GetEnvironmentVariableA("DX12_NO_GTAO", gtaoEnv, sizeof(gtaoEnv)) > 0;
+		if (!gtaoOff && s_gtao && s_gtao->IsValid())
+		{
+			float gtaoAspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
+			XMVECTOR gtaoDet;
+			XMMATRIX gtaoInvVP = XMMatrixInverse(&gtaoDet,
+				g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(gtaoAspect));
+			XMFLOAT3 gtaoCam; XMStoreFloat3(&gtaoCam, g_Camera->GetPosition());
+			GtaoSystem::Params gp;
+			s_gtao->Execute(postCommandList, g_Engine->GetDepthStencilResource(),
+				g_Engine->GetHdrRtvCpuHandle(), gtaoInvVP, gtaoCam, gp);
+		}
+	}
+
+	// ---- SSR 濡れた水たまり反射（Atmosphere 前 = 反射の上に霧が乗る）----
+	{ char e[8]; if (GetEnvironmentVariableA("DX12_NO_PUDDLE", e, sizeof(e)) > 0) goto skipPuddle; }
+	if (s_ssr && s_ssr->IsValid() && s_town)
+	{
+		D3D12_GPU_VIRTUAL_ADDRESS sceneCbAddr =
+			sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetAddress() : 0;
+		if (sceneCbAddr)
+		{
+			SsrSystem::PuddleParams pp;
+			pp.enabled = true;
+			// 水たまり領域（world, m）。地面基準点として横断歩道（路面レベル）を使い、
+			// その付近の地面のみ濡らす（高さゲートで屋根等を除外）。位置/大きさはここで調整。
+			XMFLOAT3 cw;
+			if (s_town->FirstCrosswalkWorld(cw))
+			{
+				pp.center = XMFLOAT2(cw.x, cw.z);
+				pp.groundY = cw.y;
+			}
+			else { pp.center = XMFLOAT2(0.0f, 0.0f); pp.groundY = 0.0f; }
+			pp.half = XMFLOAT2(30.0f, 30.0f);  // 濡れ地面の範囲（広場全体＝UE5の雨上がり感）
+			pp.edgeFalloff = 2.5f;
+			pp.wetDarken = 0.45f;   // 濡れて暗く（反射のコントラストを出す。Fresnelで見下ろしは下地が透ける）
+			// P2 を再利用: thickness=ノイズタイル(1/m), edgeFade=CheapContrast 量（UE5 Puddle_Blend_Constrast 相当）
+			pp.stride = 0.0f; pp.steps = 0.0f; pp.thickness = 0.013f; pp.edgeFade = 1.4f; // タイル(1/m)/コントラスト
+			pp.skyTint = XMFLOAT3(1.0f, 1.0f, 1.0f); pp.reflectivity = 1.0f;
+			// UE5 実ブレンドノイズ（水たまり分布）。一度だけロードしてキャッシュ。
+			// 512² 8bit にダウンサンプル済み（4096²16bit=170MB は VRAM を圧迫し激遅のため）
+			static Texture2D* s_puddleNoise =
+				Texture2D::Get(std::string("assets/town/Downtown_West/Textures/Blends/T_blend_noise_a_512.png"));
+			ID3D12Resource* noiseRes = (s_puddleNoise && s_puddleNoise->IsValid()) ? s_puddleNoise->Resource() : nullptr;
+			s_ssr->Execute(postCommandList,
+				g_Engine->GetHdrColorResource(), g_Engine->GetHdrRtvCpuHandle(),
+				g_Engine->GetDepthStencilResource(), s_prefilterCubemap.Get(),
+				s_reflColor ? s_reflColor.Get() : s_prefilterCubemap.Get(),  // 平面反射カラー
+				noiseRes,                                                     // 水たまり分布ノイズ
+				sceneCbAddr, pp);
+		}
+	}
+	skipPuddle:;
+
 	// ---- Atmosphere: fog + volumetric light (before bloom/tonemap) ----
 	if (s_atmosphere && s_atmosphere->IsValid() &&
 		(s_atmosphereParams.enableFog || s_atmosphereParams.enableVolumetric))
@@ -2177,4 +2688,10 @@ void Scene::Draw()
 	Profiler::GpuMarkPostProcessEndAndResolve(postCommandList);
 	// 全スタンプの Resolve（未書き込みスタンプはプレースホルダーで補完）
 	Profiler::GpuResolveAllStamps(postCommandList);
+}
+
+// 拡張テレインマスクの GPU ハンドル公開 (RenderSystem 等から参照)
+D3D12_GPU_DESCRIPTOR_HANDLE Scene_GetTerrainExtraMaskGpu()
+{
+	return s_terrainExtraMaskGpuPub;
 }

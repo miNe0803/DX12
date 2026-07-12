@@ -2,17 +2,21 @@
 #include <d3d12.h>
 #include "ComPtr.h"
 
+// data(size ãƒã‚¤ãƒˆ) ã‚’ DEFAULT ãƒ’ãƒ¼ãƒ—(VRAM)ã¸å³æ™‚ã‚¢ãƒƒãƒ—ãƒ­ãƒ¼ãƒ‰ã—ã¦è¿”ã™å…±æœ‰ãƒ˜ãƒ«ãƒ‘ãƒ¼ã€‚
+// ãƒ‡ã‚£ã‚¹ã‚¯ãƒªãƒ¼ãƒˆ GPU ã®æ¯ãƒ•ãƒ¬ãƒ¼ãƒ  PCIe èª­ã¿ã‚’é¿ã‘ã‚‹ãŸã‚ VB/IB ã¯ VRAM ã«ç½®ãã€‚
+ComPtr<ID3D12Resource> GpuUploadToDefault(const void* data, size_t size);
+
 class VertexBuffer
 {
 public:
-	VertexBuffer(size_t size, size_t stride, const void* pInitData); // ƒRƒ“ƒXƒgƒ‰ƒNƒ^‚Åƒoƒbƒtƒ@‚ğ¶¬
-	D3D12_VERTEX_BUFFER_VIEW View() const; // ’¸“_ƒoƒbƒtƒ@ƒrƒ…[‚ğæ“¾
-	bool IsValid(); // ƒoƒbƒtƒ@‚Ì¶¬‚É¬Œ÷‚µ‚½‚©‚ğæ“¾
+	VertexBuffer(size_t size, size_t stride, const void* pInitData); // ï¿½Rï¿½ï¿½ï¿½Xï¿½gï¿½ï¿½ï¿½Nï¿½^ï¿½Åƒoï¿½bï¿½tï¿½@ï¿½ğ¶ï¿½
+	D3D12_VERTEX_BUFFER_VIEW View() const; // ï¿½ï¿½ï¿½_ï¿½oï¿½bï¿½tï¿½@ï¿½rï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½æ“¾
+	bool IsValid(); // ï¿½oï¿½bï¿½tï¿½@ï¿½Ìï¿½ï¿½ï¿½ï¿½Éï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ“¾
 
 private:
-	bool m_IsValid = false; // ƒoƒbƒtƒ@‚Ì¶¬‚É¬Œ÷‚µ‚½‚©‚ğæ“¾
-	ComPtr<ID3D12Resource> m_pBuffer = nullptr; // ƒoƒbƒtƒ@
-	D3D12_VERTEX_BUFFER_VIEW m_View = {}; // ’¸“_ƒoƒbƒtƒ@ƒrƒ…[
+	bool m_IsValid = false; // ï¿½oï¿½bï¿½tï¿½@ï¿½Ìï¿½ï¿½ï¿½ï¿½Éï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ“¾
+	ComPtr<ID3D12Resource> m_pBuffer = nullptr; // ï¿½oï¿½bï¿½tï¿½@
+	D3D12_VERTEX_BUFFER_VIEW m_View = {}; // ï¿½ï¿½ï¿½_ï¿½oï¿½bï¿½tï¿½@ï¿½rï¿½ï¿½ï¿½[
 
 	VertexBuffer(const VertexBuffer&) = delete;
 	void operator = (const VertexBuffer&) = delete;

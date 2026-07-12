@@ -10,6 +10,8 @@
 
 #include <cstdio>
 
+#include <cmath>
+
 #include "GpuDebugLabels.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -514,7 +516,7 @@ bool PostProcessSystem::Init(ID3D12Device* device, DescriptorHeap* descriptorHea
 
 	CD3DX12_ROOT_PARAMETER toneMapRootParams[2] = {};
 
-	toneMapRootParams[0].InitAsConstants(4, 0);
+	toneMapRootParams[0].InitAsConstants(8, 0);
 
 	CD3DX12_DESCRIPTOR_RANGE toneMapSrvRange;
 
@@ -591,6 +593,70 @@ bool PostProcessSystem::Init(ID3D12Device* device, DescriptorHeap* descriptorHea
 	hr = device->CreateGraphicsPipelineState(&toneMapPsoDesc, IID_PPV_ARGS(&m_pToneMapPSO));
 
 	if (FAILED(hr)) return false;
+
+
+
+	// ---- オート露出: HDR平均輝度を 1x1 R32_FLOAT へ縮約する PS + リソース ----
+	{
+		ComPtr<ID3DBlob> aePsBlob;
+		if (LoadShader(L"AutoExposure_PS.cso", aePsBlob.GetAddressOf()))
+		{
+			CD3DX12_ROOT_PARAMETER aeParams[2] = {};
+			aeParams[0].InitAsConstants(4, 0);                 // b0: SampleDim + min/max log + pad
+			CD3DX12_DESCRIPTOR_RANGE aeSrv; aeSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0=HDR
+			aeParams[1].InitAsDescriptorTable(1, &aeSrv);
+			D3D12_STATIC_SAMPLER_DESC aeSmp = {};
+			aeSmp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+			aeSmp.AddressU = aeSmp.AddressV = aeSmp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+			aeSmp.ShaderRegister = 0; aeSmp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+			D3D12_ROOT_SIGNATURE_DESC aeRs = {};
+			aeRs.NumParameters = 2; aeRs.pParameters = aeParams;
+			aeRs.NumStaticSamplers = 1; aeRs.pStaticSamplers = &aeSmp;
+			aeRs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+			ComPtr<ID3DBlob> aeSig, aeErr;
+			if (SUCCEEDED(D3D12SerializeRootSignature(&aeRs, D3D_ROOT_SIGNATURE_VERSION_1, aeSig.GetAddressOf(), aeErr.GetAddressOf()))
+				&& SUCCEEDED(device->CreateRootSignature(0, aeSig->GetBufferPointer(), aeSig->GetBufferSize(), IID_PPV_ARGS(&m_pAeRootSignature))))
+			{
+				D3D12_GRAPHICS_PIPELINE_STATE_DESC aePso = {};
+				aePso.pRootSignature = m_pAeRootSignature.Get();
+				aePso.VS = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
+				aePso.PS = CD3DX12_SHADER_BYTECODE(aePsBlob.Get());
+				aePso.InputLayout = { nullptr, 0 };
+				aePso.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+				aePso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+				aePso.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+				aePso.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+				aePso.DepthStencilState.DepthEnable = FALSE;
+				aePso.SampleMask = UINT_MAX;
+				aePso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+				aePso.NumRenderTargets = 1;
+				aePso.RTVFormats[0] = DXGI_FORMAT_R32_FLOAT;
+				aePso.SampleDesc.Count = 1;
+				if (SUCCEEDED(device->CreateGraphicsPipelineState(&aePso, IID_PPV_ARGS(&m_pAePSO))))
+				{
+					auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+					auto rd = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R32_FLOAT, 1, 1, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+					D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R32_FLOAT;
+					if (SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+						D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&m_pAeTarget))))
+					{
+						D3D12_DESCRIPTOR_HEAP_DESC rh = {}; rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rh.NumDescriptors = 1;
+						device->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&m_pAeRtvHeap));
+						D3D12_RENDER_TARGET_VIEW_DESC rv = {}; rv.Format = DXGI_FORMAT_R32_FLOAT; rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+						device->CreateRenderTargetView(m_pAeTarget.Get(), &rv, m_pAeRtvHeap->GetCPUDescriptorHandleForHeapStart());
+						auto rbHp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+						auto rbRd = CD3DX12_RESOURCE_DESC::Buffer(256);
+						bool okRb = true;
+						for (int k = 0; k < 2; ++k)
+							okRb = okRb && SUCCEEDED(device->CreateCommittedResource(&rbHp, D3D12_HEAP_FLAG_NONE, &rbRd,
+								D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_pAeReadback[k])));
+						m_aeValid = okRb;
+					}
+				}
+			}
+		}
+		if (!m_aeValid) printf("[PostProcess] auto-exposure init skipped/failed (fixed exposure fallback)\n");
+	}
 
 
 
@@ -764,11 +830,78 @@ void PostProcessSystem::Execute(
 
 	// 定数: ToneMap 用 (exposure, gamma, bloomIntensity, padding)
 
-	struct ToneMapConstants { float exposure, gamma, bloomIntensity, padding; };
+	struct ToneMapConstants { float exposure, gamma, bloomIntensity, gradeSaturation, gradeContrast, gainR, gainG, gainB; };
 
-	ToneMapConstants toneMapConst = { settings.exposure, settings.gamma, settings.bloomIntensity, 0.0f };
+	ToneMapConstants toneMapConst = { settings.exposure, settings.gamma, settings.bloomIntensity,
+		settings.gradeSaturation, settings.gradeContrast, settings.gradeGainR, settings.gradeGainG, settings.gradeGainB };
 
 
+
+	// ---- オート露出: 2フレーム前の平均輝度を読み戻して露出を決め toneMapConst.exposure を上書き ----
+	//   1x1 縮約結果を READBACK バッファへ。GPU/CPU 競合回避のため read-before-write（同一 slot は
+	//   2 フレーム前に書かれ完了済み）。時間平滑で露出が滑らかに追従（eye adaptation）。
+	if (m_aeValid && settings.autoExposure && sceneDescriptorHeap)
+	{
+		const UINT slot = m_aeIndex;
+		D3D12_RANGE rr = { 0, sizeof(float) };
+		void* mapped = nullptr;
+		if (SUCCEEDED(m_pAeReadback[slot]->Map(0, &rr, &mapped)) && mapped)
+		{
+			float avgLogLum = *reinterpret_cast<const float*>(mapped);
+			D3D12_RANGE wr = { 0, 0 };
+			m_pAeReadback[slot]->Unmap(0, &wr);
+			if (std::isfinite(avgLogLum))
+			{
+				float geoMean = exp2f(avgLogLum);
+				float target = settings.aeKey / (geoMean > 1e-4f ? geoMean : 1e-4f);
+				target = target < settings.aeMinExposure ? settings.aeMinExposure
+					: (target > settings.aeMaxExposure ? settings.aeMaxExposure : target);
+				target *= settings.exposure;   // 手動バイアス
+				float rate = settings.aeSpeed < 0.001f ? 0.001f : (settings.aeSpeed > 1.0f ? 1.0f : settings.aeSpeed);
+				m_smoothedExposure += (target - m_smoothedExposure) * rate;
+			}
+		}
+		toneMapConst.exposure = m_smoothedExposure;
+
+		GPU_CMD_BEGIN_EVENT(cmdList, 230, 200, 90, L"PostProcess: Auto-exposure reduce (1x1)");
+		cmdList->SetDescriptorHeaps(1, &sceneDescriptorHeap);
+		D3D12_VIEWPORT aeVp = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f };
+		D3D12_RECT aeSc = { 0, 0, 1, 1 };
+		cmdList->RSSetViewports(1, &aeVp);
+		cmdList->RSSetScissorRects(1, &aeSc);
+		D3D12_CPU_DESCRIPTOR_HANDLE aeRtv = m_pAeRtvHeap->GetCPUDescriptorHandleForHeapStart();
+		cmdList->OMSetRenderTargets(1, &aeRtv, FALSE, nullptr);
+		cmdList->SetPipelineState(m_pAePSO.Get());
+		cmdList->SetGraphicsRootSignature(m_pAeRootSignature.Get());
+		struct AeConst { uint32_t sampleDim; float minLog; float maxLog; float pad; };
+		AeConst aeC = { 64u, -10.0f, 12.0f, 0.0f };
+		cmdList->SetGraphicsRoot32BitConstants(0, 4, &aeC, 0);
+		cmdList->SetGraphicsRootDescriptorTable(1, hdrSrvHandle);
+		cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cmdList->DrawInstanced(3, 1, 0, 0);
+
+		auto toCopy = CD3DX12_RESOURCE_BARRIER::Transition(m_pAeTarget.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		cmdList->ResourceBarrier(1, &toCopy);
+		D3D12_TEXTURE_COPY_LOCATION dst = {};
+		dst.pResource = m_pAeReadback[slot].Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_FLOAT;
+		dst.PlacedFootprint.Footprint.Width = 1;
+		dst.PlacedFootprint.Footprint.Height = 1;
+		dst.PlacedFootprint.Footprint.Depth = 1;
+		dst.PlacedFootprint.Footprint.RowPitch = 256;
+		D3D12_TEXTURE_COPY_LOCATION src = {};
+		src.pResource = m_pAeTarget.Get();
+		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		src.SubresourceIndex = 0;
+		cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		auto toRt = CD3DX12_RESOURCE_BARRIER::Transition(m_pAeTarget.Get(),
+			D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		cmdList->ResourceBarrier(1, &toRt);
+		m_aeIndex ^= 1u;
+		GPU_CMD_END_EVENT(cmdList);
+	}
 
 	struct NprTonemapConstants { float nprExposure, nprGamma, padding[2]; };
 
@@ -976,7 +1109,7 @@ void PostProcessSystem::Execute(
 
 		cmdList->SetPipelineState(m_pToneMapPSO.Get());
 
-		cmdList->SetGraphicsRoot32BitConstants(0, 4, &toneMapConst, 0);
+		cmdList->SetGraphicsRoot32BitConstants(0, 8, &toneMapConst, 0);
 
 		cmdList->SetGraphicsRootDescriptorTable(1, hdrSrvHandle);
 
@@ -1060,7 +1193,7 @@ void PostProcessSystem::Execute(
 
 		cmdList->SetPipelineState(m_pToneMapPSO.Get());
 
-		cmdList->SetGraphicsRoot32BitConstants(0, 4, &toneMapConst, 0);
+		cmdList->SetGraphicsRoot32BitConstants(0, 8, &toneMapConst, 0);
 
 		cmdList->SetGraphicsRootDescriptorTable(1, hdrSrvHandle);
 

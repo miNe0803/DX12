@@ -26,6 +26,71 @@ extern Scene* g_Scene;
 static ImGuiManager* g_ImGuiManager = nullptr;
 static EditorUI      g_EditorUI;
 
+// 環境変数 DX12_CAPTURE 指定時、frame 150 でバックバッファを cap.png へ保存（検証用）。
+// 手動リードバック（PRESENT->COPY_SOURCE->CopyTextureRegion->READBACK）+ DirectXTex SaveToWICFile。
+static void CaptureBackbufferIfRequested()
+{
+    static int frame = 0;
+    static bool done = false;
+    if (done) return;
+    char ev[8];
+    static const bool want = (GetEnvironmentVariableA("DX12_CAPTURE", ev, sizeof(ev)) > 0);
+    if (!want) return;
+    if (++frame < 150) return;
+    done = true;
+    if (!g_Engine) return;
+
+    auto dev = g_Engine->Device();
+    ID3D12Resource* bb = g_Engine->GetBackBufferResource();
+    if (!dev || !bb) return;
+    D3D12_RESOURCE_DESC desc = bb->GetDesc();
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0; UINT64 rowBytes = 0, total = 0;
+    dev->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+
+    ComPtr<ID3D12Resource> readback;
+    auto rbHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+    auto rbDesc = CD3DX12_RESOURCE_DESC::Buffer(total);
+    if (FAILED(dev->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)))) return;
+
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> cl;
+    dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc));
+    dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&cl));
+
+    auto b1 = CD3DX12_RESOURCE_BARRIER::Transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl->ResourceBarrier(1, &b1);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = bb; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    auto b2 = CD3DX12_RESOURCE_BARRIER::Transition(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+    cl->ResourceBarrier(1, &b2);
+    cl->Close();
+    ID3D12CommandList* lists[] = { cl.Get() };
+    g_Engine->Queue()->ExecuteCommandLists(1, lists);
+    g_Engine->WaitForGpuIdle();
+
+    void* mapped = nullptr;
+    if (SUCCEEDED(readback->Map(0, nullptr, &mapped)))
+    {
+        DirectX::Image img{};
+        img.width = (size_t)desc.Width;
+        img.height = (size_t)desc.Height;
+        img.format = desc.Format;
+        img.rowPitch = fp.Footprint.RowPitch;
+        img.slicePitch = (size_t)fp.Footprint.RowPitch * desc.Height;
+        img.pixels = reinterpret_cast<uint8_t*>(mapped);
+        HRESULT hr = DirectX::SaveToWICFile(img, DirectX::WIC_FLAGS_NONE,
+            DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), L"cap.png");
+        readback->Unmap(0, nullptr);
+        printf("[Capture] cap.png saved hr=0x%08X (%llux%llu)\n", (unsigned)hr,
+            (unsigned long long)desc.Width, (unsigned long long)desc.Height);
+        fflush(stdout);
+    }
+}
+
 void StartApp(const TCHAR* appName) {
     App app;
     app.Run(appName);
@@ -182,11 +247,23 @@ void App::MainLoop() {
                         g_Engine->GetFrameBufferHeight());
                 }
                 g_Engine->EndRender();
+                CaptureBackbufferIfRequested();
                 const auto t3 = std::chrono::high_resolution_clock::now();
                 const float beginMs = std::chrono::duration<float, std::milli>(t1 - t0).count();
                 const float drawMs = std::chrono::duration<float, std::milli>(t2 - t1).count();
                 const float endMs = std::chrono::duration<float, std::milli>(t3 - t2).count();
                 Profiler::SetRenderCpuBreakdown(beginMs, drawMs, endMs);
+
+                // FPS ログ ( 120 フレームごとに平均 )。Scene::Draw の CPU 内訳も出す。
+                static int fpsN = 0; static float fpsAcc = 0.0f, drawAcc = 0.0f;
+                static auto fpsPrev = t0;
+                float periodMs = std::chrono::duration<float, std::milli>(t0 - fpsPrev).count();
+                fpsPrev = t0;
+                if (periodMs > 0.0f) { fpsAcc += periodMs; drawAcc += drawMs; if (++fpsN >= 120) {
+                    float avgMs = fpsAcc / fpsN;
+                    printf("[Perf] %.1f FPS (%.2f ms/frame) | Scene::Draw CPU %.2f ms\n", 1000.0f / avgMs, avgMs, drawAcc / fpsN);
+                    fflush(stdout); fpsN = 0; fpsAcc = 0.0f; drawAcc = 0.0f;
+                } }
             }
 
             Profiler::EndFrame();

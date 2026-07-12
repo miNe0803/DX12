@@ -9,25 +9,28 @@ class ShadowSystem;
 
 struct AtmosphereParams
 {
-	// Sun
-	float sunAzimuth    = 220.0f;   // degrees, 0=North, 90=East
-	float sunElevation  = 45.0f;    // degrees above horizon
-	float sunIntensity  = 1.2f;
+	// Sun — UE5 Daytime_Lighting の DirectionalLight 実値に合わせる（umap から抽出）。
+	// LightColor=0xFFEBB5→(1.0,0.9216,0.7098) 暖色, Pitch -23°→elevation 23°（低め＝長い影）。
+	float sunAzimuth    = 40.0f;    // azimuth は skybox.exr のベイク太陽に合わせた値を維持
+	float sunElevation  = 23.0f;    // UE Pitch -23（32→23: UE準拠, 影を長く）
+	float sunIntensity  = 2.2f;     // UE は sun=skylight=3.0 の 1:1。キー強化（残りは ambientBoost で fill）
 	float sunColorR     = 1.0f;
-	float sunColorG     = 1.0f;
-	float sunColorB     = 1.0f;
+	float sunColorG     = 0.9216f;  // UE LightColor G=235/255
+	float sunColorB     = 0.7098f;  // UE LightColor B=181/255
 
-	// Fog
-	float fogDensity    = 0.003f;
-	float scatteringG   = 0.7f;
-	float heightFalloff = 0.002f;
+	// Fog — UE5 ExponentialHeightFog 実値（umap 抽出）。FogInscatteringColor=(0.594,0.843,1.0) 青系,
+	// VolumetricFogScatteringDistribution(g)=0.98, FogMaxOpacity=0.15（ヘイズ上限15%）, HeightFalloff=0.5。
+	float fogDensity    = 0.0008f;  // UE FogDensity=0.006（低め）。maxOpacity クランプで濃さは頭打ち
+	float scatteringG   = 0.98f;    // UE VolumetricFogScatteringDistribution
+	float heightFalloff = 0.02f;    // UE 0.5 を m 単位へ概算
 	float baseHeight    = 0.0f;
 	float maxFogDistance = 2000.0f;
 	float noiseStrength = 0.4f;
 	float temporalBlend = 0.05f;
-	float fogColorR     = 0.55f;
-	float fogColorG     = 0.62f;
-	float fogColorB     = 0.78f;
+	float fogMaxOpacity = 0.15f;    // UE FogMaxOpacity（ヘイズはこの割合で頭打ち＝薄い霞に）
+	float fogColorR     = 0.594f;   // UE FogInscatteringColor（青系）
+	float fogColorG     = 0.843f;
+	float fogColorB     = 1.0f;
 	bool  enableFog     = true;
 	bool  enableVolumetric = true;
 	bool  enableTemporal = false;

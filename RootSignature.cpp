@@ -112,15 +112,20 @@ void RootSignature::CreateLegacy(bool forTerrain)
 	if (forTerrain)
 	{
 		rootParam[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
-		rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+		// b1 (TerrainParams) は Water_VS が CameraPos.w=time を読むため VS でも見える必要あり
+		rootParam[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
 		tableRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0); // t0-t5: tree_mask, nature_mask, ground_diff, ground_disp, rivers, snow
 		tableRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6); // t6-t8: IBL
-		rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_PIXEL);
+		// t0-t5 は VS でも使う (TerrainVS が rivers/snow を参照して地形を変位するため)
+		rootParam[2].InitAsDescriptorTable(1, &tableRange[0], D3D12_SHADER_VISIBILITY_ALL);
 		rootParam[3].InitAsDescriptorTable(1, &tableRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParam[4].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX);
 		tableRange[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2); // t0, space2
 		rootParam[5].InitAsDescriptorTable(1, &tableRange[2], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParam[6].InitAsConstantBufferView(1, 2, D3D12_SHADER_VISIBILITY_PIXEL); // b1, space2
+		// 拡張テレインテクスチャ t9-t12: Rivers_Direction, WaterColor_Color, Trees2_FreshWater, INHIBITORS_Out
+		tableRange[3].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 9);
+		rootParam[7].InitAsDescriptorTable(1, &tableRange[3], D3D12_SHADER_VISIBILITY_PIXEL);
 
 		D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
 		samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -136,7 +141,7 @@ void RootSignature::CreateLegacy(bool forTerrain)
 		samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 		D3D12_ROOT_SIGNATURE_DESC desc = {};
-		desc.NumParameters = 7;
+		desc.NumParameters = 8; // +1 for extra terrain texture table at t9-t12
 		desc.NumStaticSamplers = 2;
 		desc.pParameters = rootParam;
 		desc.pStaticSamplers = samplers;

@@ -58,83 +58,27 @@ static void ExtractFrustumPlanes(FXMMATRIX vp, XMFLOAT4 outPlanes[6])
 	}
 }
 
+// VSMトラック Step1: **カメラ中心クリップマップ**。各カスケードはカメラ位置を中心に半径=splitFar
+// の領域を覆う。従来の視錐台フィットは中心がカメラ回転で動く→被覆が回転し、縁のキャスタ/影が
+// 出没・クロールした（＝ユーザ報告の「同位置・角度で影が消える/揺れる」）。カメラ中心なら**回転で
+// 被覆が一切変わらない**（回転不変）。平行移動はテクセルスナップでワールドロック。半径は radial
+// カスケード選択(TownShadow.hlsli の d=length(worldPos-cam))と一致させ、選んだ点は必ず箱に入る。
 static XMMATRIX ComputeLightVP(
-	const XMMATRIX& cameraView, const XMMATRIX& cameraProj,
-	const XMFLOAT3& lightDir, float splitNear, float splitFar,
-	float shadowMapSize)
+	const XMFLOAT3& lightDir, const XMFLOAT3& camPos, float splitFar,
+	float shadowMapSize, float* outRadius = nullptr)
 {
-	// Check for singular ViewProj to prevent NaN propagation (e.g., camera looking straight up)
-	XMVECTOR det;
-	XMMATRIX invViewProj = XMMatrixInverse(&det, cameraView * cameraProj);
-	if (XMVectorGetX(XMVectorAbs(det)) < 1e-10f)
-		return XMMatrixIdentity(); // degenerate frustum, return safe identity
-
-	const float zNearNdc = 0.0f;
-	const float zFarNdc = 1.0f;
-	XMVECTOR corners[8];
-	int idx = 0;
-	for (int z = 0; z < 2; ++z)
-	{
-		float zn = (z == 0) ? zNearNdc : zFarNdc;
-		for (int y = 0; y < 2; ++y)
-		{
-			for (int x = 0; x < 2; ++x)
-			{
-				XMVECTOR pt = XMVectorSet(
-					x * 2.0f - 1.0f,
-					y * 2.0f - 1.0f,
-					zn,
-					1.0f);
-				pt = XMVector4Transform(pt, invViewProj);
-				corners[idx++] = XMVectorDivide(pt, XMVectorSplatW(pt));
-			}
-		}
-	}
-
-	XMVECTOR nearCorners[4], farCorners[4];
-	for (int i = 0; i < 4; ++i)
-	{
-		XMVECTOR fullNear = corners[i];
-		XMVECTOR fullFar = corners[4 + i];
-		XMVECTOR fullDir = fullFar - fullNear;
-		float fullLen = XMVectorGetX(XMVector3Length(fullDir));
-		if (fullLen < 1e-6f) fullLen = 1.0f;
-
-		XMVECTOR depthNear = XMVector4Transform(fullNear, cameraView);
-		float camNearZ = XMVectorGetZ(depthNear);
-		XMVECTOR depthFar = XMVector4Transform(fullFar, cameraView);
-		float camFarZ = XMVectorGetZ(depthFar);
-		float range = camFarZ - camNearZ;
-		if (fabsf(range) < 1e-6f) range = 1.0f;
-
-		float tNear = (splitNear - camNearZ) / range;
-		float tFar = (splitFar - camNearZ) / range;
-		tNear = std::clamp(tNear, 0.0f, 1.0f);
-		tFar = std::clamp(tFar, 0.0f, 1.0f);
-
-		nearCorners[i] = fullNear + fullDir * tNear;
-		farCorners[i] = fullNear + fullDir * tFar;
-	}
-
-	XMVECTOR centre = XMVectorZero();
-	for (int i = 0; i < 4; ++i)
-		centre += nearCorners[i] + farCorners[i];
-	centre /= 8.0f;
-
-	float radius = 0.0f;
-	for (int i = 0; i < 4; ++i)
-	{
-		float d = XMVectorGetX(XMVector3Length(nearCorners[i] - centre));
-		radius = std::max(radius, d);
-		d = XMVectorGetX(XMVector3Length(farCorners[i] - centre));
-		radius = std::max(radius, d);
-	}
-	radius = ceilf(radius * 16.0f) / 16.0f;
-	// Guard against degenerate frustum or NaN (e.g., camera looking straight up/down)
-	if (!(radius > 0.01f)) radius = 10.0f; // catches NaN, negative, and near-zero
+	XMVECTOR centre = XMLoadFloat3(&camPos);   // カメラ位置中心＝回転不変
+	float radius = splitFar;                    // 半径距離での被覆（radial 選択と一致）
+	if (!(radius > 0.01f)) radius = 10.0f;
+	if (outRadius) *outRadius = radius;
 
 	XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDir));
-	XMVECTOR lightPos = centre + lightDirVec * radius * 2.0f;
+	// BUG2: オルソの「近平面」を太陽側へ押し出し、背の高い/低太陽の長影キャスタを取りこぼさない。
+	// 従来は near≈+2r で、受光点の太陽側(u,v同一)にある高いビルが near クリップされ、cascade0 の
+	// 深度マップにオクルーダが無い→カメラ回転で vz が split0 を跨ぐと影が消えた。横方向(2r)は不変
+	// なのでテクセル密度は維持（深度方向のみ拡張）。
+	const float casterMargin = 60.0f;
+	XMVECTOR lightPos = centre + lightDirVec * (radius * 2.0f + casterMargin);
 
 	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 	if (fabsf(XMVectorGetX(XMVector3Dot(lightDirVec, up))) > 0.99f)
@@ -146,7 +90,7 @@ static XMMATRIX ComputeLightVP(
 		lightPos = centre - lightDirVec * 1.0f;
 
 	XMMATRIX lightView = XMMatrixLookAtLH(lightPos, centre, up);
-	XMMATRIX lightProj = XMMatrixOrthographicLH(radius * 2.0f, radius * 2.0f, 0.01f, radius * 4.0f + 0.01f);
+	XMMATRIX lightProj = XMMatrixOrthographicLH(radius * 2.0f, radius * 2.0f, 0.01f, radius * 4.0f + casterMargin + 0.01f);
 
 	XMMATRIX lightVP = lightView * lightProj;
 	XMVECTOR shadowOrigin = XMVector4Transform(XMVectorSet(0, 0, 0, 1), lightVP);
@@ -312,9 +256,13 @@ bool ShadowSystem::CreatePipeline(ID3D12Device* device)
 	psoDesc.VS = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
 	psoDesc.InputLayout = Vertex::InputLayout;
 	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-	psoDesc.RasterizerState.DepthBias = 1500;
-	psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
+	// BUG1: 町は本描画が全て CULL_NONE の「両面(片面シェル)」ジオメトリ。影パスだけ CULL_FRONT に
+	// すると、太陽側を向く片面（ガラス/窓枠/看板/薄板）がカリングされ深度を書かず＝太陽が透過する。
+	// 町の影は CULL_NONE で全面が確実に深度を書く（acne は下の DepthBias/SlopeScaled + 受光側の
+	// 法線オフセットで抑制）。これで単面ジオメトリの光漏れ（Weefit透過）を根絶する。
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	psoDesc.RasterizerState.DepthBias = 2500;          // CULL_NONE で表面も書くため acne 余裕を増やす
+	psoDesc.RasterizerState.SlopeScaledDepthBias = 2.0f;
 	psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
 	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
@@ -890,18 +838,20 @@ bool ShadowSystem::CreateConstantBuffer(ID3D12Device* device)
 
 void ShadowSystem::UpdateCascades(
 	const XMMATRIX& cameraView, const XMMATRIX& cameraProj,
-	const XMFLOAT3& lightDir, float nearClip, float farClip)
+	const XMFLOAT3& lightDir, const XMFLOAT3& camPos, float nearClip, float farClip)
 {
+	(void)cameraView; (void)cameraProj;   // VSM Step1: カメラ中心クリップマップに移行し視錐台フィット不要
 	ComputeCascadeSplits(nearClip, farClip, kCascadeCount, m_cascadeSplits);
 
+	float texelWorld[kCascadeCount] = {};   // BUG3: カスケード毎の world メートル/テクセル
 	for (UINT i = 0; i < kCascadeCount; ++i)
 	{
-		float splitNear = (i == 0) ? nearClip : m_cascadeSplits[i - 1];
-		float splitFar = m_cascadeSplits[i];
+		float splitFar = m_cascadeSplits[i];   // このカスケードがカメラ中心に覆う半径
+		float rad = 10.0f;
 		m_lightVP[i] = ComputeLightVP(
-			cameraView, cameraProj, lightDir,
-			splitNear, splitFar,
-			static_cast<float>(kShadowMapSize));
+			lightDir, camPos, splitFar,
+			static_cast<float>(kShadowMapSize), &rad);
+		texelWorld[i] = 2.0f * rad / static_cast<float>(kShadowMapSize);
 	}
 
 	if (m_shadowCBMapped)
@@ -912,6 +862,9 @@ void ShadowSystem::UpdateCascades(
 			m_cascadeSplits[0], m_cascadeSplits[1],
 			m_cascadeSplits[2],
 			(kCascadeCount >= 4) ? m_cascadeSplits[3] : 0.0f);
+		m_shadowCBMapped->CascadeTexelWorld = XMFLOAT4(
+			texelWorld[0], texelWorld[1], texelWorld[2],
+			(kCascadeCount >= 4) ? texelWorld[3] : texelWorld[2]);
 	}
 }
 

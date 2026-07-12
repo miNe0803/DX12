@@ -17,7 +17,7 @@ class ShadowSystem
 {
 public:
 	static constexpr UINT kCascadeCount = 4;
-	static constexpr UINT kShadowMapSize = 512; // PCF 4-tap + テンポラル分散で品質維持
+	static constexpr UINT kShadowMapSize = 2048; // 高解像度 CSM（512→2048, テクセル密度4×）+ 16-tap Vogel PCF。TownShadow.hlsli の TS_ShadowSize と一致させる
 
 	bool Init(ID3D12Device* device, DescriptorHeap* sceneHeap);
 	void Shutdown();
@@ -29,6 +29,7 @@ public:
 		const DirectX::XMMATRIX& cameraView,
 		const DirectX::XMMATRIX& cameraProj,
 		const DirectX::XMFLOAT3& lightDir,
+		const DirectX::XMFLOAT3& camPos,   // VSM Step1: カメラ中心クリップマップの中心
 		float nearClip,
 		float farClip);
 
@@ -49,6 +50,8 @@ public:
 
 	ID3D12RootSignature* GetShadowRootSignature() const { return m_rootSignature.Get(); }
 	ID3D12PipelineState* GetShadowPSO() const { return m_pso.Get(); }
+	/// カスケード i の view 空間 far 距離（回転不変のキャスタカリング用, BUG2）。
+	float GetCascadeSplit(UINT i) const { return (i < kCascadeCount) ? m_cascadeSplits[i] : 0.0f; }
 
 	/// Shadow constant buffer GPU address (contains kCascadeCount LightVP matrices + cascade splits).
 	D3D12_GPU_VIRTUAL_ADDRESS GetShadowCBAddress() const;
@@ -107,6 +110,7 @@ public:
 	struct alignas(256) ShadowConstants {
 		DirectX::XMMATRIX LightVP[kCascadeCount];
 		DirectX::XMFLOAT4 CascadeSplits; // .x/.y/.z/.w = view-space far for cascade 0/1/2/3
+		DirectX::XMFLOAT4 CascadeTexelWorld = {}; // .x/.y/.z/.w = world metres/シャドウテクセル (cascade0..3)。BUG3: カスケード間でPCFの世界ペナンブラ幅を揃え、遷移帯のクロールを消す
 	};
 
 private:
@@ -152,7 +156,7 @@ private:
 
 	D3D12_RESOURCE_STATES m_currentState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
-	static constexpr UINT kPerDrawRingSlots = 4096;
+	static constexpr UINT kPerDrawRingSlots = 40000; // 町の影キャスタ全4カスケード（cap 8000/casc, 実測合計~7500）+ ECS + 木。BUG2でリング枯渇させない
 	ComPtr<ID3D12Resource> m_perDrawRing;
 	uint8_t* m_perDrawRingMapped = nullptr;
 	UINT m_perDrawRingOffset = 0;

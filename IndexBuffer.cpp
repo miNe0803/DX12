@@ -1,49 +1,21 @@
 #include "IndexBuffer.h"
 #include <d3dx12.h>
 #include "Engine.h"
+#include "VertexBuffer.h"   // GpuUploadToDefault
 
 IndexBuffer::IndexBuffer(size_t size, const uint32_t* pInitData)
 {
-	auto prop = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD); // ƒq[ƒvƒvƒƒpƒeƒB
-	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(size);	// ƒŠƒ\[ƒX‚ÌÝ’è
-
-	// ƒŠƒ\[ƒX‚ð¶¬
-	auto hr = g_Engine->Device()->CreateCommittedResource(
-		&prop,
-		D3D12_HEAP_FLAG_NONE,
-		&desc,
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(m_pBuffer.GetAddressOf()));
-	if (FAILED(hr))
+	// DEFAULT ãƒ’ãƒ¼ãƒ—(VRAM)ã¸ã‚¢ãƒƒãƒ—ãƒ­ãƒ¼ãƒ‰ï¼ˆUPLOAD ãƒ’ãƒ¼ãƒ—ã®æ¯Žãƒ•ãƒ¬ãƒ¼ãƒ  PCIe èª­ã¿ã‚’è§£æ¶ˆï¼‰
+	m_pBuffer = GpuUploadToDefault(pInitData, size);
+	if (!m_pBuffer)
 	{
-		printf("[OnInit] ƒCƒ“ƒfƒbƒNƒXƒoƒbƒtƒ@ƒŠƒ\[ƒX‚Ì¶¬‚ÉŽ¸”s");
+		printf("[OnInit] IndexBuffer: VRAM upload failed\n");
 		return;
 	}
-
-	// ƒCƒ“ƒfƒbƒNƒXƒoƒbƒtƒ@ƒrƒ…[‚ÌÝ’è
 	m_View = {};
 	m_View.BufferLocation = m_pBuffer->GetGPUVirtualAddress();
 	m_View.Format = DXGI_FORMAT_R32_UINT;
 	m_View.SizeInBytes = static_cast<UINT>(size);
-
-	// ƒ}ƒbƒsƒ“ƒO‚·‚é
-	if (pInitData != nullptr)
-	{
-		void* ptr = nullptr;
-		hr = m_pBuffer->Map(0, nullptr, &ptr);
-		if (FAILED(hr))
-		{
-			printf("[OnInit] ƒCƒ“ƒfƒbƒNƒXƒoƒbƒtƒ@ƒ}ƒbƒsƒ“ƒO‚ÉŽ¸”s");
-			return;
-		}
-
-		// ƒCƒ“ƒfƒbƒNƒXƒf[ƒ^‚ðƒ}ƒbƒsƒ“ƒOæ‚ÉÝ’è
-		memcpy(ptr, pInitData, size);
-
-		// ƒ}ƒbƒsƒ“ƒO‰ðœ
-		m_pBuffer->Unmap(0, nullptr);
-	}
 	m_IsValid = true;
 }
 

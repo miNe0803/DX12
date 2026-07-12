@@ -123,7 +123,7 @@
       <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;DirectXTex.lib;assimp-vc143-mtd.lib;OpenEXR-3_3_d.lib;Imath-3_2_d.lib;Iex-3_3_d.lib;IlmThread-3_3_d.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /E /I /Y "$(ProjectDir)assets" "$(OutDir)assets"
+      <Command>xcopy /D /E /I /Y /Q "$(ProjectDir)assets" "$(OutDir)assets"
 for %%f in ("C:\vcpkg\installed\x64-windows\debug\bin\*.dll") do copy /Y "%%f" "$(OutDir)" >NUL 2>&amp;1
 copy /Y "$(ProjectDir)assimp-vc143-mtd.dll" "$(OutDir)" >NUL 2>&amp;1
 exit /B 0</Command>
@@ -151,7 +151,7 @@ exit /B 0</Command>
       <AdditionalDependencies>d3d12.lib;dxgi.lib;d3dcompiler.lib;DirectXTex.lib;WinPixEventRuntime.lib;assimp-vc143-mt.lib;OpenEXR-3_3.lib;Imath-3_2.lib;Iex-3_3.lib;IlmThread-3_3.lib;user32.lib;uuid.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /E /I /Y /Q "$(ProjectDir)assets" "$(OutDir)assets" || (echo [PostBuild] asset copy warning, continuing &amp;&amp; exit /B 0)
+      <Command>xcopy /D /E /I /Y /Q "$(ProjectDir)assets" "$(OutDir)assets" || (echo [PostBuild] asset copy warning, continuing &amp;&amp; exit /B 0)
 copy /Y "C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" "$(OutDir)" >NUL 2>&amp;1
 copy /Y "$(ProjectDir)assimp-vc143-mt.dll" "$(OutDir)" >NUL 2>&amp;1
 exit /B 0</Command>
@@ -195,6 +195,7 @@ exit /B 0</Command>
     <ClInclude Include="Source\Graphics\PostProcessSettings.h" />
     <ClInclude Include="Source\Graphics\HiZSystem.h" />
     <ClInclude Include="Source\Graphics\ShadowSystem.h" />
+    <ClInclude Include="Source\Graphics\Town\TownScene.h" />
     <ClInclude Include="Source\Graphics\BindlessMaterial.h" />
     <ClInclude Include="Source\Graphics\MeshletBuilder.h" />
     <ClInclude Include="Source\Graphics\TwoPhaseOcclusion.h" />
@@ -203,6 +204,9 @@ exit /B 0</Command>
     <ClInclude Include="Source\Graphics\RayTracingManager.h" />
     <ClInclude Include="Source\Graphics\WaterSystem.h" />
     <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
+    <ClInclude Include="Source\Graphics\SsrSystem.h" />
+    <ClInclude Include="Source\Graphics\GtaoSystem.h" />
+    <ClInclude Include="Source\Graphics\VsmSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
     <ClInclude Include="Engine\ECS\Components.h" />
@@ -229,6 +233,7 @@ exit /B 0</Command>
     <ClCompile Include="DX12.cpp" />
     <ClCompile Include="Engine.cpp" />
     <ClCompile Include="EngineBarrier.cpp" />
+    <ClCompile Include="Source\Graphics\Town\TownScene.cpp" />
     <ClCompile Include="Source\Graphics\EXRLoader.cpp">
       <AdditionalIncludeDirectories>C:\Users\siuts\source\repos\DX12;C:\Users\siuts\source\repos\DX12\Source;C:\Users\siuts\source\repos\DX12\Source\Graphics;C:\vcpkg\installed\x64-windows\include;C:\vcpkg\installed\x64-windows\include\OpenEXR;C:\vcpkg\installed\x64-windows\include\Imath;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -243,6 +248,9 @@ exit /B 0</Command>
     <ClCompile Include="Source\Graphics\RayTracingManager.cpp" />
     <ClCompile Include="Source\Graphics\WaterSystem.cpp" />
     <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
+    <ClCompile Include="Source\Graphics\SsrSystem.cpp" />
+    <ClCompile Include="Source\Graphics\GtaoSystem.cpp" />
+    <ClCompile Include="Source\Graphics\VsmSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeImposterBake.cpp" />
@@ -397,6 +405,34 @@ exit /B 0</Command>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
       <ObjectFileName>$(OutDir)TerrainVS.cso</ObjectFileName>
     </FxCompile>
+    <FxCompile Include="Shaders\Water_VS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Water_VS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Water_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Water_PS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Ocean_VS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Ocean_VS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Ocean_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)Ocean_PS.cso</ObjectFileName>
+    </FxCompile>
     <FxCompile Include="Shaders\Skybox\Skybox_PS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
@@ -422,6 +458,48 @@ exit /B 0</Command>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
       <ObjectFileName>$(OutDir)ToneMap_PS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\AutoExposure_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ObjectFileName>$(OutDir)AutoExposure_PS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\GTAO_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)GTAO_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\Vsm\VsmPageMark_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)VsmPageMark_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\Vsm\VsmAllocate_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)VsmAllocate_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\Vsm\VsmBuildPageParams_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)VsmBuildPageParams_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\PostProcess\GTAOApply_PS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ObjectFileName>$(OutDir)GTAOApply_PS.cso</ObjectFileName>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
     </FxCompile>
@@ -460,6 +538,62 @@ exit /B 0</Command>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownVS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownVS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownPS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownPS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownFoliagePS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownFoliagePS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownDecalPS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownDecalPS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownDeferredDecalVS.hlsl">
+      <EntryPointName>vert</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownDeferredDecalVS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\TownDeferredDecalPS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)TownDeferredDecalPS.cso</ObjectFileName>
+    </FxCompile>
+    <FxCompile Include="Shaders\Town\SSRResolvePS.hlsl">
+      <EntryPointName>main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+      <ObjectFileName>$(OutDir)SSRResolvePS.cso</ObjectFileName>
     </FxCompile>
     <FxCompile Include="NPR_PS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>

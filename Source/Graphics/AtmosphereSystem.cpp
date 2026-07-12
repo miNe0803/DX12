@@ -337,7 +337,7 @@ void AtmosphereSystem::Execute(
 	{
 		m_cbMapped->InvViewProj = XMMatrixTranspose(invViewProj);
 		m_cbMapped->CameraPos = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, 1.0f);
-		m_cbMapped->SunDirection = XMFLOAT4(sunDir.x, sunDir.y, sunDir.z, 0.0f);
+		m_cbMapped->SunDirection = XMFLOAT4(sunDir.x, sunDir.y, sunDir.z, params.fogMaxOpacity); // .w=FogMaxOpacity
 		m_cbMapped->SunColor = XMFLOAT4(sunColor.x, sunColor.y, sunColor.z, params.noiseStrength);
 		m_cbMapped->FogParams = XMFLOAT4(params.fogDensity, params.scatteringG,
 			params.heightFalloff, params.baseHeight);

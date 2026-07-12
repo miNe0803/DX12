@@ -45,6 +45,16 @@ private:
 	ComPtr<ID3D12RootSignature> m_pBlurRootSignature;
 	ComPtr<ID3D12PipelineState> m_pBlurPSO;
 
+	// ---- オート露出（HDR平均輝度→1x1縮約→CPU読み戻し→時間平滑）----
+	ComPtr<ID3D12RootSignature> m_pAeRootSignature;
+	ComPtr<ID3D12PipelineState> m_pAePSO;
+	ComPtr<ID3D12Resource>      m_pAeTarget;        // 1x1 R32_FLOAT（平均log2輝度）
+	ComPtr<ID3D12DescriptorHeap> m_pAeRtvHeap;      // 1 slot
+	ComPtr<ID3D12Resource>      m_pAeReadback[2];   // READBACK（ping-pong）
+	UINT   m_aeIndex = 0;
+	float  m_smoothedExposure = 1.0f;
+	bool   m_aeValid = false;
+
 	// NPR トーン + 最終合成（PBR LDR + NPR LDR）
 	ComPtr<ID3D12RootSignature> m_pNprTonemapRootSignature;
 	ComPtr<ID3D12PipelineState> m_pNprTonemapPSO;

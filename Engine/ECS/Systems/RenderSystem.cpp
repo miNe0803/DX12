@@ -20,6 +20,9 @@
 #include <thread>
 #include <vector>
 
+// Scene.cpp に定義された拡張テレインマスク GPU ハンドル取得 (t9-t12 用)
+extern D3D12_GPU_DESCRIPTOR_HANDLE Scene_GetTerrainExtraMaskGpu();
+
 namespace
 {
 	RenderSystem::GpuDrawStats s_lastGpuStats;
@@ -681,6 +684,10 @@ void RenderSystem::DrawMain(
 				cmdList->SetGraphicsRootDescriptorTable(5, shadowMapSrvGpu);
 			if (shadowCBGpu != 0)
 				cmdList->SetGraphicsRootConstantBufferView(6, shadowCBGpu);
+			// 拡張テレインマスク (t9-t12): Rivers_Direction, WaterColor_Color, FreshWater, INHIBITORS
+			D3D12_GPU_DESCRIPTOR_HANDLE extraMaskGpu = ::Scene_GetTerrainExtraMaskGpu();
+			if (extraMaskGpu.ptr != 0)
+				cmdList->SetGraphicsRootDescriptorTable(7, extraMaskGpu);
 
 			D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
 			D3D12_INDEX_BUFFER_VIEW ibView = mesh.pIB->View();
