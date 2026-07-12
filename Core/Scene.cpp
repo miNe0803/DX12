@@ -74,6 +74,7 @@ static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates
 static bool s_vsmEnabled = false;      // 太陽影を VSM でサンプル（OFF=従来CSM）
 static bool s_vsmAtlasDebug = false;   // 物理アトラスをフルスクリーン表示（検証）
 static bool s_vsmShadowDebug = false;  // VSM 影係数をフルスクリーン表示（検証）
+static bool s_vsmForceRender = false;  // 診断: V5aキャッシュ無効化（毎フレーム再描画→ログ更新）DX12_VSM_NOCACHE
 static bool s_vsmGateInit = false;     // 環境変数からの初期化を1回だけ行う
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
@@ -2612,12 +2613,13 @@ void Scene::Draw()
 		s_vsmEnabled     = GetEnvironmentVariableA("DX12_VSM",        ev, sizeof(ev)) > 0;
 		s_vsmAtlasDebug  = GetEnvironmentVariableA("DX12_VSM_ATLAS",  ev, sizeof(ev)) > 0;
 		s_vsmShadowDebug = GetEnvironmentVariableA("DX12_VSM_SHADOW", ev, sizeof(ev)) > 0;
+		s_vsmForceRender = GetEnvironmentVariableA("DX12_VSM_NOCACHE", ev, sizeof(ev)) > 0;
 		s_vsmGateInit = true;
 	}
 	if (s_vsm && s_vsm->IsValid() && s_vsmEnabled)
 	{
 		// V5a: カメラ/太陽が動いたフレーム、または未準備(有効化直後)のみ再描画（描画キャッシュ）。
-		if (s_vsm->NeedsRender() || !s_vsmAtlasReady)
+		if (s_vsm->NeedsRender() || !s_vsmAtlasReady || s_vsmForceRender)
 		{
 			s_vsm->BeginRenderStates(postCommandList);    // V4: atlas/pageTable → working
 			s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());

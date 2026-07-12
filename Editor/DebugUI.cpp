@@ -186,9 +186,10 @@ void DebugUI::Draw()
 				if (g_Scene->VsmAvailable())
 				{
 					bool vsmOn = g_Scene->GetVsmEnabled();
-					if (ImGui::Checkbox("VSM sun shadows (replaces CSM)", &vsmOn))
+					if (ImGui::Checkbox("VSM sun shadows (replaces CSM) [WIP]", &vsmOn))
 						g_Scene->SetVsmEnabled(vsmOn);
-					ImGui::TextDisabled("OFF=従来CSM影 / ON=Virtual Shadow Maps（ワールドロック, 移動で揺れにくい）");
+					ImGui::TextDisabled("OFF=従来CSM影（既定・安定）。");
+					ImGui::TextDisabled("ON=VSM【開発中/V5b未完】: 移動で重く、カメラ位置により崩れる場合あり。");
 					if (vsmOn)
 					{
 						ImGui::Text("(caster,page) pairs this frame: %u", g_Scene->GetVsmLastPairCount());
