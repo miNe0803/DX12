@@ -865,6 +865,7 @@ void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* b
 {
     if (!m_valid || count == 0 || m_batchCount == 0 || !m_submeshTableVA || !m_casterVA) return;
     GPU_CMD_BEGIN_EVENT(cmd, 120, 200, 120, L"VSM: page render");
+    m_renderedCBAddr = GetConstantsAddress();   // V5b Stage0: このアトラスを描いた中心。町サンプルが後で参照
 
     // 遷移: params→SRV(VS読), InstancePairs→VB, DrawArgs→INDIRECT
     D3D12_RESOURCE_BARRIER pre[4];

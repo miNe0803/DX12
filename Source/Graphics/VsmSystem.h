@@ -83,6 +83,9 @@ public:
                            ID3D12Resource* sceneDepth);
 
     D3D12_GPU_VIRTUAL_ADDRESS GetConstantsAddress() const;
+    // V5b Stage0: 現在常駐しているアトラスを描画した時の定数(中心)アドレス。町サンプルはこれを使うと、
+    // 「前フレーム中心で描いたアトラスを今フレーム中心でサンプル」する不一致(=WSAD移動の揺れ)が消える。
+    D3D12_GPU_VIRTUAL_ADDRESS GetRenderedConstantsAddress() const { return m_renderedCBAddr ? m_renderedCBAddr : GetConstantsAddress(); }
     D3D12_GPU_DESCRIPTOR_HANDLE GetPageTableSrvGpu() const { return m_pageTableSrvGpu; }
     D3D12_GPU_DESCRIPTOR_HANDLE GetAtlasSrvGpu() const { return m_atlasSrvGpu; }
     ID3D12Resource* GetAtlas() const { return m_atlas.Get(); }
@@ -136,6 +139,7 @@ private:
     uint8_t* m_cbMapped = nullptr;
     uint32_t m_cbFrame = 0;
     static constexpr uint32_t kCbFrames = 3;
+    D3D12_GPU_VIRTUAL_ADDRESS m_renderedCBAddr = 0;   // V5b Stage0: 現常駐アトラスを描いた時のCB
 
     // V5a: 再描画要否（カメラ/太陽の変化検出）
     bool m_needsRender = true;

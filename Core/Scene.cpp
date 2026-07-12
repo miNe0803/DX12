@@ -2190,7 +2190,7 @@ void Scene::Draw()
 			static char s_vsmTownEv[8];
 			static const bool s_vsmTown = (GetEnvironmentVariableA("DX12_VSM", s_vsmTownEv, sizeof(s_vsmTownEv)) > 0);
 			if (s_vsm && s_vsm->IsValid())
-				s_town->SetVsmBindings(s_vsm->GetConstantsAddress(),
+				s_town->SetVsmBindings(s_vsm->GetRenderedConstantsAddress(),   // V5b Stage0: 描画時の中心で引く→移動の揺れ消
 					s_vsm->GetPageTable()->GetGPUVirtualAddress(),
 					s_vsm->GetAtlasSrvGpu(), s_vsmTown && s_vsmAtlasReady);   // アトラス準備後のみ（フレーム1ガード）
 		}
