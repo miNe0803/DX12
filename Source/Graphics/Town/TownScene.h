@@ -102,6 +102,11 @@ public:
     // GPU SubmeshGeoTable（batch毎 {indexCount, startIndex=0, baseVertex=0, modelId}, 16B）。m2e が間接引数生成に使用。
     D3D12_GPU_VIRTUAL_ADDRESS SubmeshTableVA() const { return m_submeshTableRes ? m_submeshTableRes->GetGPUVirtualAddress() : 0; }
 
+    // V4: 太陽シャドウを VSM からサンプルするためのバインド（Draw 前に毎フレーム設定）。useVsm=false で従来CSM。
+    void SetVsmBindings(D3D12_GPU_VIRTUAL_ADDRESS vsmCB, D3D12_GPU_VIRTUAL_ADDRESS pageTableVA,
+                        D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv, bool useVsm)
+    { m_vsmCBAddr = vsmCB; m_vsmPageTableVA = pageTableVA; m_vsmAtlasSrv = atlasSrv; m_useVsm = useVsm; }
+
 private:
     struct SubMesh
     {
@@ -200,6 +205,12 @@ private:
     std::vector<VsmBatch> m_vsmBatches;          // per-submesh 描画バッチ（modelId 順）
     ComPtr<ID3D12Resource> m_submeshTableRes;    // SubmeshGeo{indexCount,0,0,modelId} × batchCount
     void BuildCasterRecords();
+
+    // V4: VSM 太陽シャドウのバインド（Scene が毎フレーム SetVsmBindings で設定）
+    D3D12_GPU_VIRTUAL_ADDRESS m_vsmCBAddr = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS m_vsmPageTableVA = 0;
+    D3D12_GPU_DESCRIPTOR_HANDLE m_vsmAtlasSrv = { 0 };
+    bool m_useVsm = false;
     size_t m_loadedMeshes = 0;
     size_t m_missingMeshes = 0;
 

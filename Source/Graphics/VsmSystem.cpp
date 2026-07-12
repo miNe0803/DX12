@@ -926,6 +926,40 @@ void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* b
     GPU_CMD_END_EVENT(cmd);
 }
 
+void VsmSystem::BeginRenderStates(ID3D12GraphicsCommandList* cmd)
+{
+    if (!m_valid) return;
+    D3D12_RESOURCE_BARRIER b[2]; UINT n = 0;
+    if (m_atlasState != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+    {
+        b[n++] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(), m_atlasState, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        m_atlasState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    if (m_pageTableState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        b[n++] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(), m_pageTableState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_pageTableState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (n) cmd->ResourceBarrier(n, b);
+}
+
+void VsmSystem::EndRenderStates(ID3D12GraphicsCommandList* cmd)
+{
+    if (!m_valid) return;
+    D3D12_RESOURCE_BARRIER b[2]; UINT n = 0;
+    if (m_atlasState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        b[n++] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(), m_atlasState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_atlasState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (m_pageTableState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        b[n++] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(), m_pageTableState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_pageTableState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (n) cmd->ResourceBarrier(n, b);
+}
+
 bool VsmSystem::CreateAtlasDebugPipeline(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srv; srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);   // t0 atlas
@@ -974,9 +1008,12 @@ void VsmSystem::RenderAtlasDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCR
     if (!m_valid || !m_atlasDebugPso || !m_sceneHeapRaw) return;
     GPU_CMD_BEGIN_EVENT(cmd, 240, 240, 120, L"VSM: atlas debug view");
 
-    auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
-        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->ResourceBarrier(1, &toSrv);
+    if (m_atlasState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(), m_atlasState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->ResourceBarrier(1, &toSrv);
+        m_atlasState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
 
     cmd->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)m_w, (float)m_h, 0.0f, 1.0f };
@@ -990,10 +1027,7 @@ void VsmSystem::RenderAtlasDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCR
     cmd->SetGraphicsRootDescriptorTable(0, m_atlasSrvGpu);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
-
-    auto back = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    cmd->ResourceBarrier(1, &back);
+    // atlas は PIXEL_SHADER_RESOURCE(resting) のまま（町がサンプルする）
     GPU_CMD_END_EVENT(cmd);
 }
 
@@ -1081,13 +1115,16 @@ void VsmSystem::RenderShadowDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESC
         dev->CreateShaderResourceView(sceneDepth, &s, h0);
     }
 
-    // 状態遷移: depth/atlas → PIXEL_SHADER_RESOURCE
-    D3D12_RESOURCE_BARRIER pre[2];
-    pre[0] = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
+    // atlas を PIXEL(resting)へ（追跡状態から, no-op if already）。scene深度は DEPTH_WRITE→PIXEL。
+    if (m_atlasState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    {
+        auto ta = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(), m_atlasState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->ResourceBarrier(1, &ta);
+        m_atlasState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    auto dToSrv = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
         D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    pre[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
-        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->ResourceBarrier(2, pre);
+    cmd->ResourceBarrier(1, &dToSrv);
 
     cmd->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)m_w, (float)m_h, 0.0f, 1.0f };
@@ -1103,11 +1140,8 @@ void VsmSystem::RenderShadowDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESC
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
 
-    D3D12_RESOURCE_BARRIER post[2];
-    post[0] = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
+    auto dBack = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    post[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    cmd->ResourceBarrier(2, post);
+    cmd->ResourceBarrier(1, &dBack);   // atlas は PIXEL(resting)のまま
     GPU_CMD_END_EVENT(cmd);
 }

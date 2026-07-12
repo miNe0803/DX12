@@ -34,6 +34,56 @@ cbuffer ShadowCB : register(b1, space2)
     float4 CascadeTexelWorld; // world m/テクセル (cascade0..3)。BUG3: ペナンブラ幅統一用
 };
 
+// ---- V4: VSM 太陽シャドウ（gUseVsm=1 のとき CSM の代わりにサンプル）----
+#include "../Vsm/Vsm.hlsli"   // 純関数アドレッシング（Vsm_SelectLevel/VirtualPage/PageTableIndex/PhysicalUV/NormalizeDepth）
+StructuredBuffer<uint> Vsm_PageTable : register(t11, space0);
+Texture2D<float>       Vsm_Atlas     : register(t12, space0);
+SamplerState           Vsm_Smp       : register(s2,  space0);
+cbuffer VsmCB : register(b3, space0)
+{
+    matrix Vsm_LightView;
+    matrix Vsm_InvViewProj;
+    float4 Vsm_Params;              // x=levelCount, y=pageSize, z=vppr, w=appr
+    float4 Vsm_ZParams;             // x=zNear, y=zFar, z=camLightX, w=camLightY
+    float4 Vsm_DepthDim;
+    float4 Vsm_LevelCenterExtent[8];
+};
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint3 _vsmPad; };
+
+// 1タップ: ライト空間XYを完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
+float VsmShadowTap(float2 lxy, float lz)
+{
+    float base = Vsm_LevelCenterExtent[0].z;
+    uint L = Vsm_SelectLevel(lxy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
+    float2 uvp;
+    uint2 vp = Vsm_VirtualPage(lxy, Vsm_LevelCenterExtent[L].xy, Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);
+    uint idx = Vsm_PageTableIndex(L, vp, (uint)Vsm_Params.z);
+    uint phys = Vsm_PageTable[idx];
+    if (phys == 0xFFFFu) return -1.0f;
+    float2 auv = Vsm_PhysicalUV(phys, uvp, (uint)Vsm_Params.w);
+    float stored = Vsm_Atlas.SampleLevel(Vsm_Smp, auv, 0);
+    float mine = Vsm_NormalizeDepth(lz, Vsm_ZParams.x, Vsm_ZParams.y);
+    return (mine - 0.004f <= stored) ? 1.0f : 0.0f;
+}
+// 8タップ ライト空間PCF（各タップ再アドレッシング=スパース安全）。1=光,0=影。
+float SampleSunShadowVSM(float3 worldPos)
+{
+    float3 ls = mul(float4(worldPos, 1.0f), Vsm_LightView).xyz;
+    float base = Vsm_LevelCenterExtent[0].z;
+    uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
+    float radius = Vsm_LevelCenterExtent[L].w * 1.5f;   // texelWorld×1.5
+    const int TAPS = 8;
+    float sum = 0.0f, wsum = 0.0f;
+    [unroll] for (int t = 0; t < TAPS; ++t)
+    {
+        float ang = (t + 0.5f) * (6.2831853f / TAPS);
+        float r = sqrt((t + 0.5f) / TAPS) * radius;
+        float s = VsmShadowTap(ls.xy + float2(cos(ang), sin(ang)) * r, ls.z);
+        if (s >= 0.0f) { sum += s; wsum += 1.0f; }
+    }
+    return (wsum < 0.5f) ? 1.0f : (sum / wsum);   // 全未割当=光
+}
+
 cbuffer SceneCB : register(b1, space0)
 {
     matrix View;
@@ -240,7 +290,8 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
 
         // ガラスも太陽の影を受ける（従来は影を参照せず、屋根の影の下でもガラスに太陽ハイライトが
         // 出ていた＝「太陽が2つある」ように見える光漏れ。太陽由来の項を shadow で減衰）。
-        float gsh = SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
+        float gsh = (gUseVsm != 0u) ? SampleSunShadowVSM(In.worldPos)
+                                    : SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
         float3 tint = baseCol * 0.5f + float3(0.30f, 0.36f, 0.42f) * 0.5f;
         float3 col = tint * (SunColor.rgb * 0.3f * gsh)   // 太陽由来のベース明るさ→影で減衰
             + envRefl * (0.2f + fres * 0.8f)              // 環境反射(空/街)は影と無関係
@@ -283,7 +334,8 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
     float3 kD = (1.0f - F) * (1.0f - metallic);
     float  NdotL = max(dot(Nw, L), 0.0f);
     float3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
-    Lo *= SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
+    Lo *= (gUseVsm != 0u) ? SampleSunShadowVSM(In.worldPos)
+                          : SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
 
     // ---- 点光源 ( 街灯 ) ----
     int lcount = (int)TL_Count.x;

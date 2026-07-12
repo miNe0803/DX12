@@ -1258,13 +1258,14 @@ bool TownScene::ParseT3D()
 //=============================================================================
 bool TownScene::CreateRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE rangeMat, rangeIBL, rangeCsm, rangeDepth;
+    CD3DX12_DESCRIPTOR_RANGE rangeMat, rangeIBL, rangeCsm, rangeDepth, rangeVsmAtlas;
     rangeMat.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0); // t0-t4 space0
     rangeIBL.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 6, 0); // t6-t8 space0
     rangeCsm.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2); // t0 space2
     rangeDepth.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 9, 0); // t9=シーン深度, t10=シーンカラーコピー(ガラスSSR)
+    rangeVsmAtlas.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 12, 0); // t12 space0 VSMアトラス(V4)
 
-    CD3DX12_ROOT_PARAMETER params[11];
+    CD3DX12_ROOT_PARAMETER params[15];
     params[0].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX); // t0 space1 InstanceWorlds (StructuredBuffer)
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);    // b1 Scene
     params[2].InitAsConstantBufferView(2, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // b2 TownParams
@@ -1276,8 +1277,13 @@ bool TownScene::CreateRootSignature()
     params[8].InitAsConstants(2, 0, 1, D3D12_SHADER_VISIBILITY_ALL);         // b0 space1: baseInstance + windEnable ( VS+PS: デファードPSも参照 )
     params[9].InitAsShaderResourceView(1, 1, D3D12_SHADER_VISIBILITY_PIXEL);  // t1 space1 デファードデカール per-decal データ
     params[10].InitAsDescriptorTable(1, &rangeDepth, D3D12_SHADER_VISIBILITY_PIXEL); // t9 space0 シーン深度
+    // V4: VSM 太陽シャドウのバインド（gUseVsm=0 時は TownPS が未参照＝既定CSMと同一動作）
+    params[11].InitAsConstantBufferView(3, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b3 space0 VsmCB
+    params[12].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t11 space0 VSM PageTable (root SRV)
+    params[13].InitAsDescriptorTable(1, &rangeVsmAtlas, D3D12_SHADER_VISIBILITY_PIXEL); // t12 space0 VSM Atlas
+    params[14].InitAsConstants(1, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 gUseVsm (1 uint)
 
-    CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+    CD3DX12_STATIC_SAMPLER_DESC samplers[3];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
         D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
     samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -1286,6 +1292,9 @@ bool TownScene::CreateRootSignature()
     samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     samplers[1].RegisterSpace = 2;
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    samplers[2].Init(2, D3D12_FILTER_MIN_MAG_MIP_POINT,   // s2 space0: VSMアトラス用 point clamp
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC desc;
     desc.Init(_countof(params), params, _countof(samplers), samplers,
@@ -1533,6 +1542,18 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
     if (csmSrv.ptr)       cmd->SetGraphicsRootDescriptorTable(5, csmSrv);
     if (shadowCBAddr)     cmd->SetGraphicsRootConstantBufferView(6, shadowCBAddr);
     cmd->SetGraphicsRootConstantBufferView(7, m_lightCB->GetAddress());
+
+    // V4: VSM バインド。param14(gUseVsm)は常に設定（TownPSが必ず参照）。11-13はVSM有効時のみ。
+    // 反射パスではVSMを使わない（アトラス状態はメインパス前提のため）。
+    uint32_t useVsm = 0u;
+    if (m_vsmCBAddr && m_vsmAtlasSrv.ptr)
+    {
+        cmd->SetGraphicsRootConstantBufferView(11, m_vsmCBAddr);
+        cmd->SetGraphicsRootShaderResourceView(12, m_vsmPageTableVA);
+        cmd->SetGraphicsRootDescriptorTable(13, m_vsmAtlasSrv);
+        useVsm = (m_useVsm && !refl) ? 1u : 0u;
+    }
+    cmd->SetGraphicsRoot32BitConstants(14, 1, &useVsm, 0);
 
     const UINT frame = g_Engine->CurrentBackBufferIndex();
     // メイン(0)/反射(1)で別領域を使い、同フレーム2回の Draw がワールドCBを踏み合わないようにする。

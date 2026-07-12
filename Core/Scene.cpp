@@ -69,6 +69,7 @@ static GtaoSystem* s_gtao = nullptr;
 static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM影を置換予定）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
+static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -2184,6 +2185,15 @@ void Scene::Draw()
 			townViewProj = g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(aspect);
 			XMStoreFloat3(&townCamPos, g_Camera->GetPosition());
 		}
+		// V4: VSM 太陽シャドウを町へバインド（DX12_VSM 時のみ CSM を置換）。アトラスは前フレーム分を参照。
+		{
+			static char s_vsmTownEv[8];
+			static const bool s_vsmTown = (GetEnvironmentVariableA("DX12_VSM", s_vsmTownEv, sizeof(s_vsmTownEv)) > 0);
+			if (s_vsm && s_vsm->IsValid())
+				s_town->SetVsmBindings(s_vsm->GetConstantsAddress(),
+					s_vsm->GetPageTable()->GetGPUVirtualAddress(),
+					s_vsm->GetAtlasSrvGpu(), s_vsmTown && s_vsmAtlasReady);   // アトラス準備後のみ（フレーム1ガード）
+		}
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),
 			envHandle,
@@ -2585,12 +2595,15 @@ void Scene::Draw()
 			// V5a: カメラ/太陽が動いたフレームのみ再描画（描画はキャッシュ, サンプルは毎フレーム）。
 			if (s_vsm->NeedsRender())
 			{
+				s_vsm->BeginRenderStates(postCommandList);    // V4: atlas/pageTable → working
 				s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
 				s_vsm->Allocate(postCommandList);
 				s_vsm->BuildPageParams(postCommandList);
 				s_vsm->BuildCasterBinning(postCommandList);   // V3c-m2: (caster,page) ペアリスト構築
 				if (!s_vsmRenderBatches.empty())              // V3c-m3: 各ページへキャスタ深度を描画
 					s_vsm->RenderPages(postCommandList, s_vsmRenderBatches.data(), (uint32_t)s_vsmRenderBatches.size());
+				s_vsm->EndRenderStates(postCommandList);      // V4: → PIXEL_SHADER_RESOURCE(resting)。町がサンプル可
+				s_vsmAtlasReady = true;
 			}
 			// 可視化/サンプルは毎フレーム（保持アトラスを参照＝V5キャッシュのアーキテクチャ）
 			static char s_vsmAtlasEv[8];

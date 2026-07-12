@@ -143,6 +143,16 @@ private:
     DirectX::XMFLOAT4X4 m_lastLightView = {};
     DirectX::XMFLOAT4X4 m_lastInvViewProj = {};
 
+    // V4: atlas/pageTable 状態追跡。描画中は working、描画後は PIXEL_SHADER_RESOURCE(resting) へ戻し、
+    // 翌フレームの町メインパスがサンプルできるようにする（cross-frame / cross-command-list）。
+    D3D12_RESOURCE_STATES m_atlasState = D3D12_RESOURCE_STATE_DEPTH_WRITE;          // 生成時状態
+    D3D12_RESOURCE_STATES m_pageTableState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; // 生成時状態
+public:
+    // V4: VSM 描画パス群の前後で atlas/pageTable を working↔resting(SRV) へ遷移。
+    void BeginRenderStates(ID3D12GraphicsCommandList* cmd);   // → working (DEPTH_WRITE / UAV)
+    void EndRenderStates(ID3D12GraphicsCommandList* cmd);     // → PIXEL_SHADER_RESOURCE (resting)
+private:
+
     // V2: ページ要求バッファ（RWStructuredBuffer<uint>）+ クリア用ゼロbuf + 読戻し検証
     ComPtr<ID3D12Resource> m_requestBuffer;
     ComPtr<ID3D12Resource> m_zeroUpload;               // 毎フレームのクリア元（ゼロ）
