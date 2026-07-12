@@ -99,7 +99,7 @@ public:
         DirectX::XMFLOAT4 Params;                // x=levelCount, y=pageSize, z=vppr, w=atlasPpr
         DirectX::XMFLOAT4 ZParams;               // x=lightZNear, y=lightZFar, z=camLightX, w=camLightY
         DirectX::XMFLOAT4 DepthDim;              // x=width, y=height, z=1/w, w=1/h
-        // 各レベル: xy=光空間XY中心(スナップ済), z=世界範囲(extent), w=world m/texel
+        // V5b: 各レベル xy=窓原点(整数ページ座標 originX/Y), z=pageWorld(1ページ世界幅), w=world m/texel
         DirectX::XMFLOAT4 LevelCenterExtent[kLevels];
     };
 

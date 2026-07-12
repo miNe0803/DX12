@@ -34,10 +34,14 @@ void main(uint3 id : SV_DispatchThreadID)
     uint perLevel = vppr * vppr;
     uint level = vp / perLevel;
     uint rem   = vp % perLevel;
-    uint py = rem / vppr;
-    uint px = rem % vppr;
+    uint py = rem / vppr;   // スロット sy
+    uint px = rem % vppr;   // スロット sx
 
-    float4 lce = (level < levels) ? Vsm_LevelCenterExtent[level] : Vsm_LevelCenterExtent[0];
-    PageCenterExtent[phys] = float4(lce.x, lce.y, lce.z, (float)level);
+    // V5b: lce=(originX,originY,pageWorld,texel)。絶対ページ左端(光空間)= (origin+slot)*pageWorld。
+    float4 lw = (level < levels) ? Vsm_LevelCenterExtent[level] : Vsm_LevelCenterExtent[0];
+    float pw = lw.z;
+    float ox = (lw.x + (float)px) * pw;
+    float oy = (lw.y + (float)py) * pw;
+    PageCenterExtent[phys] = float4(ox, oy, pw, (float)level);   // (ページ左端X, Y, pageWorld, level)
     PageTile[phys] = uint4(px, py, phys % appr, phys / appr);
 }

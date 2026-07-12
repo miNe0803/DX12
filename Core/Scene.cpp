@@ -1517,8 +1517,12 @@ bool Scene::Init()
 				// 横断歩道デカールを間近で俯瞰（街路レベル）。高さ/手前距離はここで調整可。
 				const float camY = cw.y + 12.0f;   // 注視点からの高さ (m)
 				const float camBack = 14.0f;       // 注視点から手前への距離 (m)
-				g_Camera->SetPosition(XMVectorSet(cw.x, camY, cw.z - camBack, 0.0f));
-				g_Camera->LookAt(XMVectorSet(cw.x, 2.0f * camY - cw.y, cw.z, 0.0f));
+				// 検証用: DX12_CAM_DX でカメラと注視点を X 方向へ平行移動（WSAD相当）。
+				// 影のワールド固定性チェック: dx を変えた2枚で影が地面に対しズレなければ安定。
+				float dx = 0.0f; char dxEv[16];
+				if (GetEnvironmentVariableA("DX12_CAM_DX", dxEv, sizeof(dxEv)) > 0) dx = (float)atof(dxEv);
+				g_Camera->SetPosition(XMVectorSet(cw.x + dx, camY, cw.z - camBack, 0.0f));
+				g_Camera->LookAt(XMVectorSet(cw.x + dx, 2.0f * camY - cw.y, cw.z, 0.0f));
 			}
 			else
 			{

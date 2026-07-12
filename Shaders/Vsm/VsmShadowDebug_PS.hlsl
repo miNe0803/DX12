@@ -29,7 +29,7 @@ struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 // （アトラスUVを直接オフセットすると隣の物理タイル=別ページを踏み無効）。戻り: 1=光,0=影, -1=未割当。
 float VsmSampleTap(float2 lxy, float lz)
 {
-    float base = Vsm_LevelCenterExtent[0].z;
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld
     uint L = Vsm_SelectLevel(lxy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
     float2 uvp;
     uint2 vp = Vsm_VirtualPage(lxy, Vsm_LevelCenterExtent[L].xy,
@@ -55,7 +55,7 @@ float4 main(PSInput i) : SV_TARGET
     float3 ls = mul(float4(P, 1.0f), Vsm_LightView).xyz;
 
     // レベル（色付け＋PCF半径のワールドスケール用）
-    float base = Vsm_LevelCenterExtent[0].z;
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld
     uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
 
     // PCF: 選択レベルのテクセル世界サイズを半径に、8タップ Vogel をライト空間XYへオフセット。

@@ -48,10 +48,10 @@ VSOut main(VSIn i)
     float3 wp = mul(float4(i.pos, 1.0f), c.world).xyz;        // world（TownVS と同規約）
     float3 ls = mul(float4(wp, 1.0f), Vsm_LightView).xyz;     // ライト空間
 
-    float4 ce = PageCenterExtent[phys];
+    float4 ce = PageCenterExtent[phys];   // V5b: (ページ左端X, Y, pageWorld, level)
     uint4  pt = PageTile[phys];
-    float vppr = Vsm_Params.z, appr = Vsm_Params.w;
-    float E = ce.z, pw = E / vppr;
+    float appr = Vsm_Params.w;
+    float pw = ce.z;
     if (pw <= 1e-6f)
     {
         o.pos = float4(2.0f, 2.0f, 2.0f, 1.0f);
@@ -59,9 +59,9 @@ VSOut main(VSIn i)
         return o;
     }
 
-    // このページ（px,py）の左下（ライト空間）→ ページ内 [0,1]（= サンプル側 inPageUV）
-    float ox = (ce.x - E * 0.5f) + (float)pt.x * pw;
-    float oy = (ce.y - E * 0.5f) + (float)pt.y * pw;
+    // このページの左端（絶対・ライト空間）→ ページ内 [0,1]（= サンプル側 inPageUV）。原点減算で高精度。
+    float ox = ce.x;
+    float oy = ce.y;
     float lx = (ls.x - ox) / pw;
     float ly = (ls.y - oy) / pw;
 

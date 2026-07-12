@@ -39,16 +39,14 @@ float3 VsmCasterLS(Caster c)
 // count/scatter で完全同一の入力→出力（共有関数なので bit-identical）。
 int4 VsmLevelRect(float3 Cl, float r, uint L)
 {
-    float4 lce = Vsm_LevelCenterExtent[L];
-    float  E   = lce.z;
+    // V5b: lce=(originX,originY,pageWorld,texel)。絶対ページ floor((Cl±r)/pw) を窓原点相対スロットへ。
+    float4 lw = Vsm_LevelCenterExtent[L];
+    float  pw = lw.z;
     float  vppr = Vsm_Params.z;
-    float  pw  = E / vppr;
-    float  ox  = lce.x - E * 0.5f;
-    float  oy  = lce.y - E * 0.5f;
-    int x0 = (int)floor((Cl.x - r - ox) / pw);
-    int x1 = (int)floor((Cl.x + r - ox) / pw);
-    int y0 = (int)floor((Cl.y - r - oy) / pw);
-    int y1 = (int)floor((Cl.y + r - oy) / pw);
+    int x0 = (int)floor((Cl.x - r) / pw) - (int)lw.x;
+    int x1 = (int)floor((Cl.x + r) / pw) - (int)lw.x;
+    int y0 = (int)floor((Cl.y - r) / pw) - (int)lw.y;
+    int y1 = (int)floor((Cl.y + r) / pw) - (int)lw.y;
     int hi = (int)vppr - 1;
     x0 = max(x0, 0); y0 = max(y0, 0);
     x1 = min(x1, hi); y1 = min(y1, hi);

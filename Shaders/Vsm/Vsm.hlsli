@@ -24,15 +24,16 @@ uint Vsm_SelectLevel(float2 lightXY, float2 camLightXY, uint levelCount, float b
     return min(lvl, levelCount - 1u);
 }
 
-// レベル内の仮想ページ座標 + ページ内UV。center/extent は該当レベルのもの。
-uint2 Vsm_VirtualPage(float2 lightXY, float2 center, float extent, uint vppr, out float2 inPageUV)
+// V5b 絶対トロイダル: origin=窓原点(整数ページ座標), pageWorld=1ページの世界幅。
+// rel=lightXY/pw-origin は窓内で [0,vppr)。原点を先に引くので大座標でも高精度(レビューF3)。
+// 返すスロット座標は窓相対＝トロイダルスロット（可視点は必ず窓内なので clamp で足りる）。
+uint2 Vsm_VirtualPage(float2 lightXY, float2 origin, float pageWorld, uint vppr, out float2 inPageUV)
 {
-    float2 local = (lightXY - center) / max(extent, 1e-3f) + 0.5f;   // [0,1]
-    local = saturate(local);
-    float2 pf = local * (float)vppr;
-    uint2 page = (uint2)min(pf, (float)(vppr - 1u));
-    inPageUV = frac(pf);
-    return page;
+    // F3精度対策: origin*pageWorld(≈カメラ光空間)を先にワールド単位で引いてから割る→被除数が小さく高精度。
+    float2 rel = (lightXY - origin * pageWorld) / max(pageWorld, 1e-6f);
+    inPageUV = frac(rel);
+    int2 s = clamp((int2)floor(rel), 0, (int)vppr - 1);
+    return (uint2)s;
 }
 
 // ページテーブルの線形index

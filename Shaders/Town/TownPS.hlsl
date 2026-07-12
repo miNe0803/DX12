@@ -53,7 +53,7 @@ cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint3 _vsmPad; };
 // 1タップ: ライト空間XYを完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
 float VsmShadowTap(float2 lxy, float lz)
 {
-    float base = Vsm_LevelCenterExtent[0].z;
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld → extent0=pw0*vppr
     uint L = Vsm_SelectLevel(lxy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
     float2 uvp;
     uint2 vp = Vsm_VirtualPage(lxy, Vsm_LevelCenterExtent[L].xy, Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);
@@ -69,7 +69,7 @@ float VsmShadowTap(float2 lxy, float lz)
 float SampleSunShadowVSM(float3 worldPos)
 {
     float3 ls = mul(float4(worldPos, 1.0f), Vsm_LightView).xyz;
-    float base = Vsm_LevelCenterExtent[0].z;
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld → extent0=pw0*vppr
     uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
     float radius = Vsm_LevelCenterExtent[L].w * 1.5f;   // texelWorld×1.5
     const int TAPS = 8;

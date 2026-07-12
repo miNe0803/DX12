@@ -147,15 +147,17 @@ void VsmSystem::UpdateConstants(const XMMATRIX& lightView, const XMMATRIX& invVi
     float camLX = XMVectorGetX(camLS), camLY = XMVectorGetY(camLS);
     c->ZParams = XMFLOAT4(lightZNear, lightZFar, camLX, camLY);
 
-    // 各レベル: 世界範囲 extent=base*2^level、中心をページ世界サイズ格子へスナップ（ワールドロック）
+    // V5b: 各レベル絶対トロイダル。LevelCenterExtent[i] の意味を変更 →
+    // (originX, originY, pageWorld, texelWorld)。origin=窓原点=カメラ光空間を pageWorld 格子へ
+    // 量子化し半幅(vppr/2)引いた「整数ページ座標」。可視点は [origin, origin+vppr) の窓内に入る。
     for (uint32_t i = 0; i < kLevels; ++i)
     {
         float extent = kBaseExtent * (float)(1u << i);
         float pageWorld = extent / (float)kVirtualPagesPerRow;   // 1ページの世界サイズ
-        float cx = floorf(camLX / pageWorld) * pageWorld;
-        float cy = floorf(camLY / pageWorld) * pageWorld;
-        float texelWorld = extent / (float)(kVirtualPagesPerRow * kPageSize);
-        c->LevelCenterExtent[i] = XMFLOAT4(cx, cy, extent, texelWorld);
+        float originX = floorf(camLX / pageWorld) - (float)(kVirtualPagesPerRow / 2);
+        float originY = floorf(camLY / pageWorld) - (float)(kVirtualPagesPerRow / 2);
+        float texelWorld = pageWorld / (float)kPageSize;
+        c->LevelCenterExtent[i] = XMFLOAT4(originX, originY, pageWorld, texelWorld);
     }
 }
 

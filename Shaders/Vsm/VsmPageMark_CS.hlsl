@@ -31,13 +31,13 @@ void main(uint3 id : SV_DispatchThreadID)
     float4 wp = mul(float4(ndc, d, 1.0f), Vsm_InvViewProj);
     float3 P = wp.xyz / wp.w;
 
-    // world → light 空間 → レベル/ページ
+    // world → light 空間 → レベル/ページ（V5b: .z は pageWorld なので base=pw0*vppr）
     float3 ls = mul(float4(P, 1.0f), Vsm_LightView).xyz;
-    float base = Vsm_LevelCenterExtent[0].z;   // level0 の世界範囲 = baseExtent
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // level0 extent = pw0 * vppr
     uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
     float2 uvp;
-    uint2 vp = Vsm_VirtualPage(ls.xy, Vsm_LevelCenterExtent[L].xy,
-                               Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);
+    uint2 vp = Vsm_VirtualPage(ls.xy, Vsm_LevelCenterExtent[L].xy,   // origin
+                               Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);  // pageWorld
     uint idx = Vsm_PageTableIndex(L, vp, (uint)Vsm_Params.z);
 
     uint prev;
