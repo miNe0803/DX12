@@ -15,6 +15,7 @@ bool VsmSystem::Init(ID3D12Device* device, DescriptorHeap* sceneHeap, uint32_t w
 {
     if (!device || !sceneHeap) return false;
     m_w = width; m_h = height;
+    m_sceneHeapRaw = sceneHeap->GetHeap();   // 検証用アトラス可視化のヒープ
     if (!CreateAtlas(device)) return false;
     if (!CreatePageTable(device, sceneHeap)) return false;
     if (!CreateConstantBuffer(device)) return false;
@@ -24,6 +25,12 @@ bool VsmSystem::Init(ID3D12Device* device, DescriptorHeap* sceneHeap, uint32_t w
     if (!CreateAllocPipeline(device)) return false;
     if (!CreateBuildResources(device)) return false;
     if (!CreateBuildPipeline(device)) return false;
+    if (!CreateBinningResources(device)) return false;
+    if (!CreateBinningPipelines(device)) return false;
+    if (!CreateDrawArgsPipeline(device)) return false;
+    if (!CreatePageRenderPipeline(device)) return false;
+    if (!CreateAtlasDebugPipeline(device)) return false;
+    if (!CreateShadowDebugPipeline(device)) return false;
 
     // アトラス SRV（サンプル用, V4）をシーンヒープへ
     {
@@ -110,6 +117,23 @@ void VsmSystem::UpdateConstants(const XMMATRIX& lightView, const XMMATRIX& invVi
     const XMFLOAT3& camPos, float lightZNear, float lightZFar)
 {
     if (!m_valid) return;
+
+    // V5a: カメラ(invViewProj)/太陽(lightView)が前回描画から変わったか＝再描画要否。
+    // クリップマップはカメラ回転でも可視ページ集合が変わる（MarkPagesが深度依存）ため、
+    // 平行移動・回転・太陽変化のいずれでも再描画が必要。静止フレームはスキップ。
+    XMFLOAT4X4 lv, ivp;
+    XMStoreFloat4x4(&lv, lightView);
+    XMStoreFloat4x4(&ivp, invViewProj);
+    m_needsRender = !m_hasLastView ||
+        memcmp(&lv, &m_lastLightView, sizeof(lv)) != 0 ||
+        memcmp(&ivp, &m_lastInvViewProj, sizeof(ivp)) != 0;
+    if (m_needsRender)
+    {
+        m_lastLightView = lv;
+        m_lastInvViewProj = ivp;
+        m_hasLastView = true;
+    }
+
     m_cbFrame = (m_cbFrame + 1) % kCbFrames;
     auto* c = reinterpret_cast<VsmConstants*>(m_cbMapped + (size_t)m_cbFrame * sizeof(VsmConstants));
 
@@ -516,6 +540,574 @@ void VsmSystem::BuildPageParams(ID3D12GraphicsCommandList* cmd)
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     post[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->ResourceBarrier(2, post);
+    GPU_CMD_END_EVENT(cmd);
+}
+
+// ============================================================
+//  V3c-m2: キャスタ→ページ ビニング
+// ============================================================
+void VsmSystem::SetCasterSource(D3D12_GPU_VIRTUAL_ADDRESS casterVA, uint32_t casterCount, uint32_t modelCount,
+                                D3D12_GPU_VIRTUAL_ADDRESS submeshTableVA, uint32_t batchCount)
+{
+    m_casterVA = casterVA;
+    m_casterCount = casterCount;
+    m_binModelCount = (modelCount <= kMaxModels) ? modelCount : kMaxModels;
+    m_submeshTableVA = submeshTableVA;
+    m_batchCount = (batchCount <= kMaxBatches) ? batchCount : kMaxBatches;
+    if (modelCount > kMaxModels)
+        printf("[VSM] WARNING: modelCount %u > kMaxModels %u (clamped)\n", modelCount, kMaxModels);
+    if (batchCount > kMaxBatches)
+        printf("[VSM] WARNING: batchCount %u > kMaxBatches %u (clamped)\n", batchCount, kMaxBatches);
+    printf("[VSM] caster source set: %u casters, %u models, %u batches\n", m_casterCount, m_binModelCount, m_batchCount);
+    fflush(stdout);
+}
+
+bool VsmSystem::CreateBinningResources(ID3D12Device* device)
+{
+    auto def = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    auto mk = [&](UINT64 bytes, ComPtr<ID3D12Resource>& out) {
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        return SUCCEEDED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&out)));
+    };
+    if (!mk((UINT64)kMaxModels * sizeof(uint32_t), m_pairCount)) return false;
+    if (!mk((UINT64)kMaxModels * sizeof(uint32_t), m_pairBase)) return false;
+    if (!mk((UINT64)kMaxModels * sizeof(uint32_t), m_pairCursor)) return false;
+    if (!mk((UINT64)kMaxPairs * 2 * sizeof(uint32_t), m_instancePairs)) return false; // uint2
+    if (!mk(sizeof(uint32_t), m_globalCounter)) return false;
+    if (!mk(sizeof(uint32_t), m_binTotals)) return false;
+
+    auto rbp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+    auto rbd = CD3DX12_RESOURCE_DESC::Buffer(2 * sizeof(uint32_t)); // [0]=total, [1]=attempts
+    for (uint32_t i = 0; i < kCbFrames; ++i)
+        if (FAILED(device->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_binReadback[i])))) return false;
+    return true;
+}
+
+bool VsmSystem::CreateBinningPipelines(ID3D12Device* device)
+{
+    auto makePso = [&](const wchar_t* cso, const wchar_t* csoAlt,
+                       ID3D12RootSignature* rs, ComPtr<ID3D12PipelineState>& pso) -> bool {
+        ComPtr<ID3DBlob> b;
+        if (FAILED(D3DReadFileToBlob(cso, &b)) && FAILED(D3DReadFileToBlob(csoAlt, &b)))
+        { wprintf(L"VSM: %s not found\n", cso); return false; }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+        pd.pRootSignature = rs;
+        pd.CS = CD3DX12_SHADER_BYTECODE(b.Get());
+        return SUCCEEDED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)));
+    };
+    auto serialize = [&](const D3D12_ROOT_SIGNATURE_DESC& rs, ComPtr<ID3D12RootSignature>& out) -> bool {
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+        { if (err) printf("VSM bin RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+        return SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&out)));
+    };
+
+    // count: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageTable, u0 PairCount
+    {
+        CD3DX12_ROOT_PARAMETER p[5];
+        p[0].InitAsConstantBufferView(0);
+        p[1].InitAsConstants(4, 1);
+        p[2].InitAsShaderResourceView(0);
+        p[3].InitAsShaderResourceView(1);
+        p[4].InitAsUnorderedAccessView(0);
+        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 5; rs.pParameters = p;
+        if (!serialize(rs, m_binCountRS)) return false;
+        if (!makePso(L"VsmCasterCount_CS.cso", L"Shaders\\Vsm\\VsmCasterCount_CS.cso", m_binCountRS.Get(), m_binCountPso)) return false;
+    }
+    // prefix: b0 consts(4), u0 PairCount, u1 PairBase, u2 PairCursor, u3 Totals
+    {
+        CD3DX12_ROOT_PARAMETER p[5];
+        p[0].InitAsConstants(4, 0);
+        p[1].InitAsUnorderedAccessView(0);
+        p[2].InitAsUnorderedAccessView(1);
+        p[3].InitAsUnorderedAccessView(2);
+        p[4].InitAsUnorderedAccessView(3);
+        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 5; rs.pParameters = p;
+        if (!serialize(rs, m_binPrefixRS)) return false;
+        if (!makePso(L"VsmPrefixSum_CS.cso", L"Shaders\\Vsm\\VsmPrefixSum_CS.cso", m_binPrefixRS.Get(), m_binPrefixPso)) return false;
+    }
+    // scatter: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageTable, u0 PairBase, u1 PairCursor, u2 PairCount, u3 InstancePairs, u4 GlobalCounter
+    {
+        CD3DX12_ROOT_PARAMETER p[9];
+        p[0].InitAsConstantBufferView(0);
+        p[1].InitAsConstants(4, 1);
+        p[2].InitAsShaderResourceView(0);
+        p[3].InitAsShaderResourceView(1);
+        p[4].InitAsUnorderedAccessView(0);
+        p[5].InitAsUnorderedAccessView(1);
+        p[6].InitAsUnorderedAccessView(2);
+        p[7].InitAsUnorderedAccessView(3);
+        p[8].InitAsUnorderedAccessView(4);
+        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 9; rs.pParameters = p;
+        if (!serialize(rs, m_binScatterRS)) return false;
+        if (!makePso(L"VsmCasterScatter_CS.cso", L"Shaders\\Vsm\\VsmCasterScatter_CS.cso", m_binScatterRS.Get(), m_binScatterPso)) return false;
+    }
+    return true;
+}
+
+void VsmSystem::ZeroBuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res, uint64_t bytes)
+{
+    auto b = CD3DX12_RESOURCE_BARRIER::Transition(res,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->ResourceBarrier(1, &b);
+    cmd->CopyBufferRegion(res, 0, m_zeroUpload.Get(), 0, bytes);
+    b = CD3DX12_RESOURCE_BARRIER::Transition(res,
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->ResourceBarrier(1, &b);
+}
+
+void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
+{
+    if (!m_valid || !m_casterVA || m_casterCount == 0 || m_binModelCount == 0) return;
+    GPU_CMD_BEGIN_EVENT(cmd, 220, 180, 80, L"VSM: caster binning");
+
+    // pageTable を SRV へ（Allocate 後は UAV）
+    auto ptToSrv = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(1, &ptToSrv);
+
+    // per-model カウンタ + グローバルカウンタを 0 クリア（PairBase/PairCursor は prefix-sum が全上書き）
+    ZeroBuffer(cmd, m_pairCount.Get(), (UINT64)m_binModelCount * sizeof(uint32_t));
+    ZeroBuffer(cmd, m_globalCounter.Get(), sizeof(uint32_t));
+
+    const uint32_t consts[4] = { m_casterCount, m_binModelCount, kPhysicalPages, kMaxPairs };
+    const D3D12_GPU_VIRTUAL_ADDRESS pageTableVA = m_pageTable->GetGPUVirtualAddress();
+
+    // --- m2b: count ---
+    cmd->SetComputeRootSignature(m_binCountRS.Get());
+    cmd->SetPipelineState(m_binCountPso.Get());
+    cmd->SetComputeRootConstantBufferView(0, GetConstantsAddress());
+    cmd->SetComputeRoot32BitConstants(1, 4, consts, 0);
+    cmd->SetComputeRootShaderResourceView(2, m_casterVA);
+    cmd->SetComputeRootShaderResourceView(3, pageTableVA);
+    cmd->SetComputeRootUnorderedAccessView(4, m_pairCount->GetGPUVirtualAddress());
+    cmd->Dispatch((m_casterCount + 63) / 64, 1, 1);
+    { auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_pairCount.Get()); cmd->ResourceBarrier(1, &u); }
+
+    // --- m2c: prefix-sum ---
+    cmd->SetComputeRootSignature(m_binPrefixRS.Get());
+    cmd->SetPipelineState(m_binPrefixPso.Get());
+    cmd->SetComputeRoot32BitConstants(0, 4, consts, 0);
+    cmd->SetComputeRootUnorderedAccessView(1, m_pairCount->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(2, m_pairBase->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(3, m_pairCursor->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(4, m_binTotals->GetGPUVirtualAddress());
+    cmd->Dispatch(1, 1, 1);
+    {
+        D3D12_RESOURCE_BARRIER u[3] = {
+            CD3DX12_RESOURCE_BARRIER::UAV(m_pairBase.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_pairCursor.Get()),
+            CD3DX12_RESOURCE_BARRIER::UAV(m_binTotals.Get()) };
+        cmd->ResourceBarrier(3, u);
+    }
+
+    // --- m2d: scatter ---
+    cmd->SetComputeRootSignature(m_binScatterRS.Get());
+    cmd->SetPipelineState(m_binScatterPso.Get());
+    cmd->SetComputeRootConstantBufferView(0, GetConstantsAddress());
+    cmd->SetComputeRoot32BitConstants(1, 4, consts, 0);
+    cmd->SetComputeRootShaderResourceView(2, m_casterVA);
+    cmd->SetComputeRootShaderResourceView(3, pageTableVA);
+    cmd->SetComputeRootUnorderedAccessView(4, m_pairBase->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(5, m_pairCursor->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(6, m_pairCount->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(7, m_instancePairs->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(8, m_globalCounter->GetGPUVirtualAddress());
+    cmd->Dispatch((m_casterCount + 63) / 64, 1, 1);
+    { auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_instancePairs.Get()); cmd->ResourceBarrier(1, &u); }
+
+    // --- m2e: 間接引数生成（PairBase/PairCount → DrawArgs、submesh バッチ毎）---
+    if (m_submeshTableVA && m_batchCount > 0)
+    {
+        const uint32_t argConsts[4] = { m_batchCount, kMaxPairs, 0, 0 };
+        cmd->SetComputeRootSignature(m_argsRS.Get());
+        cmd->SetPipelineState(m_argsPso.Get());
+        cmd->SetComputeRoot32BitConstants(0, 4, argConsts, 0);
+        cmd->SetComputeRootShaderResourceView(1, m_submeshTableVA);
+        cmd->SetComputeRootUnorderedAccessView(2, m_pairBase->GetGPUVirtualAddress());
+        cmd->SetComputeRootUnorderedAccessView(3, m_pairCount->GetGPUVirtualAddress());
+        cmd->SetComputeRootUnorderedAccessView(4, m_drawArgs->GetGPUVirtualAddress());
+        cmd->Dispatch((m_batchCount + 63) / 64, 1, 1);
+        auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_drawArgs.Get()); cmd->ResourceBarrier(1, &u);
+    }
+
+    // pageTable を UAV へ復帰（C3: 次フレーム Allocate 用）
+    auto ptBack = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTable.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->ResourceBarrier(1, &ptBack);
+
+    // --- 検証: Totals + GlobalCounter を読戻し ---
+    {
+        auto s0 = CD3DX12_RESOURCE_BARRIER::Transition(m_binTotals.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        auto s1 = CD3DX12_RESOURCE_BARRIER::Transition(m_globalCounter.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_RESOURCE_BARRIER pre[2] = { s0, s1 }; cmd->ResourceBarrier(2, pre);
+        ID3D12Resource* rb = m_binReadback[m_binFrame % kCbFrames].Get();
+        cmd->CopyBufferRegion(rb, 0, m_binTotals.Get(), 0, sizeof(uint32_t));
+        cmd->CopyBufferRegion(rb, sizeof(uint32_t), m_globalCounter.Get(), 0, sizeof(uint32_t));
+        auto b0 = CD3DX12_RESOURCE_BARRIER::Transition(m_binTotals.Get(),
+            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        auto b1 = CD3DX12_RESOURCE_BARRIER::Transition(m_globalCounter.Get(),
+            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_RESOURCE_BARRIER post[2] = { b0, b1 }; cmd->ResourceBarrier(2, post);
+    }
+    if ((m_dbgThrottle % 120u) == 2u)   // mark=0 / alloc=1 と別位相
+    {
+        uint32_t oldest = (m_binFrame + 1u) % kCbFrames;
+        void* p = nullptr; D3D12_RANGE rr{ 0, 2 * sizeof(uint32_t) };
+        if (SUCCEEDED(m_binReadback[oldest]->Map(0, &rr, &p)) && p)
+        {
+            const uint32_t* d = reinterpret_cast<const uint32_t*>(p);
+            m_lastPairCount = d[0]; m_lastPairAttempts = d[1];
+            D3D12_RANGE wr{ 0, 0 }; m_binReadback[oldest]->Unmap(0, &wr);
+            printf("[VSM] binning: total pairs=%u, attempts=%u, cap=%u%s\n",
+                m_lastPairCount, m_lastPairAttempts, kMaxPairs,
+                (m_lastPairCount != m_lastPairAttempts) ? " [MISMATCH!]" :
+                (m_lastPairCount >= kMaxPairs) ? " [CAP HIT!]" : " OK");
+            fflush(stdout);
+        }
+    }
+    ++m_binFrame;
+    GPU_CMD_END_EVENT(cmd);
+}
+
+// ============================================================
+//  V3c-m2e/m3: 間接引数 + ページ描画
+// ============================================================
+bool VsmSystem::CreateDrawArgsPipeline(ID3D12Device* device)
+{
+    auto def = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    auto rd = CD3DX12_RESOURCE_DESC::Buffer((UINT64)kMaxBatches * 5 * sizeof(uint32_t),
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_drawArgs)))) return false;
+
+    CD3DX12_ROOT_PARAMETER p[5];
+    p[0].InitAsConstants(4, 0);
+    p[1].InitAsShaderResourceView(0);   // t0 SubmeshGeoTable
+    p[2].InitAsUnorderedAccessView(0);  // u0 PairBase
+    p[3].InitAsUnorderedAccessView(1);  // u1 PairCount
+    p[4].InitAsUnorderedAccessView(2);  // u2 DrawArgsOut
+    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 5; rs.pParameters = p;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { if (err) printf("VSM args RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+    if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_argsRS)))) return false;
+
+    ComPtr<ID3DBlob> cs;
+    if (FAILED(D3DReadFileToBlob(L"VsmBuildDrawArgs_CS.cso", &cs)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\Vsm\\VsmBuildDrawArgs_CS.cso", &cs)))
+    { printf("VSM: VsmBuildDrawArgs_CS.cso not found\n"); return false; }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_argsRS.Get(); pd.CS = CD3DX12_SHADER_BYTECODE(cs.Get());
+    if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_argsPso)))) { printf("VSM: args PSO failed\n"); return false; }
+    return true;
+}
+
+bool VsmSystem::CreatePageRenderPipeline(ID3D12Device* device)
+{
+    // root sig: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageCenterExtent, t2 PageTile
+    CD3DX12_ROOT_PARAMETER p[5];
+    p[0].InitAsConstantBufferView(0);
+    p[1].InitAsConstants(4, 1);
+    p[2].InitAsShaderResourceView(0);
+    p[3].InitAsShaderResourceView(1);
+    p[4].InitAsShaderResourceView(2);
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 5; rs.pParameters = p;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { if (err) printf("VSM pageRender RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+    if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_pageRenderRS)))) return false;
+
+    ComPtr<ID3DBlob> vs;
+    if (FAILED(D3DReadFileToBlob(L"VsmCasterDepth_VS.cso", &vs)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\Vsm\\VsmCasterDepth_VS.cso", &vs)))
+    { printf("VSM: VsmCasterDepth_VS.cso not found\n"); return false; }
+
+    static const D3D12_INPUT_ELEMENT_DESC il[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,   0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_UINT,     1, 0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_pageRenderRS.Get();
+    pd.VS = CD3DX12_SHADER_BYTECODE(vs.Get());
+    pd.InputLayout = { il, _countof(il) };
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthBias = 2500;
+    pd.RasterizerState.SlopeScaledDepthBias = 2.0f;
+    pd.RasterizerState.DepthClipEnable = TRUE;     // H2: 範囲外 Z を HW クリップ
+    pd.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT); // depth write ALL, LESS
+    pd.SampleMask = UINT_MAX;
+    pd.NumRenderTargets = 0;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_pageRenderPso))))
+    { printf("VSM: pageRender PSO failed\n"); return false; }
+
+    D3D12_INDIRECT_ARGUMENT_DESC arg = {}; arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+    D3D12_COMMAND_SIGNATURE_DESC csd = {};
+    csd.ByteStride = 5 * sizeof(uint32_t); csd.NumArgumentDescs = 1; csd.pArgumentDescs = &arg;
+    if (FAILED(device->CreateCommandSignature(&csd, nullptr, IID_PPV_ARGS(&m_pageCmdSig))))
+    { printf("VSM: page cmd sig failed\n"); return false; }
+    return true;
+}
+
+void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* batches, uint32_t count)
+{
+    if (!m_valid || count == 0 || m_batchCount == 0 || !m_submeshTableVA || !m_casterVA) return;
+    GPU_CMD_BEGIN_EVENT(cmd, 120, 200, 120, L"VSM: page render");
+
+    // 遷移: params→SRV(VS読), InstancePairs→VB, DrawArgs→INDIRECT
+    D3D12_RESOURCE_BARRIER pre[4];
+    pre[0] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageCenterExtent.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    pre[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTile.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    pre[2] = CD3DX12_RESOURCE_BARRIER::Transition(m_instancePairs.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    pre[3] = CD3DX12_RESOURCE_BARRIER::Transition(m_drawArgs.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    cmd->ResourceBarrier(4, pre);
+
+    // アトラス（常時 DEPTH_WRITE）へ深度描画
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_atlasDsvHeap->GetCPUDescriptorHandleForHeapStart();
+    cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+    const UINT dim = kAtlasPagesPerRow * kPageSize;   // 8192
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)dim, (float)dim, 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, (LONG)dim, (LONG)dim };
+    cmd->RSSetViewports(1, &vp); cmd->RSSetScissorRects(1, &sc);
+
+    cmd->SetPipelineState(m_pageRenderPso.Get());
+    cmd->SetGraphicsRootSignature(m_pageRenderRS.Get());
+    cmd->SetGraphicsRootConstantBufferView(0, GetConstantsAddress());
+    const uint32_t consts[4] = { m_casterCount, kPhysicalPages, 0, 0 };
+    cmd->SetGraphicsRoot32BitConstants(1, 4, consts, 0);
+    cmd->SetGraphicsRootShaderResourceView(2, m_casterVA);
+    cmd->SetGraphicsRootShaderResourceView(3, m_pageCenterExtent->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootShaderResourceView(4, m_pageTile->GetGPUVirtualAddress());
+
+    D3D12_VERTEX_BUFFER_VIEW instVBV = {
+        m_instancePairs->GetGPUVirtualAddress(),
+        (UINT)(kMaxPairs * 2 * sizeof(uint32_t)),
+        (UINT)(2 * sizeof(uint32_t)) };
+    cmd->IASetVertexBuffers(1, 1, &instVBV);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    uint32_t n = (count <= m_batchCount) ? count : m_batchCount;
+    for (uint32_t b = 0; b < n; ++b)
+    {
+        cmd->IASetVertexBuffers(0, 1, &batches[b].vbv);
+        cmd->IASetIndexBuffer(&batches[b].ibv);
+        cmd->ExecuteIndirect(m_pageCmdSig.Get(), 1, m_drawArgs.Get(),
+            (UINT64)b * 5 * sizeof(uint32_t), nullptr, 0);
+    }
+
+    // 遷移復帰（C3: 次フレームの BuildPageParams/scatter/m2e が UAV 前提）
+    D3D12_RESOURCE_BARRIER post[4];
+    post[0] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageCenterExtent.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    post[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_pageTile.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    post[2] = CD3DX12_RESOURCE_BARRIER::Transition(m_instancePairs.Get(),
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    post[3] = CD3DX12_RESOURCE_BARRIER::Transition(m_drawArgs.Get(),
+        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->ResourceBarrier(4, post);
+    GPU_CMD_END_EVENT(cmd);
+}
+
+bool VsmSystem::CreateAtlasDebugPipeline(ID3D12Device* device)
+{
+    CD3DX12_DESCRIPTOR_RANGE srv; srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);   // t0 atlas
+    CD3DX12_ROOT_PARAMETER p[1];
+    p[0].InitAsDescriptorTable(1, &srv, D3D12_SHADER_VISIBILITY_PIXEL);
+    D3D12_STATIC_SAMPLER_DESC smp = {};
+    smp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    smp.AddressU = smp.AddressV = smp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    smp.ShaderRegister = 0; smp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 1; rs.pParameters = p; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &smp;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { if (err) printf("VSM atlasDebug RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+    if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_atlasDebugRS)))) return false;
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (FAILED(D3DReadFileToBlob(L"ToneMap_VS.cso", &vs)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\PostProcess\\ToneMap_VS.cso", &vs)))
+    { printf("VSM: ToneMap_VS.cso not found (atlasDebug)\n"); return false; }
+    if (FAILED(D3DReadFileToBlob(L"VsmAtlasDebug_PS.cso", &ps)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\Vsm\\VsmAtlasDebug_PS.cso", &ps)))
+    { printf("VSM: VsmAtlasDebug_PS.cso not found\n"); return false; }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_atlasDebugRS.Get();
+    pd.VS = CD3DX12_SHADER_BYTECODE(vs.Get());
+    pd.PS = CD3DX12_SHADER_BYTECODE(ps.Get());
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.SampleMask = UINT_MAX;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_atlasDebugPso))))
+    { printf("VSM: atlasDebug PSO failed\n"); return false; }
+    return true;
+}
+
+void VsmSystem::RenderAtlasDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv)
+{
+    if (!m_valid || !m_atlasDebugPso || !m_sceneHeapRaw) return;
+    GPU_CMD_BEGIN_EVENT(cmd, 240, 240, 120, L"VSM: atlas debug view");
+
+    auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(1, &toSrv);
+
+    cmd->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)m_w, (float)m_h, 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, (LONG)m_w, (LONG)m_h };
+    cmd->RSSetViewports(1, &vp); cmd->RSSetScissorRects(1, &sc);
+
+    ID3D12DescriptorHeap* heaps[] = { m_sceneHeapRaw };
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetPipelineState(m_atlasDebugPso.Get());
+    cmd->SetGraphicsRootSignature(m_atlasDebugRS.Get());
+    cmd->SetGraphicsRootDescriptorTable(0, m_atlasSrvGpu);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->DrawInstanced(3, 1, 0, 0);
+
+    auto back = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    cmd->ResourceBarrier(1, &back);
+    GPU_CMD_END_EVENT(cmd);
+}
+
+bool VsmSystem::CreateShadowDebugPipeline(ID3D12Device* device)
+{
+    // 専用ヒープ [0]=depth SRV(遅延), [1]=pageTable SRV, [2]=atlas SRV
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 3;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_shadowDbgHeap)))) return false;
+    m_shadowDbgStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_shadowDbgHeap->GetCPUDescriptorHandleForHeapStart();
+    // [1] pageTable SRV
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h1 = h; h1.ptr += (SIZE_T)m_shadowDbgStride;
+        D3D12_SHADER_RESOURCE_VIEW_DESC s = {}; s.Format = DXGI_FORMAT_UNKNOWN;
+        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER; s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Buffer.NumElements = kTotalVirtualPages; s.Buffer.StructureByteStride = sizeof(uint32_t);
+        device->CreateShaderResourceView(m_pageTable.Get(), &s, h1);
+    }
+    // [2] atlas SRV
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h2 = h; h2.ptr += (SIZE_T)m_shadowDbgStride * 2;
+        D3D12_SHADER_RESOURCE_VIEW_DESC s = {}; s.Format = DXGI_FORMAT_R32_FLOAT;
+        s.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_atlas.Get(), &s, h2);
+    }
+
+    CD3DX12_DESCRIPTOR_RANGE srv; srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);  // t0,t1,t2
+    CD3DX12_ROOT_PARAMETER p[2];
+    p[0].InitAsConstantBufferView(0);                                   // b0 VsmCB
+    p[1].InitAsDescriptorTable(1, &srv, D3D12_SHADER_VISIBILITY_PIXEL);
+    D3D12_STATIC_SAMPLER_DESC smp = {};
+    smp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    smp.AddressU = smp.AddressV = smp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    smp.ShaderRegister = 0; smp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 2; rs.pParameters = p; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &smp;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { if (err) printf("VSM shadowDbg RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+    if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_shadowDbgRS)))) return false;
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (FAILED(D3DReadFileToBlob(L"ToneMap_VS.cso", &vs)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\PostProcess\\ToneMap_VS.cso", &vs)))
+    { printf("VSM: ToneMap_VS.cso not found (shadowDbg)\n"); return false; }
+    if (FAILED(D3DReadFileToBlob(L"VsmShadowDebug_PS.cso", &ps)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\Vsm\\VsmShadowDebug_PS.cso", &ps)))
+    { printf("VSM: VsmShadowDebug_PS.cso not found\n"); return false; }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_shadowDbgRS.Get();
+    pd.VS = CD3DX12_SHADER_BYTECODE(vs.Get());
+    pd.PS = CD3DX12_SHADER_BYTECODE(ps.Get());
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.SampleMask = UINT_MAX;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_shadowDbgPso))))
+    { printf("VSM: shadowDbg PSO failed\n"); return false; }
+    return true;
+}
+
+void VsmSystem::RenderShadowDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv,
+                                  ID3D12Resource* sceneDepth)
+{
+    if (!m_valid || !m_shadowDbgPso || !sceneDepth) return;
+    GPU_CMD_BEGIN_EVENT(cmd, 200, 100, 200, L"VSM: shadow debug");
+
+    // depth SRV [0] を（毎回）作成
+    auto* dev = g_Engine->Device();
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h0 = m_shadowDbgHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC s = {}; s.Format = DXGI_FORMAT_R32_FLOAT;
+        s.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Texture2D.MipLevels = 1;
+        dev->CreateShaderResourceView(sceneDepth, &s, h0);
+    }
+
+    // 状態遷移: depth/atlas → PIXEL_SHADER_RESOURCE
+    D3D12_RESOURCE_BARRIER pre[2];
+    pre[0] = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    pre[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(2, pre);
+
+    cmd->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)m_w, (float)m_h, 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, (LONG)m_w, (LONG)m_h };
+    cmd->RSSetViewports(1, &vp); cmd->RSSetScissorRects(1, &sc);
+
+    ID3D12DescriptorHeap* heaps[] = { m_shadowDbgHeap.Get() };
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetPipelineState(m_shadowDbgPso.Get());
+    cmd->SetGraphicsRootSignature(m_shadowDbgRS.Get());
+    cmd->SetGraphicsRootConstantBufferView(0, GetConstantsAddress());
+    cmd->SetGraphicsRootDescriptorTable(1, m_shadowDbgHeap->GetGPUDescriptorHandleForHeapStart());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->DrawInstanced(3, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER post[2];
+    post[0] = CD3DX12_RESOURCE_BARRIER::Transition(sceneDepth,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    post[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_atlas.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     cmd->ResourceBarrier(2, post);
     GPU_CMD_END_EVENT(cmd);
 }

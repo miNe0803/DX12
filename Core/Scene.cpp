@@ -68,6 +68,7 @@ static SsrSystem* s_ssr = nullptr;
 static GtaoSystem* s_gtao = nullptr;
 static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM影を置換予定）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
+static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 
 std::wstring ReplaceExtension(const std::wstring& origin, const char* ext)
 {
@@ -1529,6 +1530,17 @@ bool Scene::Init()
 		}
 	}
 
+	// VSM V3c-m2/m3: 町の静的キャスタレコード + submesh バッチを VSM へ登録（init 時1回）。
+	if (s_town && s_vsm && s_vsm->IsValid())
+	{
+		s_vsm->SetCasterSource(s_town->CasterRecordsVA(), s_town->CasterCount(), s_town->CasterModelCount(),
+			s_town->SubmeshTableVA(), s_town->VsmBatchCount());
+		s_vsmRenderBatches.clear();
+		s_vsmRenderBatches.reserve(s_town->VsmBatches().size());
+		for (const auto& b : s_town->VsmBatches())
+			s_vsmRenderBatches.push_back(VsmSystem::RenderBatch{ b.vbv, b.ibv });
+	}
+
 	return true;
 }
 
@@ -2562,12 +2574,34 @@ void Scene::Draw()
 		Profiler::GpuMarkHiZBuildEnd(postCommandList);
 	}
 
-	// ---- VSM本体 V2/V3a: ページ要求 → 物理割当（描画=V3c/サンプル=V4）----
+	// ---- VSM本体: ページ要求→割当→ページ描画（V5a: 静止時は保持アトラス再利用でスキップ）----
+	// 既定OFF（V4町統合未のため画面に効かない）。DX12_VSM=1 で有効化。DX12_VSM_ATLAS/DX12_VSM_SHADOW で可視化。
 	if (s_vsm && s_vsm->IsValid())
 	{
-		s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
-		s_vsm->Allocate(postCommandList);
-		s_vsm->BuildPageParams(postCommandList);
+		static char s_vsmEv[8];
+		static const bool s_vsmRender = (GetEnvironmentVariableA("DX12_VSM", s_vsmEv, sizeof(s_vsmEv)) > 0);
+		if (s_vsmRender)
+		{
+			// V5a: カメラ/太陽が動いたフレームのみ再描画（描画はキャッシュ, サンプルは毎フレーム）。
+			if (s_vsm->NeedsRender())
+			{
+				s_vsm->MarkPages(postCommandList, g_Engine->GetDepthStencilResource());
+				s_vsm->Allocate(postCommandList);
+				s_vsm->BuildPageParams(postCommandList);
+				s_vsm->BuildCasterBinning(postCommandList);   // V3c-m2: (caster,page) ペアリスト構築
+				if (!s_vsmRenderBatches.empty())              // V3c-m3: 各ページへキャスタ深度を描画
+					s_vsm->RenderPages(postCommandList, s_vsmRenderBatches.data(), (uint32_t)s_vsmRenderBatches.size());
+			}
+			// 可視化/サンプルは毎フレーム（保持アトラスを参照＝V5キャッシュのアーキテクチャ）
+			static char s_vsmAtlasEv[8];
+			static const bool s_showAtlas = (GetEnvironmentVariableA("DX12_VSM_ATLAS", s_vsmAtlasEv, sizeof(s_vsmAtlasEv)) > 0);
+			if (s_showAtlas)
+				s_vsm->RenderAtlasDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle());
+			static char s_vsmShadowEv[8];
+			static const bool s_showVsmShadow = (GetEnvironmentVariableA("DX12_VSM_SHADOW", s_vsmShadowEv, sizeof(s_vsmShadowEv)) > 0);
+			if (s_showVsmShadow)
+				s_vsm->RenderShadowDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle(), g_Engine->GetDepthStencilResource());
+		}
 	}
 
 	// ---- GI G0: GTAO（スクリーン空間AO）を HDR に乗算適用（bloom/tonemap 前）----

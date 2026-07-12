@@ -32,6 +32,9 @@ public:
     static constexpr uint32_t kTotalVirtualPages    = kLevels * kVirtualPagesPerLevel; // 32768
     static constexpr uint32_t kPhysicalPages        = kAtlasPagesPerRow * kAtlasPagesPerRow; // 4096
     static constexpr uint32_t kInvalidPage          = 0xFFFFu;
+    // V3c-m2 ビニング
+    static constexpr uint32_t kMaxModels            = 1024;        // ユニークキャスタモデル上限（町 maxUniqueMeshes=500）
+    static constexpr uint32_t kMaxPairs             = 1u << 20;     // (caster,page) ペア上限=1,048,576（uint2=8MB）
 
     bool Init(ID3D12Device* device, DescriptorHeap* sceneHeap, uint32_t width, uint32_t height);
     void Shutdown();
@@ -40,6 +43,10 @@ public:
     // 毎フレーム: 太陽ライト視点＋カメラ位置からクリップマップ定数を更新（レベル中心をページ格子へスナップ）。
     void UpdateConstants(const DirectX::XMMATRIX& lightView, const DirectX::XMMATRIX& invViewProj,
                          const DirectX::XMFLOAT3& camPos, float lightZNear, float lightZFar);
+
+    // V5a: 前フレームからカメラ/太陽が変化したか（＝アトラス再描画が必要か）。静止時は false→
+    // MarkPages〜RenderPages をスキップし保持アトラスを再利用（サンプルは毎フレーム可）。
+    bool NeedsRender() const { return m_needsRender; }
 
     // V2: シーン深度から必要な仮想ページを要求バッファへマーク（要求をクリア→CS→読み戻し検証）。
     // depthResource は DEPTH_WRITE 状態で渡す。
@@ -56,6 +63,24 @@ public:
     void BuildPageParams(ID3D12GraphicsCommandList* cmd);
     ID3D12Resource* GetPageCenterExtent() const { return m_pageCenterExtent.Get(); }
     ID3D12Resource* GetPageTile() const { return m_pageTile.Get(); }
+
+    // V3c-m2: 町の静的キャスタレコード + submesh バッチ表（TownScene が用意）を登録（init 時1回）。
+    void SetCasterSource(D3D12_GPU_VIRTUAL_ADDRESS casterVA, uint32_t casterCount, uint32_t modelCount,
+                         D3D12_GPU_VIRTUAL_ADDRESS submeshTableVA, uint32_t batchCount);
+    // V3c-m2b-e: キャスタ→ページ展開→prefix-sum→scatter→間接引数生成。BuildPageParams 後。純 compute。
+    void BuildCasterBinning(ID3D12GraphicsCommandList* cmd);
+    uint32_t LastPairCount() const { return m_lastPairCount; }
+    ID3D12Resource* GetInstancePairs() const { return m_instancePairs.Get(); }
+
+    // V3c-m3: per-page 深度をアトラスへ描画（ExecuteIndirect × submesh バッチ）。BuildCasterBinning 後。
+    struct RenderBatch { D3D12_VERTEX_BUFFER_VIEW vbv; D3D12_INDEX_BUFFER_VIEW ibv; };
+    void RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* batches, uint32_t count);
+
+    // 検証: 物理アトラスをフルスクリーン表示（HDR RTV へ上書き）。DX12_VSM_ATLAS 時に呼ぶ。
+    void RenderAtlasDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv);
+    // 検証(V4前): シーン深度→worldPos→VSMサンプルで影係数を画面出力。DX12_VSM_SHADOW 時。
+    void RenderShadowDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv,
+                           ID3D12Resource* sceneDepth);
 
     D3D12_GPU_VIRTUAL_ADDRESS GetConstantsAddress() const;
     D3D12_GPU_DESCRIPTOR_HANDLE GetPageTableSrvGpu() const { return m_pageTableSrvGpu; }
@@ -85,6 +110,13 @@ private:
     bool CreateAllocPipeline(ID3D12Device* device);
     bool CreateBuildResources(ID3D12Device* device);
     bool CreateBuildPipeline(ID3D12Device* device);
+    bool CreateBinningResources(ID3D12Device* device);
+    bool CreateBinningPipelines(ID3D12Device* device);
+    bool CreateDrawArgsPipeline(ID3D12Device* device);
+    bool CreatePageRenderPipeline(ID3D12Device* device);
+    bool CreateAtlasDebugPipeline(ID3D12Device* device);
+    bool CreateShadowDebugPipeline(ID3D12Device* device);
+    void ZeroBuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res, uint64_t bytes);
 
     bool m_valid = false;
     uint32_t m_w = 0, m_h = 0;
@@ -104,6 +136,12 @@ private:
     uint8_t* m_cbMapped = nullptr;
     uint32_t m_cbFrame = 0;
     static constexpr uint32_t kCbFrames = 3;
+
+    // V5a: 再描画要否（カメラ/太陽の変化検出）
+    bool m_needsRender = true;
+    bool m_hasLastView = false;
+    DirectX::XMFLOAT4X4 m_lastLightView = {};
+    DirectX::XMFLOAT4X4 m_lastInvViewProj = {};
 
     // V2: ページ要求バッファ（RWStructuredBuffer<uint>）+ クリア用ゼロbuf + 読戻し検証
     ComPtr<ID3D12Resource> m_requestBuffer;
@@ -135,4 +173,44 @@ private:
     UINT m_buildStride = 0;
     ComPtr<ID3D12RootSignature> m_buildRootSig;
     ComPtr<ID3D12PipelineState> m_buildPso;
+
+    // V3c-m2: キャスタ→ページ ビニング（すべて root descriptor, UNORDERED_ACCESS 常駐）
+    D3D12_GPU_VIRTUAL_ADDRESS m_casterVA = 0;
+    uint32_t m_casterCount = 0;
+    uint32_t m_binModelCount = 0;
+    ComPtr<ID3D12Resource> m_pairCount;      // uint × kMaxModels（モデル別ペア数）
+    ComPtr<ID3D12Resource> m_pairBase;       // uint × kMaxModels（exclusive prefix）
+    ComPtr<ID3D12Resource> m_pairCursor;     // uint × kMaxModels（scatter 書込カーソル）
+    ComPtr<ID3D12Resource> m_instancePairs;  // uint2 × kMaxPairs（worldIdx, physPage）
+    ComPtr<ID3D12Resource> m_globalCounter;  // uint（総試行ペア数=検証/監視）
+    ComPtr<ID3D12Resource> m_binTotals;      // uint（総ペア数=Σ PairCount）
+    ComPtr<ID3D12Resource> m_binReadback[kCbFrames];
+    ComPtr<ID3D12RootSignature> m_binCountRS, m_binPrefixRS, m_binScatterRS;
+    ComPtr<ID3D12PipelineState> m_binCountPso, m_binPrefixPso, m_binScatterPso;
+    uint32_t m_binFrame = 0;
+    uint32_t m_lastPairCount = 0;
+    uint32_t m_lastPairAttempts = 0;
+
+    // V3c-m2e/m3: 間接引数 + ページ描画
+    static constexpr uint32_t kMaxBatches = 4096;
+    D3D12_GPU_VIRTUAL_ADDRESS m_submeshTableVA = 0;
+    uint32_t m_batchCount = 0;
+    ComPtr<ID3D12Resource> m_drawArgs;              // DrawArgs(20B) × kMaxBatches
+    ComPtr<ID3D12RootSignature> m_argsRS;
+    ComPtr<ID3D12PipelineState> m_argsPso;
+    ComPtr<ID3D12RootSignature> m_pageRenderRS;
+    ComPtr<ID3D12PipelineState> m_pageRenderPso;
+    ComPtr<ID3D12CommandSignature> m_pageCmdSig;
+
+    // 検証: アトラス可視化
+    ID3D12DescriptorHeap* m_sceneHeapRaw = nullptr;   // シーン記述子ヒープ（atlas SRV を含む）
+    ComPtr<ID3D12RootSignature> m_atlasDebugRS;
+    ComPtr<ID3D12PipelineState> m_atlasDebugPso;
+
+    // 検証: 影サンプル（フルスクリーン）。専用ヒープ [0]=depth SRV,[1]=pageTable SRV,[2]=atlas SRV
+    ComPtr<ID3D12DescriptorHeap> m_shadowDbgHeap;
+    UINT m_shadowDbgStride = 0;
+    bool m_shadowDbgSrvReady = false;
+    ComPtr<ID3D12RootSignature> m_shadowDbgRS;
+    ComPtr<ID3D12PipelineState> m_shadowDbgPso;
 };

@@ -90,6 +90,18 @@ public:
     // 検証用: 最初の壁/awning 用水滴デカール ( UE Z>300cm ) のワールド中心。
     bool FirstDripWorld(DirectX::XMFLOAT3& out) const;
 
+    // VSM V3c: GPU駆動ページ描画用の静的キャスタレコード（transpose(world)+worldCenter/半径+modelId, 96B）。
+    D3D12_GPU_VIRTUAL_ADDRESS CasterRecordsVA() const { return m_casterRecRes ? m_casterRecRes->GetGPUVirtualAddress() : 0; }
+    uint32_t CasterCount() const { return m_casterCount; }
+    uint32_t CasterModelCount() const { return m_casterModelCount; }
+
+    // VSM V3c-m3: per-submesh 描画バッチ（modelId 順）。m3 の CPU ループが VB/IB を差替えつつ ExecuteIndirect する。
+    struct VsmBatch { D3D12_VERTEX_BUFFER_VIEW vbv; D3D12_INDEX_BUFFER_VIEW ibv; UINT indexCount; uint32_t modelId; };
+    const std::vector<VsmBatch>& VsmBatches() const { return m_vsmBatches; }
+    uint32_t VsmBatchCount() const { return (uint32_t)m_vsmBatches.size(); }
+    // GPU SubmeshGeoTable（batch毎 {indexCount, startIndex=0, baseVertex=0, modelId}, 16B）。m2e が間接引数生成に使用。
+    D3D12_GPU_VIRTUAL_ADDRESS SubmeshTableVA() const { return m_submeshTableRes ? m_submeshTableRes->GetGPUVirtualAddress() : 0; }
+
 private:
     struct SubMesh
     {
@@ -180,6 +192,14 @@ private:
     std::unordered_map<std::string, D3D12_GPU_DESCRIPTOR_HANDLE> m_overrideCache; // matName -> slot0 上書きテーブル
     std::vector<Instance> m_instances;
     std::unordered_map<std::string, std::string> m_texIndex; // 小文字basename -> フルパス
+
+    // VSM V3c キャスタレコード（96B: transpose(world)+centerRadius+meta(modelId)）。DrawDepth と同条件で収集。
+    ComPtr<ID3D12Resource> m_casterRecRes;
+    uint32_t m_casterCount = 0;
+    uint32_t m_casterModelCount = 0;
+    std::vector<VsmBatch> m_vsmBatches;          // per-submesh 描画バッチ（modelId 順）
+    ComPtr<ID3D12Resource> m_submeshTableRes;    // SubmeshGeo{indexCount,0,0,modelId} × batchCount
+    void BuildCasterRecords();
     size_t m_loadedMeshes = 0;
     size_t m_missingMeshes = 0;
 

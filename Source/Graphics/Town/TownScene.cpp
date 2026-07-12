@@ -674,6 +674,64 @@ void TownScene::DrawDepth(ID3D12GraphicsCommandList* cmd, const XMMATRIX& lightV
 }
 
 //=============================================================================
+// VSM V3c: GPU駆動ページ描画用のキャスタレコードを構築（load時1回）。
+// DrawDepth と同一条件でキャスタを収集し、96B レコード（transpose(world)+worldCenter/半径+modelId）を
+// DEFAULT バッファへ。modelId はユニーク model へ密採番（scatter の per-model グループ化用）。
+// worldCenter/worldRadius は既にスケール込みで算出済み（レビュー H1: ローカル半径を使わない）。
+void TownScene::BuildCasterRecords()
+{
+    struct CasterRec { XMFLOAT4X4 world; XMFLOAT4 centerRadius; uint32_t meta[4]; };
+    struct SubmeshGeo { uint32_t indexCount, startIndex, baseVertex, modelId; };
+    static_assert(sizeof(CasterRec) == 96, "CasterRec must match VsmBinning.hlsli Caster (96B)");
+    static_assert(sizeof(SubmeshGeo) == 16, "SubmeshGeo must be 16B");
+
+    // ユニーク（キャスト）モデルへ密採番。CasterRecords と 描画バッチ/SubmeshGeoTable で共有。
+    std::unordered_map<TownModel*, uint32_t> modelId;
+    std::vector<TownModel*> uniqueModels;
+    std::vector<CasterRec> recs;
+    recs.reserve(m_instances.size());
+    for (const Instance& inst : m_instances)
+    {
+        if (!inst.castShadow || inst.isFoliage) continue;         // DrawDepth と同条件
+        if (!inst.model || inst.model->subs.empty()) continue;
+        auto it = modelId.find(inst.model);
+        uint32_t mid;
+        if (it == modelId.end()) { mid = (uint32_t)uniqueModels.size(); modelId.emplace(inst.model, mid); uniqueModels.push_back(inst.model); }
+        else mid = it->second;
+        CasterRec r;
+        r.world = inst.worldT;   // 既に transpose(BuildLocal*G)（描画 VS 用）
+        r.centerRadius = XMFLOAT4(inst.worldCenter.x, inst.worldCenter.y, inst.worldCenter.z, inst.worldRadius);
+        r.meta[0] = mid; r.meta[1] = 0; r.meta[2] = 0; r.meta[3] = 0;
+        recs.push_back(r);
+    }
+    m_casterCount = (uint32_t)recs.size();
+    m_casterModelCount = (uint32_t)uniqueModels.size();
+    if (!recs.empty())
+        m_casterRecRes = MakeGpuBuffer(recs.data(), recs.size() * sizeof(CasterRec));
+
+    // m3 描画バッチ + SubmeshGeoTable（modelId 順に各モデルの全 submesh。startIndex/baseVertex=0=submesh毎VB）。
+    std::vector<SubmeshGeo> geos;
+    m_vsmBatches.clear();
+    for (uint32_t mid = 0; mid < uniqueModels.size(); ++mid)
+    {
+        for (const SubMesh& s : uniqueModels[mid]->subs)
+        {
+            if (!s.vbRes || !s.ibRes || s.indexCount == 0) continue;
+            VsmBatch b; b.vbv = s.vbv; b.ibv = s.ibv; b.indexCount = s.indexCount; b.modelId = mid;
+            m_vsmBatches.push_back(b);
+            SubmeshGeo g{ s.indexCount, 0u, 0u, mid };
+            geos.push_back(g);
+        }
+    }
+    if (!geos.empty())
+        m_submeshTableRes = MakeGpuBuffer(geos.data(), geos.size() * sizeof(SubmeshGeo));
+
+    printf("[VSM] caster records: %u casters, %u unique models, %zu draw batches (%.2f MB recs)\n",
+        m_casterCount, m_casterModelCount, m_vsmBatches.size(), recs.size() * sizeof(CasterRec) / (1024.0 * 1024.0));
+    fflush(stdout);
+}
+
+//=============================================================================
 // T3D Landscape アクター ( CollisionHeightData ) から地形グリッドメッシュを生成。
 void TownScene::LoadLandscapes()
 {
@@ -1351,6 +1409,7 @@ bool TownScene::Init(ID3D12Device* device, DescriptorHeap* heap, const TownConfi
         return a.overrideTable.ptr < b.overrideTable.ptr;
     });
     if (m_cfg.enableLandscape) LoadLandscapes();
+    BuildCasterRecords();   // VSM V3c: 静的キャスタレコード（FlushUploads 前に MakeGpuBuffer へ蓄積）
     FlushUploads();   // 蓄積した VRAM コピーをまとめて実行
 
     // デファードデカール/ガラスSSR 用: シーン深度(R32_TYPELESS リソース)の R32_FLOAT SRV を
