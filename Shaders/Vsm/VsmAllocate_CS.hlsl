@@ -25,6 +25,7 @@ cbuffer AllocCb : register(b0)
     uint gPhysCap;       // = kPhysicalPages（診断でDX12_VSM_POOLCAP縮小可）
     uint gCacheMode;     // 0=非キャッシュ, 1=永続キャッシュ
     uint gFrame;         // 現在のVSM描画フレーム番号（同フレーム退去防止用）
+    uint gPhase;         // cache: 0=touch(可視ページをgFrameで保護), 1=allocate
 };
 
 [numthreads(64, 1, 1)]
@@ -32,6 +33,20 @@ void main(uint3 id : SV_DispatchThreadID)
 {
     uint idx = id.x;
     if (idx >= gTotalVirtual) return;
+
+    // 近似LRU phase0（cache専用）: 今フレーム要求されていて既に常駐(residentAP一致)のページ＝「画面に映っている」
+    // ので、その物理を gFrame で touch し、後段の退去(phase1)から保護する。回転churnで可視ページがFIFOに
+    // 巻き込まれて明滅する破綻を防ぐ（FIFOは割当順で退去するが、これで可視ページは退去対象外になる）。
+    if (gCacheMode != 0u && gPhase == 0u)
+    {
+        uint req = Request[idx];
+        if (req != 0u)
+        {
+            uint cur = PageTable[idx];
+            if (cur != 0xFFFFu && ResidentAP[idx] == req) PhysFrame[cur] = gFrame;
+        }
+        return;
+    }
 
     if (gCacheMode == 0u)
     {

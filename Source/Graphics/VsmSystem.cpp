@@ -276,10 +276,11 @@ void VsmSystem::MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthR
     cmd->SetComputeRootDescriptorTable(2, gUav);
     // VSMを近距離の連続レベルに限定（これより遠い=高レベルの画素はページ要求せず→町側でCSM）。
     // これでプール溢れ(密な遠景視界)による散在パッチ/ブロック破綻を防ぎ、近VSM＋遠CSMの綺麗な境界にする。
-    // 既定 5（レベル0-5 ≒ 近~128m を VSM高精細、以遠は CSM）。密な街路の遠景がプールを溢れさせるのを防ぐ。
+    // 既定 4（レベル0-4 ≒ 近~64m を VSM高精細、以遠は CSM）。グレージング地面視点でも作業集合をほぼ
+    // プール(4096)内に収める（level5だと ~4316, level4で ~4146）。touch-LRU と併せて破綻を防ぐ。
     // DX12_VSM_MAXLEVEL で調整（大=VSM遠くまで/溢れ risk, 小=近だけVSM・遠CSM）。
     static uint32_t s_maxMarkLevel = [] {
-        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 5u;
+        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 4u;
     }();
     cmd->SetComputeRoot32BitConstants(3, 1, &s_maxMarkLevel, 0);
     cmd->Dispatch((m_w + 7) / 8, (m_h + 7) / 8, 1);
@@ -409,7 +410,7 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
 bool VsmSystem::CreateAllocPipeline(ID3D12Device* device)
 {
     CD3DX12_ROOT_PARAMETER params[3] = {};
-    params[0].InitAsConstants(4, 0);   // b0: gTotalVirtual, gPhysCap, pad, pad
+    params[0].InitAsConstants(5, 0);   // b0: gTotalVirtual, gPhysCap, gCacheMode, gFrame, gPhase
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     params[1].InitAsDescriptorTable(1, &srvR);
     CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0);  // u0..u5 (u3=dirty,u4=residentAP,u5=physFrame)
@@ -471,12 +472,22 @@ void VsmSystem::Allocate(ID3D12GraphicsCommandList* cmd)
     // 強制再現できるようにする（ユーザーの密な街路視点の破綻を切り分けるため）。0=無効(=4096)。
     static uint32_t s_poolCap = [] { char e[16]; return GetEnvironmentVariableA("DX12_VSM_POOLCAP", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 0u; }();
     uint32_t effCap = (s_poolCap > 0u && s_poolCap < kPhysicalPages) ? s_poolCap : kPhysicalPages;
-    uint32_t consts[4] = { kTotalVirtualPages, effCap, m_cacheMode ? 1u : 0u, ++m_allocFrameCounter };
-    cmd->SetComputeRoot32BitConstants(0, 4, consts, 0);
+    uint32_t frame = ++m_allocFrameCounter;
     D3D12_GPU_DESCRIPTOR_HANDLE gbase = m_allocHeap->GetGPUDescriptorHandleForHeapStart();
     cmd->SetComputeRootDescriptorTable(1, gbase);                          // t0 Request SRV
-    D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += m_allocStride;   // u0..u2 = [1,2,3]
+    D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += m_allocStride;   // u0..u5
     cmd->SetComputeRootDescriptorTable(2, gUav);
+    if (m_cacheMode)
+    {
+        // 近似LRU phase0: 可視(=今フレーム要求かつ常駐)ページの物理を gFrame で touch し退去から保護。
+        uint32_t c0[5] = { kTotalVirtualPages, effCap, 1u, frame, 0u };
+        cmd->SetComputeRoot32BitConstants(0, 5, c0, 0);
+        cmd->Dispatch((kTotalVirtualPages + 63) / 64, 1, 1);
+        auto uav = CD3DX12_RESOURCE_BARRIER::UAV(m_physFrame.Get()); cmd->ResourceBarrier(1, &uav);
+    }
+    // phase1: 割当（cache時は可視ページを避けて退去）。非cacheは gPhase 無視。
+    uint32_t consts[5] = { kTotalVirtualPages, effCap, m_cacheMode ? 1u : 0u, frame, 1u };
+    cmd->SetComputeRoot32BitConstants(0, 5, consts, 0);
     cmd->Dispatch((kTotalVirtualPages + 63) / 64, 1, 1);
 
     // Request を UNORDERED_ACCESS へ戻す（次フレームのマーククリア用）

@@ -1700,6 +1700,17 @@ void Scene::Update()
 		static float s_panSpd = [] { char e[16]; return GetEnvironmentVariableA("DX12_VSM_AUTOPAN", e, sizeof(e)) > 0 ? (float)atof(e) : 0.0f; }();
 		if (s_panSpd != 0.0f && g_Camera)
 			g_Camera->SetPosition(DirectX::XMVectorAdd(g_Camera->GetPosition(), DirectX::XMVectorSet(s_panSpd, 0.0f, 0.0f, 0.0f)));
+		// 検証用: DX12_VSM_AUTOYAW=<rad/frame> で毎フレーム水平回転（位置固定・向きだけ変化）。
+		// 回転は見えるページ集合を総入れ替え＝キャッシュ churn/プール溢れを起こす。平行移動では出ない破綻を再現。
+		static float s_yawSpd = [] { char e[16]; return GetEnvironmentVariableA("DX12_VSM_AUTOYAW", e, sizeof(e)) > 0 ? (float)atof(e) : 0.0f; }();
+		if (s_yawSpd != 0.0f && g_Camera)
+		{
+			static float s_yawAcc = 0.0f; s_yawAcc += s_yawSpd;
+			XMVECTOR p = g_Camera->GetPosition();
+			// LookAt は垂直反転仕様: target Y をカメラより上に置くと見下ろし（地面グレージング）になる。
+			XMVECTOR tgt = XMVectorAdd(p, XMVectorSet(sinf(s_yawAcc) * 10.0f, 8.0f, cosf(s_yawAcc) * 10.0f, 0.0f));
+			g_Camera->LookAt(tgt);
+		}
 	}
 
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
