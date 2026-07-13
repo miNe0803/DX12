@@ -34,11 +34,12 @@ void main(uint3 id : SV_DispatchThreadID)
     uint n = 0;
     for (uint L = 0; L < levels; ++L)
     {
-        int4 rc = VsmLevelRect(Cl, r, L);
-        for (int py = rc.y; py <= rc.w; ++py)
-            for (int px = rc.x; px <= rc.z; ++px)
+        int4 rc = VsmLevelRect(Cl, r, L);   // 絶対ページ矩形（窓内）
+        for (int ay = rc.y; ay <= rc.w; ++ay)
+            for (int ax = rc.x; ax <= rc.z; ++ax)
             {
-                uint vp = VsmCellVp(L, (uint)px, (uint)py, vppr);
+                uint sx = VsmAbsToSlot(ax, vppr), sy = VsmAbsToSlot(ay, vppr);   // 世界固定スロット
+                uint vp = VsmCellVp(L, sx, sy, vppr);
                 uint phys = PageTable[vp];
                 if (phys != 0xFFFFu && phys < gPhysCap) ++n;   // レビュー H4
             }

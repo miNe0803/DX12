@@ -24,16 +24,26 @@ uint Vsm_SelectLevel(float2 lightXY, float2 camLightXY, uint levelCount, float b
     return min(lvl, levelCount - 1u);
 }
 
-// V5b 絶対トロイダル: origin=窓原点(整数ページ座標), pageWorld=1ページの世界幅。
-// rel=lightXY/pw-origin は窓内で [0,vppr)。原点を先に引くので大座標でも高精度(レビューF3)。
-// 返すスロット座標は窓相対＝トロイダルスロット（可視点は必ず窓内なので clamp で足りる）。
+// V5b 真トロイダル: origin=窓原点(整数ページ座標), pageWorld=1ページの世界幅。
+// スロット = 絶対ページ mod vppr（= (origin + 窓内オフセット) & (vppr-1)）。これによりスロットは
+// **世界固定**（カメラ移動で origin が変わっても同じ世界ページは同じスロット）＝永続キャッシュが移動でも成立。
+// rel は origin を先に引くので大座標でも高精度(レビューF3)。inPageUV は frac(rel)=ページ内位置。
 uint2 Vsm_VirtualPage(float2 lightXY, float2 origin, float pageWorld, uint vppr, out float2 inPageUV)
 {
     // F3精度対策: origin*pageWorld(≈カメラ光空間)を先にワールド単位で引いてから割る→被除数が小さく高精度。
     float2 rel = (lightXY - origin * pageWorld) / max(pageWorld, 1e-6f);
     inPageUV = frac(rel);
-    int2 s = clamp((int2)floor(rel), 0, (int)vppr - 1);
+    int2 sw = clamp((int2)floor(rel), 0, (int)vppr - 1);   // 窓内オフセット [0,vppr)
+    int2 originI = (int2)origin;                            // 窓原点（整数ページ座標）
+    int2 s = (originI + sw) & (int)(vppr - 1u);             // 絶対ページの剰余＝世界固定スロット（負も二の補数で巻く）
     return (uint2)s;
+}
+
+// トロイダルスロット(px or py) → 現在窓 [origin, origin+vppr) 内の絶対ページ座標。
+// BuildPageParams が「そのスロットが現在保持すべき世界ページ」を復元するのに使う。
+int Vsm_SlotToAbsPage(int slot, int origin, uint vppr)
+{
+    return origin + ((slot - origin) & (int)(vppr - 1u));
 }
 
 // ページテーブルの線形index

@@ -1694,6 +1694,14 @@ void Scene::Update()
 	if (!sc)
 		return;
 
+	// 検証用: DX12_VSM_AUTOPAN=<m/frame> で毎フレーム g_Camera を X 方向へ平行移動。
+	// 移動時の VSM キャッシュ挙動（トロイダルスロットの wrap・カウンタ・影の正しさ）を静止キャプチャで検証するため。
+	{
+		static float s_panSpd = [] { char e[16]; return GetEnvironmentVariableA("DX12_VSM_AUTOPAN", e, sizeof(e)) > 0 ? (float)atof(e) : 0.0f; }();
+		if (s_panSpd != 0.0f && g_Camera)
+			g_Camera->SetPosition(DirectX::XMVectorAdd(g_Camera->GetPosition(), DirectX::XMVectorSet(s_panSpd, 0.0f, 0.0f, 0.0f)));
+	}
+
 	float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
 	XMMATRIX viewMat = g_Camera->GetViewMatrix();
 	XMMATRIX projMat = g_Camera->GetProjectionMatrix(aspect);
@@ -2650,6 +2658,11 @@ void Scene::Draw()
 			s_vsmAtlasReady = true;
 		}
 		// 可視化/サンプルは毎フレーム（保持アトラスを参照＝V5キャッシュのアーキテクチャ）
+		// V5b 暫定セーフガード（LRU退去 未実装のため）: 永続キャッシュの物理プールが枯渇に近づいたら
+		// 次フレームに一度リセット（全クリア→現在ビュー再フィル）。長時間移動で常駐が 4096 超過→遠方の
+		// 影が抜け続ける「恒久劣化」を防ぐ。移動継続中のみ発火（静止時は増えないので無ヒッチ）。
+		if (s_vsmCache && s_vsm->LastResidentPages() > (VsmSystem::kPhysicalPages * 3u / 4u))
+			s_vsm->RequestCacheReset();
 		if (s_vsmAtlasDebug)
 			s_vsm->RenderAtlasDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle());
 		if (s_vsmShadowDebug)

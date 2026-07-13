@@ -333,6 +333,13 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_dirtyPageTable)))) return false;
     }
+    // V5b: residentAP（vp -> 保持中の絶対ページ packed）。wrap 検出用。
+    {
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer((UINT64)kTotalVirtualPages * sizeof(uint32_t),
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_residentAP)))) return false;
+    }
     // V5b: PageTable を 0xFFFF(=kInvalidPage) で初期化するアップロード元（リセット時にコピー）。
     {
         auto up = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
@@ -354,9 +361,9 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_counterReadback[i])))) return false;
 
-    // ヒープ [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV,[4]=DirtyPageTable UAV
+    // ヒープ [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV,[4]=DirtyPageTable UAV,[5]=residentAP UAV
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 5;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 6;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_allocHeap)))) return false;
     m_allocStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -377,6 +384,7 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
     mkUav(m_physToVirtual.Get(), kPhysicalPages);
     mkUav(m_counter.Get(), 1);
     mkUav(m_dirtyPageTable.Get(), kTotalVirtualPages);   // u3 (cache)
+    mkUav(m_residentAP.Get(), kTotalVirtualPages);       // u4 (cache: wrap 検出キー)
     return true;
 }
 
@@ -386,7 +394,7 @@ bool VsmSystem::CreateAllocPipeline(ID3D12Device* device)
     params[0].InitAsConstants(4, 0);   // b0: gTotalVirtual, gPhysCap, pad, pad
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     params[1].InitAsDescriptorTable(1, &srvR);
-    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 4, 0);  // u0,u1,u2,u3(cache dirty)
+    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0);  // u0..u4 (u3=dirty,u4=residentAP)
     params[2].InitAsDescriptorTable(1, &uavR);
     D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 3; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
@@ -1001,6 +1009,16 @@ void VsmSystem::ResetCacheGpu(ID3D12GraphicsCommandList* cmd)
         cmd->ResourceBarrier(1, &b);
         cmd->CopyBufferRegion(m_counter.Get(), 0, m_zeroUpload.Get(), 0, sizeof(uint32_t));
         b = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+    // residentAP ← 0（全スロット「未保持」。次フレーム全要求が mismatch→再割当）
+    {
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_residentAP.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_residentAP.Get(), 0, m_zeroUpload.Get(), 0, ptBytes);
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_residentAP.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cmd->ResourceBarrier(1, &b);
     }

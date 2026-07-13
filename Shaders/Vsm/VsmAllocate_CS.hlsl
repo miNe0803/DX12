@@ -11,11 +11,12 @@
 //                描画は DirtyPageTable を binning に流すことで新規ページのみ（RenderPages はクリア無し、
 //                phys→tile が安定＝新規physのタイルは初期化クリア以降未使用でpristine=1.0）。
 // ============================================================
-StructuredBuffer<uint>   Request        : register(t0);   // vp -> 要求フラグ(V2)
+StructuredBuffer<uint>   Request        : register(t0);   // vp -> 要求(V2)。cache時は bit31=有効|packed絶対ページ
 RWStructuredBuffer<uint>  PageTable      : register(u0);  // vp -> phys (0xFFFF=未割当) ※永続（町がサンプル）
 RWStructuredBuffer<uint>  PhysToVirtual  : register(u1);  // phys -> vp (描画で射影決定)
 RWStructuredBuffer<uint>  Counter        : register(u2);  // [0]=割当数（cache時は高水位）
 RWStructuredBuffer<uint>  DirtyPageTable : register(u3);  // vp -> phys（今フレーム新規のみ, 他 0xFFFF）cache専用
+RWStructuredBuffer<uint>  ResidentAP     : register(u4);  // vp -> スロット保持中の絶対ページ(packed) cache専用（wrap検出）
 
 cbuffer AllocCb : register(b0)
 {
@@ -48,24 +49,31 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // ---- 永続キャッシュ（V5b）----
-    DirtyPageTable[idx] = 0xFFFFu;   // 毎フレーム dirty をクリア（新規のみ後で印）
-    if (Request[idx] != 0u)
+    // ---- 永続キャッシュ（V5b, 真トロイダル + residentAP）----
+    DirtyPageTable[idx] = 0xFFFFu;   // 毎フレーム dirty をクリア（新規/巻いたスロットのみ後で印）
+    uint req = Request[idx];         // bit31=有効, 下位=packed絶対ページ
+    if (req != 0u)
     {
         uint cur = PageTable[idx];
-        if (cur == 0xFFFFu)          // 未resident → 新規割当（永続カウンタ）
+        // スロットが未resident、または保持中の世界ページ(residentAP)が要求と違う(=カメラ移動で
+        // トロイダルスロットが別の世界ページへ巻いた)なら、新規物理ページを割当てて再描画する。
+        if (cur == 0xFFFFu || ResidentAP[idx] != req)
         {
             uint phys;
             InterlockedAdd(Counter[0], 1u, phys);
             if (phys < gPhysCap)
             {
-                PageTable[idx]      = phys;
+                PageTable[idx]      = phys;   // 新しい物理(=初期クリア以降未使用でpristine 1.0)へ張替え
                 PhysToVirtual[phys] = idx;
-                DirtyPageTable[idx] = phys;   // 今フレーム新規＝描画対象
+                ResidentAP[idx]     = req;    // このスロットが今保持する世界ページを記録
+                DirtyPageTable[idx] = phys;   // 今フレーム描画対象
             }
-            // 溢れ時は PageTable=0xFFFF のまま（未割当=lit）。次フレーム再挑戦。
+            else
+            {
+                PageTable[idx] = 0xFFFFu;      // プール枯渇 → 未割当(lit)。stale回避（退去は次段LRU）。
+            }
         }
-        // resident は保持（再描画不要）。
+        // residentAP 一致（同じ世界ページを継続保持）→ 再描画不要。キャッシュ命中。
     }
     // 非要求は PageTable を保持（永続キャッシュの本体）。
 }

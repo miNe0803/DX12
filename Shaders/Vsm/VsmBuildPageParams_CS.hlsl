@@ -34,14 +34,19 @@ void main(uint3 id : SV_DispatchThreadID)
     uint perLevel = vppr * vppr;
     uint level = vp / perLevel;
     uint rem   = vp % perLevel;
-    uint py = rem / vppr;   // スロット sy
-    uint px = rem % vppr;   // スロット sx
+    uint py = rem / vppr;   // トロイダルスロット sy
+    uint px = rem % vppr;   // トロイダルスロット sx
 
-    // V5b: lce=(originX,originY,pageWorld,texel)。絶対ページ左端(光空間)= (origin+slot)*pageWorld。
+    // V5b 真トロイダル: スロットは絶対ページの剰余(ap & (vppr-1))。origin=窓原点(整数ページ)から
+    // 現在窓 [origin, origin+vppr) 内の絶対ページを復元: ap = origin + ((slot - origin) & (vppr-1))。
     float4 lw = (level < levels) ? Vsm_LevelCenterExtent[level] : Vsm_LevelCenterExtent[0];
     float pw = lw.z;
-    float ox = (lw.x + (float)px) * pw;
-    float oy = (lw.y + (float)py) * pw;
+    int m = (int)vppr - 1;
+    int ox_i = (int)lw.x, oy_i = (int)lw.y;
+    int apx = ox_i + (((int)px - ox_i) & m);
+    int apy = oy_i + (((int)py - oy_i) & m);
+    float ox = (float)apx * pw;   // 絶対ページ左端(光空間X)
+    float oy = (float)apy * pw;
     PageCenterExtent[phys] = float4(ox, oy, pw, (float)level);   // (ページ左端X, Y, pageWorld, level)
     PageTile[phys] = uint4(px, py, phys % appr, phys / appr);
 }

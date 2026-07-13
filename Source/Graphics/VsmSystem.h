@@ -193,8 +193,10 @@ private:
     bool m_cacheMode = false;         // DX12_VSM_CACHE / Scene::SetVsm... 経由
     bool m_cacheNeedsReset = true;    // 次回描画で PageTable/Counter/アトラスを初期化
     ComPtr<ID3D12Resource> m_dirtyPageTable;      // vp->phys（今フレーム新規のみ, 他0xFFFF）binning へ流す
+    ComPtr<ID3D12Resource> m_residentAP;          // vp-> そのスロットが現在保持する絶対ページ(packed)。移動でスロットが
+                                                  // 別世界ページに巻いた(wrap)ことを検出し再描画するためのキー。
     ComPtr<ID3D12Resource> m_pageTableInit;       // 0xFFFF 埋めアップロード（リセット時 PageTable へコピー）
-    void ResetCacheGpu(ID3D12GraphicsCommandList* cmd);   // PageTable←0xFFFF, Counter←0, アトラス全クリア
+    void ResetCacheGpu(ID3D12GraphicsCommandList* cmd);   // PageTable←0xFFFF, Counter←0, residentAP←0, アトラス全クリア
 
     // V3c-m1: per-page 描画パラメータ
     ComPtr<ID3D12Resource> m_pageCenterExtent;   // float4/page: cx,cy,extent,level

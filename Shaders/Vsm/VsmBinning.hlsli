@@ -35,28 +35,36 @@ float3 VsmCasterLS(Caster c)
     return mul(float4(c.centerRadius.xyz, 1.0f), Vsm_LightView).xyz;
 }
 
-// レベル L でキャスタ境界球が覆う仮想ページ矩形(inclusive)。空なら x>z or y>w。
-// count/scatter で完全同一の入力→出力（共有関数なので bit-identical）。
+// レベル L でキャスタ境界球が覆う「絶対ページ矩形」を現在窓 [origin, origin+vppr) に切って返す(inclusive)。
+// 空なら x>z or y>w。真トロイダル: 返すのは絶対ページ座標。count/scatter が各絶対ページを
+// スロット=(ap & (vppr-1)) へ写す（世界固定スロット）。count/scatter で完全同一の入力→出力。
 int4 VsmLevelRect(float3 Cl, float r, uint L)
 {
-    // V5b: lce=(originX,originY,pageWorld,texel)。絶対ページ floor((Cl±r)/pw) を窓原点相対スロットへ。
+    // V5b: lce=(originX,originY,pageWorld,texel)。origin=窓原点(整数ページ)。
     float4 lw = Vsm_LevelCenterExtent[L];
     float  pw = lw.z;
-    float  vppr = Vsm_Params.z;
-    int x0 = (int)floor((Cl.x - r) / pw) - (int)lw.x;
-    int x1 = (int)floor((Cl.x + r) / pw) - (int)lw.x;
-    int y0 = (int)floor((Cl.y - r) / pw) - (int)lw.y;
-    int y1 = (int)floor((Cl.y + r) / pw) - (int)lw.y;
-    int hi = (int)vppr - 1;
-    x0 = max(x0, 0); y0 = max(y0, 0);
-    x1 = min(x1, hi); y1 = min(y1, hi);
-    return int4(x0, y0, x1, y1);
+    int    vppr = (int)Vsm_Params.z;
+    int ox = (int)lw.x, oy = (int)lw.y;
+    int ax0 = (int)floor((Cl.x - r) / pw);
+    int ax1 = (int)floor((Cl.x + r) / pw);
+    int ay0 = (int)floor((Cl.y - r) / pw);
+    int ay1 = (int)floor((Cl.y + r) / pw);
+    // 現在窓 [origin, origin+vppr) に交差クランプ（窓外は非常駐なので不要）。
+    ax0 = max(ax0, ox); ay0 = max(ay0, oy);
+    ax1 = min(ax1, ox + vppr - 1); ay1 = min(ay1, oy + vppr - 1);
+    return int4(ax0, ay0, ax1, ay1);   // 絶対ページ座標（inclusive, 窓内）
 }
 
-// (L, px, py) → ページテーブル線形index（Vsm_PageTableIndex と一致）
+// (L, スロットpx, スロットpy) → ページテーブル線形index（Vsm_PageTableIndex と一致）
 uint VsmCellVp(uint L, uint px, uint py, uint vppr)
 {
     return L * (vppr * vppr) + py * vppr + px;
+}
+
+// 絶対ページ座標 → 世界固定トロイダルスロット（Vsm_VirtualPage と一致: ap & (vppr-1)）
+uint VsmAbsToSlot(int absPage, uint vppr)
+{
+    return (uint)(absPage & (int)(vppr - 1u));
 }
 
 #endif // VSM_BINNING_HLSLI

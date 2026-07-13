@@ -40,6 +40,13 @@ void main(uint3 id : SV_DispatchThreadID)
                                Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);  // pageWorld
     uint idx = Vsm_PageTableIndex(L, vp, (uint)Vsm_Params.z);
 
-    uint prev;
-    InterlockedOr(Request[idx], 1u, prev);
+    // V5b 永続キャッシュ: 要求フラグに「このスロットが今欲しい絶対ページ(packed)」を載せる。
+    // Allocate 側が residentAP と比較し、別世界ページに巻いた(wrap)スロットだけ再割当/再描画する。
+    // bit31=有効, [29:15]=apX(15bit signed), [14:0]=apY。窓内では 1スロット=1絶対ページなので
+    // 同一スロットへ書く全画素は同値→非アトミック格納で安全（非キャッシュ経路も !=0 判定で従来通り）。
+    float pw = Vsm_LevelCenterExtent[L].z;
+    int apx = (int)floor(ls.x / max(pw, 1e-6f));
+    int apy = (int)floor(ls.y / max(pw, 1e-6f));
+    uint packed = 0x80000000u | (((uint)(apx & 0x7FFF)) << 15) | ((uint)(apy & 0x7FFF));
+    Request[idx] = packed;
 }
