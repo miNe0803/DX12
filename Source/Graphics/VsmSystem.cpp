@@ -276,11 +276,11 @@ void VsmSystem::MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthR
     cmd->SetComputeRootDescriptorTable(2, gUav);
     // VSMを近距離の連続レベルに限定（これより遠い=高レベルの画素はページ要求せず→町側でCSM）。
     // これでプール溢れ(密な遠景視界)による散在パッチ/ブロック破綻を防ぎ、近VSM＋遠CSMの綺麗な境界にする。
-    // 既定 4（レベル0-4 ≒ 近~64m を VSM高精細、以遠は CSM）。グレージング地面視点でも作業集合をほぼ
-    // プール(4096)内に収める（level5だと ~4316, level4で ~4146）。touch-LRU と併せて破綻を防ぐ。
-    // DX12_VSM_MAXLEVEL で調整（大=VSM遠くまで/溢れ risk, 小=近だけVSM・遠CSM）。
+    // 既定 6（レベル0-6 ≒ 近~256m を VSM高精細、以遠=遠景背景のみ CSM）。VSM主軸化: プール 9216 に拡大したので
+    // 町全体を VSM で賄える。グレージング地面(level5=4316,level7≈5-6k)も 9216 内に収容。touch-LRU で回転も可視保護。
+    // DX12_VSM_MAXLEVEL で調整（大=VSM遠くまで, 小=近だけVSM・遠CSM）。
     static uint32_t s_maxMarkLevel = [] {
-        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 4u;
+        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 6u;
     }();
     cmd->SetComputeRoot32BitConstants(3, 1, &s_maxMarkLevel, 0);
     cmd->Dispatch((m_w + 7) / 8, (m_h + 7) / 8, 1);

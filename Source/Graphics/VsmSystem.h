@@ -26,7 +26,9 @@ public:
     static constexpr uint32_t kLevels             = 8;    // クリップマップレベル数
     static constexpr uint32_t kPageSize           = 128;  // 1ページの解像度(texel)
     static constexpr uint32_t kVirtualPagesPerRow = 64;   // 仮想=64*128=8192² / レベル
-    static constexpr uint32_t kAtlasPagesPerRow   = 64;   // 物理アトラス=64*128=8192²
+    static constexpr uint32_t kAtlasPagesPerRow   = 96;   // 物理アトラス=96*128=12288²(≈576MB D32)。VSM主軸化で
+                                                          // プール 4096→9216 に拡大。密なグレージング視点(≈4300枚)も余裕で収容し
+                                                          // 溢れ破綻を回避（近~中~町全体を VSM、遠景背景のみ CSM）。vppr(仮想)とは独立。
     static constexpr float    kBaseExtent         = 4.0f; // レベル0の世界範囲(m)。level i = 4*2^i
     static constexpr uint32_t kVirtualPagesPerLevel = kVirtualPagesPerRow * kVirtualPagesPerRow;
     static constexpr uint32_t kTotalVirtualPages    = kLevels * kVirtualPagesPerLevel; // 32768
