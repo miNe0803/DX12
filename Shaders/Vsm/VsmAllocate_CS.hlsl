@@ -17,13 +17,14 @@ RWStructuredBuffer<uint>  PhysToVirtual  : register(u1);  // phys -> vp (描画�
 RWStructuredBuffer<uint>  Counter        : register(u2);  // [0]=割当数（cache時は高水位）
 RWStructuredBuffer<uint>  DirtyPageTable : register(u3);  // vp -> phys（今フレーム新規のみ, 他 0xFFFF）cache専用
 RWStructuredBuffer<uint>  ResidentAP     : register(u4);  // vp -> スロット保持中の絶対ページ(packed) cache専用（wrap検出）
+RWStructuredBuffer<uint>  PhysFrame      : register(u5);  // phys -> 最後に(再)割当されたフレーム番号 cache専用（同フレーム退去防止）
 
 cbuffer AllocCb : register(b0)
 {
     uint gTotalVirtual;  // = kTotalVirtualPages
-    uint gPhysCap;       // = kPhysicalPages
+    uint gPhysCap;       // = kPhysicalPages（診断でDX12_VSM_POOLCAP縮小可）
     uint gCacheMode;     // 0=非キャッシュ, 1=永続キャッシュ
-    uint _pad;
+    uint gFrame;         // 現在のVSM描画フレーム番号（同フレーム退去防止用）
 };
 
 [numthreads(64, 1, 1)]
@@ -59,21 +60,31 @@ void main(uint3 id : SV_DispatchThreadID)
         // トロイダルスロットが別の世界ページへ巻いた)なら、物理ページを割当てて再描画する。
         if (cur == 0xFFFFu || ResidentAP[idx] != req)
         {
-            // FIFOリング: seq を単調加算し phys=seq%cap で循環割当（最古を退去）。プール枯渇しても
-            // lit にならず一番古いページを再利用する。作業集合が cap 以下なら可視ページは常駐維持。
+            // FIFOリング: seq を単調加算し phys=seq%cap で循環割当（最古を退去）。
             uint seq; InterlockedAdd(Counter[0], 1u, seq);
             uint phys = seq % gPhysCap;
-            // 旧所有者を無効化（この物理を今保持している別スロット）。まだPageTableがこの物理を指す時のみ。
-            uint oldVp = PhysToVirtual[phys];
-            if (oldVp < gTotalVirtual && PageTable[oldVp] == phys)
+            // 同フレーム退去防止（intra-frame FIFO wrap の破綻対策）: この物理が「今フレーム既に(再)割当済み」
+            // なら、退去すると今フレームの可視ページを壊す（＝プール枯渇時のブロック状破綻の原因）。その場合は
+            // 割当を断念し未割当のまま＝町側でCSMフォールバック（滑らか）。作業集合>プールでも破綻せず degrade。
+            if (PhysFrame[phys] == gFrame)
             {
-                PageTable[oldVp]  = 0xFFFFu;   // 退去されたスロットは次に見えれば再要求される
-                ResidentAP[oldVp] = 0u;
+                PageTable[idx] = 0xFFFFu;       // 今フレームはCSMに任せる
             }
-            PageTable[idx]      = phys;
-            PhysToVirtual[phys] = idx;
-            ResidentAP[idx]     = req;         // このスロットが今保持する世界ページを記録
-            DirtyPageTable[idx] = phys;        // 今フレーム描画対象（+ 再利用タイルは事前クリア）
+            else
+            {
+                // 旧所有者を無効化（この物理を今保持している別スロット）。まだPageTableがこの物理を指す時のみ。
+                uint oldVp = PhysToVirtual[phys];
+                if (oldVp < gTotalVirtual && PageTable[oldVp] == phys)
+                {
+                    PageTable[oldVp]  = 0xFFFFu;   // 退去されたスロットは次に見えれば再要求される
+                    ResidentAP[oldVp] = 0u;
+                }
+                PageTable[idx]      = phys;
+                PhysToVirtual[phys] = idx;
+                ResidentAP[idx]     = req;         // このスロットが今保持する世界ページを記録
+                PhysFrame[phys]     = gFrame;      // この物理は今フレーム使用中（同フレーム退去を防ぐ）
+                DirtyPageTable[idx] = phys;        // 今フレーム描画対象（+ 再利用タイルは事前クリア）
+            }
         }
         // residentAP 一致（同じ世界ページを継続保持）→ 再描画不要。キャッシュ命中。
     }

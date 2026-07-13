@@ -17,6 +17,7 @@ cbuffer VsmCB : register(b0)
 
 Texture2D<float>         Depth   : register(t0);
 RWStructuredBuffer<uint> Request : register(u0);
+cbuffer MarkCb : register(b1) { uint gMaxMarkLevel; uint3 _mpad; }   // これより遠い(高)レベルの画素は要求しない→CSM
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -35,6 +36,7 @@ void main(uint3 id : SV_DispatchThreadID)
     float3 ls = mul(float4(P, 1.0f), Vsm_LightView).xyz;
     float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // level0 extent = pw0 * vppr
     uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
+    if (L > gMaxMarkLevel) return;   // 遠距離(高レベル)はVSMで賄わない→未割当のまま=町側でCSMフォールバック
     float2 uvp;
     uint2 vp = Vsm_VirtualPage(ls.xy, Vsm_LevelCenterExtent[L].xy,   // origin
                                Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);  // pageWorld

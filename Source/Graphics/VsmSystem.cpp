@@ -202,13 +202,14 @@ bool VsmSystem::CreateRequestResources(ID3D12Device* device)
 
 bool VsmSystem::CreateMarkPipeline(ID3D12Device* device)
 {
-    CD3DX12_ROOT_PARAMETER params[3] = {};
+    CD3DX12_ROOT_PARAMETER params[4] = {};
     params[0].InitAsConstantBufferView(0);
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     params[1].InitAsDescriptorTable(1, &srvR);
     CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
     params[2].InitAsDescriptorTable(1, &uavR);
-    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 3; rs.pParameters = params;
+    params[3].InitAsConstants(1, 1);   // b1: gMaxMarkLevel（これより遠いレベルの画素はページ要求しない→CSM）
+    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 4; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
     { if (err) printf("VSM mark RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
@@ -273,6 +274,14 @@ void VsmSystem::MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthR
     cmd->SetComputeRootDescriptorTable(1, gbase);
     D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += m_markStride;
     cmd->SetComputeRootDescriptorTable(2, gUav);
+    // VSMを近距離の連続レベルに限定（これより遠い=高レベルの画素はページ要求せず→町側でCSM）。
+    // これでプール溢れ(密な遠景視界)による散在パッチ/ブロック破綻を防ぎ、近VSM＋遠CSMの綺麗な境界にする。
+    // 既定 5（レベル0-5 ≒ 近~128m を VSM高精細、以遠は CSM）。密な街路の遠景がプールを溢れさせるのを防ぐ。
+    // DX12_VSM_MAXLEVEL で調整（大=VSM遠くまで/溢れ risk, 小=近だけVSM・遠CSM）。
+    static uint32_t s_maxMarkLevel = [] {
+        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 5u;
+    }();
+    cmd->SetComputeRoot32BitConstants(3, 1, &s_maxMarkLevel, 0);
     cmd->Dispatch((m_w + 7) / 8, (m_h + 7) / 8, 1);
 
     auto dBack = CD3DX12_RESOURCE_BARRIER::Transition(depthResource,
@@ -341,6 +350,13 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_residentAP)))) return false;
     }
+    // V5b: physFrame（phys -> 最後に割当されたフレーム番号）。同フレーム退去防止用。
+    {
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer((UINT64)kPhysicalPages * sizeof(uint32_t),
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_physFrame)))) return false;
+    }
     // V5b: PageTable を 0xFFFF(=kInvalidPage) で初期化するアップロード元（リセット時にコピー）。
     {
         auto up = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
@@ -362,9 +378,9 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
         if (FAILED(device->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_counterReadback[i])))) return false;
 
-    // ヒープ [0]=Request SRV,[1]=PageTable UAV,[2]=PhysToVirtual UAV,[3]=Counter UAV,[4]=DirtyPageTable UAV,[5]=residentAP UAV
+    // ヒープ [0]=Request SRV,[1]=PageTable,[2]=PhysToVirtual,[3]=Counter,[4]=DirtyPageTable,[5]=residentAP,[6]=physFrame (UAV)
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 6;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 7;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_allocHeap)))) return false;
     m_allocStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -386,6 +402,7 @@ bool VsmSystem::CreateAllocResources(ID3D12Device* device)
     mkUav(m_counter.Get(), 1);
     mkUav(m_dirtyPageTable.Get(), kTotalVirtualPages);   // u3 (cache)
     mkUav(m_residentAP.Get(), kTotalVirtualPages);       // u4 (cache: wrap 検出キー)
+    mkUav(m_physFrame.Get(), kPhysicalPages);            // u5 (cache: 同フレーム退去防止)
     return true;
 }
 
@@ -395,7 +412,7 @@ bool VsmSystem::CreateAllocPipeline(ID3D12Device* device)
     params[0].InitAsConstants(4, 0);   // b0: gTotalVirtual, gPhysCap, pad, pad
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     params[1].InitAsDescriptorTable(1, &srvR);
-    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0);  // u0..u4 (u3=dirty,u4=residentAP)
+    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0);  // u0..u5 (u3=dirty,u4=residentAP,u5=physFrame)
     params[2].InitAsDescriptorTable(1, &uavR);
     D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 3; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
@@ -450,7 +467,11 @@ void VsmSystem::Allocate(ID3D12GraphicsCommandList* cmd)
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetComputeRootSignature(m_allocRootSig.Get());
     cmd->SetPipelineState(m_allocPso.Get());
-    uint32_t consts[4] = { kTotalVirtualPages, kPhysicalPages, m_cacheMode ? 1u : 0u, 0 };
+    // 診断: DX12_VSM_POOLCAP で物理プールの実効サイズを縮小し、通常視点でも枯渇(intra-frame FIFO wrap)を
+    // 強制再現できるようにする（ユーザーの密な街路視点の破綻を切り分けるため）。0=無効(=4096)。
+    static uint32_t s_poolCap = [] { char e[16]; return GetEnvironmentVariableA("DX12_VSM_POOLCAP", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 0u; }();
+    uint32_t effCap = (s_poolCap > 0u && s_poolCap < kPhysicalPages) ? s_poolCap : kPhysicalPages;
+    uint32_t consts[4] = { kTotalVirtualPages, effCap, m_cacheMode ? 1u : 0u, ++m_allocFrameCounter };
     cmd->SetComputeRoot32BitConstants(0, 4, consts, 0);
     D3D12_GPU_DESCRIPTOR_HANDLE gbase = m_allocHeap->GetGPUDescriptorHandleForHeapStart();
     cmd->SetComputeRootDescriptorTable(1, gbase);                          // t0 Request SRV
@@ -1080,6 +1101,16 @@ void VsmSystem::ResetCacheGpu(ID3D12GraphicsCommandList* cmd)
         cmd->ResourceBarrier(1, &b);
         cmd->CopyBufferRegion(m_physToVirtual.Get(), 0, m_pageTableInit.Get(), 0, (UINT64)kPhysicalPages * sizeof(uint32_t));
         b = CD3DX12_RESOURCE_BARRIER::Transition(m_physToVirtual.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+    // PhysFrame ← 0（フレーム番号は1から振るので 0 は「未使用」を意味＝初回サイクルで退去可能）
+    {
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_physFrame.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_physFrame.Get(), 0, m_zeroUpload.Get(), 0, (UINT64)kPhysicalPages * sizeof(uint32_t));
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_physFrame.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cmd->ResourceBarrier(1, &b);
     }

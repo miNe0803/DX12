@@ -195,6 +195,8 @@ private:
     bool m_cacheMode = false;         // DX12_VSM_CACHE / Scene::SetVsm... 経由
     bool m_cacheNeedsReset = true;    // 次回描画で PageTable/Counter/アトラスを初期化
     ComPtr<ID3D12Resource> m_dirtyPageTable;      // vp->phys（今フレーム新規のみ, 他0xFFFF）binning へ流す
+    ComPtr<ID3D12Resource> m_physFrame;           // phys-> 最後に(再)割当されたVSM描画フレーム番号（同フレーム退去防止）
+    uint32_t m_allocFrameCounter = 0;             // VSM 描画毎に++（gFrame としてAllocateへ）
     ComPtr<ID3D12Resource> m_residentAP;          // vp-> そのスロットが現在保持する絶対ページ(packed)。移動でスロットが
                                                   // 別世界ページに巻いた(wrap)ことを検出し再描画するためのキー。
     ComPtr<ID3D12Resource> m_pageTableInit;       // 0xFFFF 埋めアップロード（リセット時 PageTable へコピー）
