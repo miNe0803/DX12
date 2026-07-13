@@ -186,18 +186,18 @@ void DebugUI::Draw()
 				if (g_Scene->VsmAvailable())
 				{
 					bool vsmOn = g_Scene->GetVsmEnabled();
-					if (ImGui::Checkbox("VSM sun shadows (replaces CSM) [WIP]", &vsmOn))
+					if (ImGui::Checkbox("VSM sun shadows (replaces CSM)", &vsmOn))
 						g_Scene->SetVsmEnabled(vsmOn);
-					ImGui::TextDisabled("OFF=従来CSM影（既定・安定）。");
-					ImGui::TextDisabled("ON=VSM【開発中】: 世界固定の高精細影。移動を軽くするには下の Cache を ON。");
+					ImGui::TextDisabled("OFF=従来CSM影（既定）。ON=VSM 世界固定の高精細影（永続キャッシュ既定ON）。");
+					ImGui::TextDisabled("静止~50FPS / 移動~35-40FPS（移動時は町全キャスタのbinningが上限。将来ページ単位カリングで改善余地）。");
 					if (vsmOn)
 					{
 						bool cache = g_Scene->GetVsmCache();
-						if (ImGui::Checkbox("Persistent cache (V5b): 移動時は新規ページのみ描画", &cache))
+						if (ImGui::Checkbox("Persistent cache (V5b, 既定ON): 移動時は新規/巻いたページのみ描画", &cache))
 							g_Scene->SetVsmCache(cache);
 						ImGui::TextDisabled(cache
-							? "ON=静的な町はページ世界固定→一度描けば再利用。移動でも軽量（推奨）。"
-							: "OFF=毎フレーム全ページ再描画（移動で重い。検証用）。");
+							? "ON=世界固定＋FIFO退去＋タイルクリアで移動でも影破綻なし・軽量（推奨）。"
+							: "OFF=毎フレーム全ページ再描画（移動で~5FPS。比較/診断用）。");
 						ImGui::Text("(caster,page) pairs this frame: %u", g_Scene->GetVsmLastPairCount());
 						ImGui::Text("resident pages (cache): %u / 4096", g_Scene->GetVsmResidentPages());
 						ImGui::Separator();

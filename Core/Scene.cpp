@@ -2637,7 +2637,12 @@ void Scene::Draw()
 		s_vsmAtlasDebug  = GetEnvironmentVariableA("DX12_VSM_ATLAS",  ev, sizeof(ev)) > 0;
 		s_vsmShadowDebug = GetEnvironmentVariableA("DX12_VSM_SHADOW", ev, sizeof(ev)) > 0;
 		s_vsmForceRender = GetEnvironmentVariableA("DX12_VSM_NOCACHE", ev, sizeof(ev)) > 0;
-		s_vsmCache       = GetEnvironmentVariableA("DX12_VSM_CACHE",   ev, sizeof(ev)) > 0;
+		// 永続キャッシュは既定ON（正しく高速な経路。移動で全再描画=重い の回避）。
+		// DX12_VSM_CACHE=0 で明示的に無効化可（非キャッシュ経路の比較/診断用）。
+		if (GetEnvironmentVariableA("DX12_VSM_CACHE", ev, sizeof(ev)) > 0)
+			s_vsmCache = (ev[0] != '0');
+		else
+			s_vsmCache = true;
 		s_vsmGateInit = true;
 	}
 	if (s_vsm && s_vsm->IsValid())
