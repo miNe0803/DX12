@@ -81,7 +81,7 @@ float SampleSunShadowVSM(float3 worldPos)
         float s = VsmShadowTap(ls.xy + float2(cos(ang), sin(ang)) * r, ls.z);
         if (s >= 0.0f) { sum += s; wsum += 1.0f; }
     }
-    return (wsum < 0.5f) ? 1.0f : (sum / wsum);   // 全未割当=光
+    return (wsum < 0.5f) ? -1.0f : (sum / wsum);   // 全未割当 → -1（VSM非カバー＝CSMへフォールバック）
 }
 
 cbuffer SceneCB : register(b1, space0)
@@ -199,6 +199,18 @@ float2 ParallaxOcclusion(float2 uv, float3 viewTS, float heightScale)
 // g_Csm / g_ShadowSmp / ShadowCB(LightVP,CascadeSplits) / SceneCB(View) は上で宣言済み。
 #include "TownShadow.hlsli"
 
+// ハイブリッド太陽影: VSM がカバーする画素は VSM（近~中の高精細・世界固定）、未割当画素（遠景/プール溢れ）は
+// CSM（安価・堅牢なフォールバック）。VSM OFF 時は常に CSM。→ VSM を ON にしても遠景で影が抜けない。
+float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
+{
+    if (gUseVsm != 0u)
+    {
+        float s = SampleSunShadowVSM(worldPos);
+        if (s >= 0.0f) return s;   // VSM がこの画素をカバー
+    }
+    return SampleSunShadowSoft(worldPos, Nw, svpos);   // 非VSM or VSM未割当 → CSM
+}
+
 // 点光源 1 灯の寄与
 float3 PointLightContrib(float3 Nw, float3 V, float3 worldPos,
     float3 albedo, float roughness, float metallic, float3 F0,
@@ -290,8 +302,7 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
 
         // ガラスも太陽の影を受ける（従来は影を参照せず、屋根の影の下でもガラスに太陽ハイライトが
         // 出ていた＝「太陽が2つある」ように見える光漏れ。太陽由来の項を shadow で減衰）。
-        float gsh = (gUseVsm != 0u) ? SampleSunShadowVSM(In.worldPos)
-                                    : SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
+        float gsh = SampleSunShadowHybrid(In.worldPos, Nw, In.svpos.xy);   // VSM→未割当はCSMフォールバック
         float3 tint = baseCol * 0.5f + float3(0.30f, 0.36f, 0.42f) * 0.5f;
         float3 col = tint * (SunColor.rgb * 0.3f * gsh)   // 太陽由来のベース明るさ→影で減衰
             + envRefl * (0.2f + fres * 0.8f)              // 環境反射(空/街)は影と無関係
@@ -334,8 +345,7 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
     float3 kD = (1.0f - F) * (1.0f - metallic);
     float  NdotL = max(dot(Nw, L), 0.0f);
     float3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
-    Lo *= (gUseVsm != 0u) ? SampleSunShadowVSM(In.worldPos)
-                          : SampleSunShadowSoft(In.worldPos, Nw, In.svpos.xy);
+    Lo *= SampleSunShadowHybrid(In.worldPos, Nw, In.svpos.xy);   // VSM→未割当はCSMフォールバック
 
     // ---- 点光源 ( 街灯 ) ----
     int lcount = (int)TL_Count.x;
