@@ -55,7 +55,8 @@ public:
     void SetCacheMode(bool on);
     bool GetCacheMode() const { return m_cacheMode; }
     void RequestCacheReset() { m_cacheNeedsReset = true; }   // 太陽変化・視点ワープ時など
-    uint32_t LastResidentPages() const { return m_lastAllocCount; }   // cache時=常駐高水位
+    // 物理プール使用量（FIFOリングなので実使用は cap で頭打ち）。m_lastAllocCount は単調 seq なので clamp。
+    uint32_t LastResidentPages() const { return m_lastAllocCount < kPhysicalPages ? m_lastAllocCount : kPhysicalPages; }
 
     // V2: シーン深度から必要な仮想ページを要求バッファへマーク（要求をクリア→CS→読み戻し検証）。
     // depthResource は DEPTH_WRITE 状態で渡す。
@@ -126,6 +127,7 @@ private:
     bool CreateBinningPipelines(ID3D12Device* device);
     bool CreateDrawArgsPipeline(ID3D12Device* device);
     bool CreatePageRenderPipeline(ID3D12Device* device);
+    bool CreateClearTilesPipeline(ID3D12Device* device);   // V5b: dirty タイル深度クリア
     bool CreateAtlasDebugPipeline(ID3D12Device* device);
     bool CreateShadowDebugPipeline(ID3D12Device* device);
     void ZeroBuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res, uint64_t bytes);
@@ -233,6 +235,10 @@ private:
     ComPtr<ID3D12RootSignature> m_pageRenderRS;
     ComPtr<ID3D12PipelineState> m_pageRenderPso;
     ComPtr<ID3D12CommandSignature> m_pageCmdSig;
+
+    // V5b: FIFO 再利用タイルの stale 除去（dirty タイルを深度1.0で事前クリア）
+    ComPtr<ID3D12RootSignature> m_clearTilesRS;
+    ComPtr<ID3D12PipelineState> m_clearTilesPso;
 
     // 検証: アトラス可視化
     ID3D12DescriptorHeap* m_sceneHeapRaw = nullptr;   // シーン記述子ヒープ（atlas SRV を含む）

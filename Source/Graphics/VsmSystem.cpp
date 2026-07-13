@@ -29,6 +29,7 @@ bool VsmSystem::Init(ID3D12Device* device, DescriptorHeap* sceneHeap, uint32_t w
     if (!CreateBinningPipelines(device)) return false;
     if (!CreateDrawArgsPipeline(device)) return false;
     if (!CreatePageRenderPipeline(device)) return false;
+    if (!CreateClearTilesPipeline(device)) return false;
     if (!CreateAtlasDebugPipeline(device)) return false;
     if (!CreateShadowDebugPipeline(device)) return false;
 
@@ -907,6 +908,43 @@ bool VsmSystem::CreatePageRenderPipeline(ID3D12Device* device)
     return true;
 }
 
+// V5b: dirty タイルを深度1.0でクリアする軽量パイプライン（頂点はSV_VertexID生成, PSなし, DepthFunc ALWAYS）
+bool VsmSystem::CreateClearTilesPipeline(ID3D12Device* device)
+{
+    CD3DX12_ROOT_PARAMETER p[2];
+    p[0].InitAsConstants(4, 0);              // b0: appr, pageSize, atlasDim, totalVp
+    p[1].InitAsUnorderedAccessView(0);       // u0: DirtyPageTable（VSでUAV読取）
+    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 2; rs.pParameters = p;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { if (err) printf("VSM clearTiles RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
+    if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_clearTilesRS)))) return false;
+
+    ComPtr<ID3DBlob> vs;
+    if (FAILED(D3DReadFileToBlob(L"VsmClearTiles_VS.cso", &vs)) &&
+        FAILED(D3DReadFileToBlob(L"Shaders\\Vsm\\VsmClearTiles_VS.cso", &vs)))
+    { printf("VSM: VsmClearTiles_VS.cso not found\n"); return false; }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_clearTilesRS.Get();
+    pd.VS = CD3DX12_SHADER_BYTECODE(vs.Get());
+    pd.InputLayout = { nullptr, 0 };                                  // 頂点は SV_VertexID から生成
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = FALSE;                       // z=1.0 を確実に通す
+    pd.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;    // 無条件上書き＝クリア
+    pd.SampleMask = UINT_MAX;
+    pd.NumRenderTargets = 0;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_clearTilesPso))))
+    { printf("VSM: clearTiles PSO failed\n"); return false; }
+    return true;
+}
+
 void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* batches, uint32_t count)
 {
     if (!m_valid || count == 0 || m_batchCount == 0 || !m_submeshTableVA || !m_casterVA) return;
@@ -937,6 +975,19 @@ void VsmSystem::RenderPages(ID3D12GraphicsCommandList* cmd, const RenderBatch* b
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)dim, (float)dim, 0.0f, 1.0f };
     D3D12_RECT sc = { 0, 0, (LONG)dim, (LONG)dim };
     cmd->RSSetViewports(1, &vp); cmd->RSSetScissorRects(1, &sc);
+
+    // 永続キャッシュ: dirty（今フレーム(再)割当）タイルだけを深度1.0で事前クリア（FIFO再利用タイルの
+    // stale 除去）。DirtyPageTable は UAV 状態のまま VS で読む。この後キャスタが LESS で最近深度を書く。
+    if (m_cacheMode)
+    {
+        cmd->SetPipelineState(m_clearTilesPso.Get());
+        cmd->SetGraphicsRootSignature(m_clearTilesRS.Get());
+        const uint32_t cc[4] = { kAtlasPagesPerRow, kPageSize, kAtlasPagesPerRow * kPageSize, kTotalVirtualPages };
+        cmd->SetGraphicsRoot32BitConstants(0, 4, cc, 0);
+        cmd->SetGraphicsRootUnorderedAccessView(1, m_dirtyPageTable->GetGPUVirtualAddress());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        cmd->DrawInstanced(4, kTotalVirtualPages, 0, 0);
+    }
 
     cmd->SetPipelineState(m_pageRenderPso.Get());
     cmd->SetGraphicsRootSignature(m_pageRenderRS.Get());
@@ -1019,6 +1070,16 @@ void VsmSystem::ResetCacheGpu(ID3D12GraphicsCommandList* cmd)
         cmd->ResourceBarrier(1, &b);
         cmd->CopyBufferRegion(m_residentAP.Get(), 0, m_zeroUpload.Get(), 0, ptBytes);
         b = CD3DX12_RESOURCE_BARRIER::Transition(m_residentAP.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+    // PhysToVirtual ← 0xFFFF（>kTotalVirtualPages なので「旧所有者なし」の番兵。リング初回サイクルで誤退去を防ぐ）
+    {
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_physToVirtual.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_physToVirtual.Get(), 0, m_pageTableInit.Get(), 0, (UINT64)kPhysicalPages * sizeof(uint32_t));
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_physToVirtual.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cmd->ResourceBarrier(1, &b);
     }
