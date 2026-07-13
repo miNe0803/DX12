@@ -208,7 +208,7 @@ void DebugUI::Draw()
 						bool shadowDbg = g_Scene->GetVsmShadowDebug();
 						if (ImGui::Checkbox("Show VSM shadow factor (screen-space)", &shadowDbg))
 							g_Scene->SetVsmShadowDebug(shadowDbg);
-						ImGui::TextDisabled("※shadow factor 表示は現在CB基準のため移動中は誤差（町本体は正しい）。");
+						ImGui::TextDisabled("※shadow factor 表示: VSM被覆域のみ淡色、非被覆は実描画(CSM影)を透過表示。");
 					}
 				}
 				else
