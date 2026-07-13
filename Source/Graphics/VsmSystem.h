@@ -207,6 +207,10 @@ private:
     // V3c-m1: per-page 描画パラメータ
     ComPtr<ID3D12Resource> m_pageCenterExtent;   // float4/page: cx,cy,extent,level
     ComPtr<ID3D12Resource> m_pageTile;           // uint4/page: px,py,tx,ty
+    // ビニング空間カリング: dirty ページの光空間AABB(encoded uint×4)。BuildPageParams が縮約、binning が参照。
+    ComPtr<ID3D12Resource> m_dirtyBounds;
+    ComPtr<ID3D12Resource> m_boundsResetCache;   // [FFFFFFFF,FFFFFFFF,0,0]=空(min=+inf,max=-inf) cache時reset
+    ComPtr<ID3D12Resource> m_boundsResetInf;     // [0,0,FFFFFFFF,FFFFFFFF]=無限(全カリング無効) 非cache時reset
     ComPtr<ID3D12DescriptorHeap> m_buildHeap;    // [0]=PhysToVirtual SRV,[1]=Counter SRV,[2]=PageCenterExtent UAV,[3]=PageTile UAV
     UINT m_buildStride = 0;
     ComPtr<ID3D12RootSignature> m_buildRootSig;

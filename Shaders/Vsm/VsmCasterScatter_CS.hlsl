@@ -13,6 +13,9 @@ RWStructuredBuffer<uint>  PairCursor    : register(u1);
 RWStructuredBuffer<uint>  PairCount     : register(u2);
 RWStructuredBuffer<uint2> InstancePairs : register(u3);  // (worldIdx=cid, physPage)
 RWStructuredBuffer<uint>  GlobalCounter : register(u4);  // [0]=総試行ペア数
+RWStructuredBuffer<uint>  DirtyBounds   : register(u5);  // 空間カリング: dirty領域の光空間AABB(encoded)
+
+float DecF(uint u) { u = (u & 0x80000000u) ? (u & 0x7FFFFFFFu) : ~u; return asfloat(u); }
 
 cbuffer BinCb : register(b1)
 {
@@ -35,10 +38,17 @@ void main(uint3 id : SV_DispatchThreadID)
     float  r  = c.centerRadius.w;
     uint levels = (uint)Vsm_Params.x;
     uint vppr   = (uint)Vsm_Params.z;
+
     uint modelEnd = PairBase[m] + PairCount[m];   // このモデルの領域上限（C2: 越境禁止）
 
     for (uint L = 0; L < levels; ++L)
     {
+        // レベル毎 空間カリング（count と同一判定でペア数一致を保証）。
+        uint bi = L * 4u;
+        float bMinX = DecF(DirtyBounds[bi + 0u]), bMinY = DecF(DirtyBounds[bi + 1u]);
+        float bMaxX = DecF(DirtyBounds[bi + 2u]), bMaxY = DecF(DirtyBounds[bi + 3u]);
+        if (Cl.x + r < bMinX || Cl.x - r > bMaxX || Cl.y + r < bMinY || Cl.y - r > bMaxY) continue;
+
         int4 rc = VsmLevelRect(Cl, r, L);   // 絶対ページ矩形（窓内）
         for (int ay = rc.y; ay <= rc.w; ++ay)
             for (int ax = rc.x; ax <= rc.z; ++ax)

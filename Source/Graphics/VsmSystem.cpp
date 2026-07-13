@@ -533,10 +533,35 @@ bool VsmSystem::CreateBuildResources(ID3D12Device* device)
     };
     if (!mkBuf(sizeof(float) * 4, m_pageCenterExtent)) return false;
     if (!mkBuf(sizeof(uint32_t) * 4, m_pageTile)) return false;
+    // dirty AABB（レベル毎 uint×4 = kLevels*4）+ リセット元アップロード2種
+    {
+        const UINT boundsCount = kLevels * 4u;
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer(boundsCount * sizeof(uint32_t), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_dirtyBounds)))) return false;
+        auto up = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        auto urd = CD3DX12_RESOURCE_DESC::Buffer(boundsCount * sizeof(uint32_t));
+        auto mkReset = [&](ComPtr<ID3D12Resource>& out, uint32_t a, uint32_t b, uint32_t c, uint32_t d) -> bool {
+            if (FAILED(device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &urd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&out)))) return false;
+            void* p = nullptr; D3D12_RANGE none{ 0, 0 };
+            if (SUCCEEDED(out->Map(0, &none, &p)) && p)
+            {
+                uint32_t* d32 = reinterpret_cast<uint32_t*>(p);
+                for (uint32_t L = 0; L < kLevels; ++L) { d32[L*4+0]=a; d32[L*4+1]=b; d32[L*4+2]=c; d32[L*4+3]=d; }
+                out->Unmap(0, nullptr);
+            }
+            return true;
+        };
+        // 空(min=+inf=0xFFFFFFFF, max=-inf=0): [minX,minY,maxX,maxY] を全レベルへ
+        if (!mkReset(m_boundsResetCache, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u)) return false;
+        // 無限(min=-inf=0, max=+inf=0xFFFFFFFF): カリング無効（非cache）
+        if (!mkReset(m_boundsResetInf, 0u, 0u, 0xFFFFFFFFu, 0xFFFFFFFFu)) return false;
+    }
 
-    // ヒープ [0]=PhysToVirtual SRV,[1]=Counter SRV,[2]=PageCenterExtent UAV,[3]=PageTile UAV
+    // ヒープ [0]=PhysToVirtual SRV,[1]=Counter SRV,[2]=PageCenterExtent UAV,[3]=PageTile UAV,[4]=DirtyPageTable UAV,[5]=DirtyBounds UAV
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 4;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 6;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_buildHeap)))) return false;
     m_buildStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -556,18 +581,21 @@ bool VsmSystem::CreateBuildResources(ID3D12Device* device)
     mkSrv(m_counter.Get(), 1, sizeof(uint32_t));
     mkUav(m_pageCenterExtent.Get(), kPhysicalPages, sizeof(float) * 4);
     mkUav(m_pageTile.Get(), kPhysicalPages, sizeof(uint32_t) * 4);
+    mkUav(m_dirtyPageTable.Get(), kTotalVirtualPages, sizeof(uint32_t)); // u2 (dirty判定)
+    mkUav(m_dirtyBounds.Get(), kLevels * 4, sizeof(uint32_t));           // u3 (レベル毎AABB縮約)
     return true;
 }
 
 bool VsmSystem::CreateBuildPipeline(ID3D12Device* device)
 {
-    CD3DX12_ROOT_PARAMETER params[3] = {};
+    CD3DX12_ROOT_PARAMETER params[4] = {};
     params[0].InitAsConstantBufferView(0);              // b0 = VsmConstants
     CD3DX12_DESCRIPTOR_RANGE srvR; srvR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);   // t0,t1
     params[1].InitAsDescriptorTable(1, &srvR);
-    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0);   // u0,u1
+    CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 4, 0);   // u0..u3 (u2=DirtyPageTable,u3=DirtyBounds)
     params[2].InitAsDescriptorTable(1, &uavR);
-    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 3; rs.pParameters = params;
+    params[3].InitAsConstants(1, 1);                    // b1: gCacheMode
+    D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 4; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
     { if (err) printf("VSM build RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
@@ -591,13 +619,26 @@ void VsmSystem::BuildPageParams(ID3D12GraphicsCommandList* cmd)
     if (!m_valid) return;
     GPU_CMD_BEGIN_EVENT(cmd, 100, 180, 200, L"VSM: build page params");
 
-    // PhysToVirtual/Counter を SRV 状態へ（Allocate 後は UAV）
-    D3D12_RESOURCE_BARRIER pre[2];
+    // dirty AABB をリセット（cache=空へ縮約開始 / 非cache=無限＝カリング無効）。
+    {
+        ID3D12Resource* src = m_cacheMode ? m_boundsResetCache.Get() : m_boundsResetInf.Get();
+        auto b = CD3DX12_RESOURCE_BARRIER::Transition(m_dirtyBounds.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->ResourceBarrier(1, &b);
+        cmd->CopyBufferRegion(m_dirtyBounds.Get(), 0, src, 0, kLevels * 4 * sizeof(uint32_t));
+        b = CD3DX12_RESOURCE_BARRIER::Transition(m_dirtyBounds.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->ResourceBarrier(1, &b);
+    }
+
+    // PhysToVirtual/Counter を SRV 状態へ（Allocate 後は UAV）。DirtyPageTable は Allocate の書込を読むので UAV barrier。
+    D3D12_RESOURCE_BARRIER pre[3];
     pre[0] = CD3DX12_RESOURCE_BARRIER::Transition(m_physToVirtual.Get(),
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     pre[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    cmd->ResourceBarrier(2, pre);
+    pre[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_dirtyPageTable.Get());
+    cmd->ResourceBarrier(3, pre);
 
     ID3D12DescriptorHeap* heaps[] = { m_buildHeap.Get() };
     cmd->SetDescriptorHeaps(1, heaps);
@@ -606,16 +647,19 @@ void VsmSystem::BuildPageParams(ID3D12GraphicsCommandList* cmd)
     cmd->SetComputeRootConstantBufferView(0, GetConstantsAddress());
     D3D12_GPU_DESCRIPTOR_HANDLE gbase = m_buildHeap->GetGPUDescriptorHandleForHeapStart();
     cmd->SetComputeRootDescriptorTable(1, gbase);                            // t0,t1
-    D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += 2 * m_buildStride; // u0,u1
+    D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += 2 * m_buildStride; // u0..u3
     cmd->SetComputeRootDescriptorTable(2, gUav);
+    uint32_t bcm = m_cacheMode ? 1u : 0u;
+    cmd->SetComputeRoot32BitConstants(3, 1, &bcm, 0);
     cmd->Dispatch((kPhysicalPages + 63) / 64, 1, 1);
 
-    D3D12_RESOURCE_BARRIER post[2];
+    D3D12_RESOURCE_BARRIER post[3];
     post[0] = CD3DX12_RESOURCE_BARRIER::Transition(m_physToVirtual.Get(),
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     post[1] = CD3DX12_RESOURCE_BARRIER::Transition(m_counter.Get(),
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    cmd->ResourceBarrier(2, post);
+    post[2] = CD3DX12_RESOURCE_BARRIER::UAV(m_dirtyBounds.Get());   // 縮約完了を binning の読取前に可視化
+    cmd->ResourceBarrier(3, post);
     GPU_CMD_END_EVENT(cmd);
 }
 
@@ -680,15 +724,16 @@ bool VsmSystem::CreateBinningPipelines(ID3D12Device* device)
         return SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&out)));
     };
 
-    // count: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageTable, u0 PairCount
+    // count: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageTable, u0 PairCount, u1 DirtyBounds
     {
-        CD3DX12_ROOT_PARAMETER p[5];
+        CD3DX12_ROOT_PARAMETER p[6];
         p[0].InitAsConstantBufferView(0);
         p[1].InitAsConstants(4, 1);
         p[2].InitAsShaderResourceView(0);
         p[3].InitAsShaderResourceView(1);
         p[4].InitAsUnorderedAccessView(0);
-        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 5; rs.pParameters = p;
+        p[5].InitAsUnorderedAccessView(1);   // DirtyBounds（空間カリング）
+        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 6; rs.pParameters = p;
         if (!serialize(rs, m_binCountRS)) return false;
         if (!makePso(L"VsmCasterCount_CS.cso", L"Shaders\\Vsm\\VsmCasterCount_CS.cso", m_binCountRS.Get(), m_binCountPso)) return false;
     }
@@ -706,7 +751,7 @@ bool VsmSystem::CreateBinningPipelines(ID3D12Device* device)
     }
     // scatter: b0 VsmCB, b1 consts(4), t0 Casters, t1 PageTable, u0 PairBase, u1 PairCursor, u2 PairCount, u3 InstancePairs, u4 GlobalCounter
     {
-        CD3DX12_ROOT_PARAMETER p[9];
+        CD3DX12_ROOT_PARAMETER p[10];
         p[0].InitAsConstantBufferView(0);
         p[1].InitAsConstants(4, 1);
         p[2].InitAsShaderResourceView(0);
@@ -716,7 +761,8 @@ bool VsmSystem::CreateBinningPipelines(ID3D12Device* device)
         p[6].InitAsUnorderedAccessView(2);
         p[7].InitAsUnorderedAccessView(3);
         p[8].InitAsUnorderedAccessView(4);
-        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 9; rs.pParameters = p;
+        p[9].InitAsUnorderedAccessView(5);   // DirtyBounds（空間カリング）
+        D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 10; rs.pParameters = p;
         if (!serialize(rs, m_binScatterRS)) return false;
         if (!makePso(L"VsmCasterScatter_CS.cso", L"Shaders\\Vsm\\VsmCasterScatter_CS.cso", m_binScatterRS.Get(), m_binScatterPso)) return false;
     }
@@ -763,6 +809,7 @@ void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
     cmd->SetComputeRootShaderResourceView(2, m_casterVA);
     cmd->SetComputeRootShaderResourceView(3, pageTableVA);
     cmd->SetComputeRootUnorderedAccessView(4, m_pairCount->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(5, m_dirtyBounds->GetGPUVirtualAddress());   // 空間カリングAABB
     cmd->Dispatch((m_casterCount + 63) / 64, 1, 1);
     { auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_pairCount.Get()); cmd->ResourceBarrier(1, &u); }
 
@@ -795,6 +842,7 @@ void VsmSystem::BuildCasterBinning(ID3D12GraphicsCommandList* cmd)
     cmd->SetComputeRootUnorderedAccessView(6, m_pairCount->GetGPUVirtualAddress());
     cmd->SetComputeRootUnorderedAccessView(7, m_instancePairs->GetGPUVirtualAddress());
     cmd->SetComputeRootUnorderedAccessView(8, m_globalCounter->GetGPUVirtualAddress());
+    cmd->SetComputeRootUnorderedAccessView(9, m_dirtyBounds->GetGPUVirtualAddress());   // 空間カリングAABB
     cmd->Dispatch((m_casterCount + 63) / 64, 1, 1);
     { auto u = CD3DX12_RESOURCE_BARRIER::UAV(m_instancePairs.Get()); cmd->ResourceBarrier(1, &u); }
 

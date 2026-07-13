@@ -8,6 +8,8 @@ StructuredBuffer<uint>     PhysToVirtual : register(t0);   // phys -> vp
 StructuredBuffer<uint>     Counter       : register(t1);   // [0]=割当数
 RWStructuredBuffer<float4> PageCenterExtent : register(u0); // per phys: (cx, cy, extent, 0)
 RWStructuredBuffer<uint4>  PageTile         : register(u1); // per phys: (px, py, tx, ty)
+RWStructuredBuffer<uint>   DirtyPageTable   : register(u2); // vp -> phys（今フレームdirty, 他0xFFFF）
+RWStructuredBuffer<uint>   DirtyBounds      : register(u3); // レベル毎 [L*4+0..3]=encMinX,encMinY,encMaxX,encMaxY(光空間)
 
 // VsmSystem::VsmConstants と一致（GetConstantsAddress を b0 にバインド）
 cbuffer VsmCB : register(b0)
@@ -19,6 +21,10 @@ cbuffer VsmCB : register(b0)
     float4 Vsm_DepthDim;
     float4 Vsm_LevelCenterExtent[8];
 };
+cbuffer BuildCb : register(b1) { uint gCacheMode; uint3 _bpad; }
+
+// float を順序保存 uint へ（InterlockedMin/Max 用）。負値も単調。
+uint EncF(float f) { uint u = asuint(f); return (u & 0x80000000u) ? ~u : (u | 0x80000000u); }
 
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -49,4 +55,15 @@ void main(uint3 id : SV_DispatchThreadID)
     float oy = (float)apy * pw;
     PageCenterExtent[phys] = float4(ox, oy, pw, (float)level);   // (ページ左端X, Y, pageWorld, level)
     PageTile[phys] = uint4(px, py, phys % appr, phys / appr);
+
+    // ビニング空間カリング用: このphysが今フレームdirty(=描画対象)なら、その光空間ページ境界を
+    // DirtyBounds へ縮約（InterlockedMin/Max）。binning は casters をこのAABBで早期棄却する。
+    if (gCacheMode != 0u && DirtyPageTable[vp] == phys)
+    {
+        uint bi = level * 4u;   // レベル毎AABB（細レベルのdirtyは近傍=タイト→カリング効く）
+        InterlockedMin(DirtyBounds[bi + 0u], EncF(ox));
+        InterlockedMin(DirtyBounds[bi + 1u], EncF(oy));
+        InterlockedMax(DirtyBounds[bi + 2u], EncF(ox + pw));
+        InterlockedMax(DirtyBounds[bi + 3u], EncF(oy + pw));
+    }
 }
