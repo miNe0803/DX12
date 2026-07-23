@@ -39,6 +39,7 @@
 #include "Graphics/SsrSystem.h"
 #include "Graphics/GtaoSystem.h"
 #include "Graphics/VsmSystem.h"
+#include "Graphics/RayTracingManager.h"   // DXR-GI F1: TLAS基盤
 #include "Graphics/TreeVegetation.h"
 #include "Graphics/TreeImposterBake.h"
 #include "ComPtr.h"
@@ -67,6 +68,8 @@ static AtmosphereParams s_atmosphereParams;
 static SsrSystem* s_ssr = nullptr;
 static GtaoSystem* s_gtao = nullptr;
 static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM影を置換予定）
+static RayTracingManager* s_rtManager = nullptr;  // DXR-GI: 静的町の BLAS/TLAS（F1で構築, R/G で RTAO/DDGI が利用）
+static bool s_giEnabled = false;     // DXR-GI 有効（DX12_GI で初期化。F1は既定OFF＝TLAS構築せず無コスト・無変更）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -434,6 +437,7 @@ Scene::~Scene()
 	if (s_ssr) { s_ssr->Shutdown(); delete s_ssr; s_ssr = nullptr; }
 	if (s_gtao) { s_gtao->Shutdown(); delete s_gtao; s_gtao = nullptr; }
 	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
+	if (s_rtManager) { s_rtManager->Shutdown(); delete s_rtManager; s_rtManager = nullptr; }
 	s_reflValid = false;
 	s_reflColor.Reset(); s_reflDepth.Reset(); s_reflRtvHeap.Reset(); s_reflDsvHeap.Reset();
 
@@ -1562,6 +1566,40 @@ bool Scene::Init()
 		s_vsmRenderBatches.reserve(s_town->VsmBatches().size());
 		for (const auto& b : s_town->VsmBatches())
 			s_vsmRenderBatches.push_back(VsmSystem::RenderBatch{ b.vbv, b.ibv });
+	}
+
+	// [DXR-GI F1] 静的町の BLAS/TLAS を一度だけ構築（DX12_GI 有効時のみ）。町の VB/IB は
+	// s_town->Init 内の FlushUploads で resident 済み。専用コマンドリスト(CmdList4)で構築→実行→
+	// GPU-idle→scratch解放。既定OFF＝TLAS未構築で無コスト・描画は完全に従来通り（バイト一致）。
+	{
+		char ev[8];
+		s_giEnabled = (GetEnvironmentVariableA("DX12_GI", ev, sizeof(ev)) > 0) && (ev[0] != '0');
+	}
+	if (s_giEnabled && s_town && g_Engine->GetFeatureSupport().raytracingSupported)
+	{
+		s_rtManager = new RayTracingManager();
+		D3D12_VIEWPORT vpRt = g_Engine->GetViewport();
+		if (s_rtManager->Init(g_Engine->Device(), descriptorHeap, (uint32_t)vpRt.Width, (uint32_t)vpRt.Height))
+		{
+			auto* dev = g_Engine->Device();
+			ComPtr<ID3D12CommandAllocator> alloc;
+			ComPtr<ID3D12GraphicsCommandList> list;
+			ComPtr<ID3D12GraphicsCommandList4> list4;
+			if (SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) &&
+				SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&list))) &&
+				SUCCEEDED(list.As(&list4)))
+			{
+				s_town->BuildRayTracingScene(s_rtManager, list4.Get());
+				list4->Close();
+				ID3D12CommandList* lists[] = { list4.Get() };
+				g_Engine->Queue()->ExecuteCommandLists(1, lists);
+				g_Engine->WaitForGpuIdle();
+				s_rtManager->ReleaseBuildScratch();   // 非同期構築完了後に一時scratchを解放
+				printf("[DXR] TLAS built: %u instances (GI enabled)\n", s_rtManager->GetInstanceCount());
+				fflush(stdout);
+			}
+		}
+		else { delete s_rtManager; s_rtManager = nullptr; }
 	}
 
 	return true;
@@ -2701,6 +2739,22 @@ void Scene::Draw()
 			s_vsm->RenderAtlasDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle());
 		if (s_vsmShadowDebug)
 			s_vsm->RenderShadowDebug(postCommandList, g_Engine->GetHdrRtvCpuHandle(), g_Engine->GetDepthStencilResource());
+	}
+
+	// ---- DXR-GI F1 検証: primary ray のヒット距離 vs ラスタ深度を色分け（DX12_GI_DEBUG）----
+	// 緑=一致(TLAS正), 赤=不一致, 青=RT取りこぼし。TLAS＋トランスフォームの正しさを確認する。
+	if (s_giEnabled && s_rtManager && s_rtManager->IsValid())
+	{
+		static bool s_giDebug = [] { char e[8]; return GetEnvironmentVariableA("DX12_GI_DEBUG", e, sizeof(e)) > 0; }();
+		if (s_giDebug)
+		{
+			float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
+			XMVECTOR det;
+			XMMATRIX invVP = XMMatrixInverse(&det, g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(aspect));
+			XMFLOAT3 cam; XMStoreFloat3(&cam, g_Camera->GetPosition());
+			s_rtManager->RenderDebugPrimary(postCommandList, g_Engine->GetHdrRtvCpuHandle(),
+				g_Engine->GetDepthStencilResource(), invVP, cam);
+		}
 	}
 
 	// ---- GI G0: GTAO（スクリーン空間AO）を HDR に乗算適用（bloom/tonemap 前）----

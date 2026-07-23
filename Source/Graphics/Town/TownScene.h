@@ -24,6 +24,7 @@ class ConstantBuffer;
 class PipelineState;
 class Texture2D;
 class ShadowSystem;
+class RayTracingManager;
 
 // 段階的サブセット読込・機能ゲートの設定
 struct TownConfig
@@ -106,6 +107,10 @@ public:
     void SetVsmBindings(D3D12_GPU_VIRTUAL_ADDRESS vsmCB, D3D12_GPU_VIRTUAL_ADDRESS pageTableVA,
                         D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv, bool useVsm, bool fpLod = false)
     { m_vsmCBAddr = vsmCB; m_vsmPageTableVA = pageTableVA; m_vsmAtlasSrv = atlasSrv; m_useVsm = useVsm; m_vsmFpLod = fpLod; }
+
+    // DXR-GI F1: 静的町ジオメトリを RT へ登録（モデル毎に1 BLAS、フォリッジ除外）し TLAS を一度構築。
+    // ロード後に ID3D12GraphicsCommandList4 上で1回呼ぶ（実行→GPU-idle→rtm->ReleaseBuildScratch() の前）。
+    void BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsCommandList4* cmd);
 
 private:
     struct SubMesh

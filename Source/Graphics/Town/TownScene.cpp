@@ -16,6 +16,7 @@
 #include "SharedStruct.h"
 #include "DebugLog.h"
 #include "Graphics/ShadowSystem.h"
+#include "Graphics/RayTracingManager.h"   // DXR-GI F1: BLAS/TLAS 登録
 
 #include <assimp/cimport.h>
 #include <assimp/scene.h>
@@ -728,6 +729,82 @@ void TownScene::BuildCasterRecords()
 
     printf("[VSM] caster records: %u casters, %u unique models, %zu draw batches (%.2f MB recs)\n",
         m_casterCount, m_casterModelCount, m_vsmBatches.size(), recs.size() * sizeof(CasterRec) / (1024.0 * 1024.0));
+    fflush(stdout);
+}
+
+//=============================================================================
+// DXR-GI F1: 静的町ジオメトリを RT 加速構造へ登録。モデル毎に 1 BLAS（不透明サブメッシュのみ、
+// ガラス除外）、インスタンス毎に 1 TLAS エントリ（影を落とすもの、フォリッジ/木は除外＝
+// アルファ切り抜きクアッドが不透明として黒ハローを作るのを防ぐ）。ロード後に1回だけ呼ぶ。
+void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsCommandList4* cmd)
+{
+    if (!rtm || !cmd) return;
+
+    // 1) ユニークモデル毎に 1 BLAS。
+    std::unordered_map<TownModel*, uint32_t> modelBlas;
+    for (auto& kv : m_cache)
+    {
+        TownModel* model = kv.second;
+        if (!model || model->subs.empty()) continue;
+        std::vector<RTGeometry> geos;
+        geos.reserve(model->subs.size());
+        for (const SubMesh& s : model->subs)
+        {
+            if (s.glass || !s.vbRes || !s.ibRes || s.indexCount == 0) continue;   // ガラスは光を遮らない
+            if (s.vbv.StrideInBytes == 0) continue;
+            RTGeometry g{};
+            g.vertexBuffer = s.vbRes.Get();
+            g.vertexStride = s.vbv.StrideInBytes;                 // = sizeof(Vertex) 84
+            g.vertexCount  = s.vbv.SizeInBytes / s.vbv.StrideInBytes;
+            g.indexBuffer  = s.ibRes.Get();
+            g.indexCount   = s.indexCount;
+            geos.push_back(g);
+        }
+        if (geos.empty()) continue;
+        modelBlas[model] = rtm->AddBLAS(cmd, geos.data(), (uint32_t)geos.size());
+    }
+
+    // 2) インスタンス毎に 1 TLAS エントリ。worldT = transpose(BuildLocal*G) は D3D12 の
+    //    列ベクトル 3x4 object->world そのもの（先頭12 float = 行0-2）なので直接コピー。
+    std::vector<RTInstance> insts;
+    insts.reserve(m_instances.size());
+    for (const Instance& inst : m_instances)
+    {
+        if (!inst.model || !inst.castShadow) continue;
+        if (inst.isFoliage) continue;   // 花/低木/木は AS から除外（不透明クアッド=黒ハロー）
+        auto it = modelBlas.find(inst.model);
+        if (it == modelBlas.end()) continue;
+        RTInstance ri{};
+        std::memcpy(&ri.transform, &inst.worldT, sizeof(float) * 12);
+        ri.blasIndex = it->second;
+        ri.instanceMask = 0xFF;
+        ri.flags = 0;
+        insts.push_back(ri);
+    }
+
+    // 3) 地面/道路プレーン + 地形メッシュ（GlobalG 変換で 1 インスタンスずつ）。
+    //    GI は地面が主要な受光/バウンス面なので TLAS に必須（除外すると地面バウンスが出ない）。
+    XMFLOAT4X4 gT; XMStoreFloat4x4(&gT, XMMatrixTranspose(GlobalG()));
+    auto addWorldGeo = [&](ID3D12Resource* vb, const D3D12_VERTEX_BUFFER_VIEW& vbv,
+                           ID3D12Resource* ib, UINT indexCount)
+    {
+        if (!vb || !ib || indexCount == 0 || vbv.StrideInBytes == 0) return;
+        RTGeometry g{};
+        g.vertexBuffer = vb; g.vertexStride = vbv.StrideInBytes;
+        g.vertexCount = vbv.SizeInBytes / vbv.StrideInBytes;
+        g.indexBuffer = ib; g.indexCount = indexCount;
+        uint32_t blas = rtm->AddBLAS(cmd, &g, 1);
+        RTInstance ri{}; std::memcpy(&ri.transform, &gT, sizeof(float) * 12);
+        ri.blasIndex = blas; ri.instanceMask = 0xFF; ri.flags = 0;
+        insts.push_back(ri);
+    };
+    addWorldGeo(m_roadVBRes.Get(), m_roadVbv, m_roadIBRes.Get(), m_roadIbv.SizeInBytes / 4u);
+    for (const LandMesh& lm : m_landscapes)
+        addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount);
+
+    rtm->BuildTLAS(cmd, insts.data(), (uint32_t)insts.size());
+    printf("[DXR] RT scene: %zu BLAS (models), %zu TLAS instances (buildings+ground, foliage excluded)\n",
+        rtm->GetInstanceCount() ? (modelBlas.size() + 1 + m_landscapes.size()) : 0, insts.size());
     fflush(stdout);
 }
 

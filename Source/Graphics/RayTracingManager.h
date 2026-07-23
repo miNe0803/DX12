@@ -16,6 +16,15 @@ struct RTInstance {
 	uint32_t flags = 0;                // D3D12_RAYTRACING_INSTANCE_FLAGS
 };
 
+/// One triangle geometry (submesh) fed into a BLAS. Position must be at vertex offset 0.
+struct RTGeometry {
+	ID3D12Resource* vertexBuffer = nullptr;
+	uint32_t vertexCount = 0;
+	uint32_t vertexStride = 0;       // e.g. sizeof(Vertex) == 84
+	ID3D12Resource* indexBuffer = nullptr;
+	uint32_t indexCount = 0;
+};
+
 /// DXR 1.1 Ray Tracing Manager.
 /// Builds BLAS per unique mesh, TLAS per frame from instance transforms.
 /// Dispatches reflection rays for water surfaces.
@@ -25,14 +34,23 @@ public:
 	bool Init(ID3D12Device5* device, DescriptorHeap* heap, uint32_t screenW, uint32_t screenH);
 	void Shutdown();
 
-	/// Register a unique mesh as a BLAS. Returns BLAS index.
-	uint32_t AddBLAS(ID3D12GraphicsCommandList4* cmd,
-	                 ID3D12Resource* vertexBuffer, uint32_t vertexCount, uint32_t vertexStride,
-	                 ID3D12Resource* indexBuffer, uint32_t indexCount);
+	/// Register one MODEL as a single BLAS built from N submesh geometries. Returns BLAS index.
+	/// (One BLAS per model — NOT per submesh — keeps TLAS instance count ~= actor count.)
+	uint32_t AddBLAS(ID3D12GraphicsCommandList4* cmd, const RTGeometry* geos, uint32_t geoCount);
 
-	/// Rebuild TLAS from current frame's instances. Call once per frame.
+	/// Build TLAS from instances. For the STATIC town this is called ONCE (PREFER_FAST_TRACE).
 	void BuildTLAS(ID3D12GraphicsCommandList4* cmd,
 	               const RTInstance* instances, uint32_t instanceCount);
+
+	/// Free the transient BLAS/TLAS scratch buffers. Call ONCE after the one-time static build
+	/// command list has been executed AND GPU-idle-waited (scratch must outlive the async build).
+	void ReleaseBuildScratch() { m_buildScratch.clear(); m_tlasScratch.Reset(); }
+
+	/// TLAS GPU VA for inline RayQuery (RaytracingAccelerationStructure SRV via root SRV).
+	D3D12_GPU_VIRTUAL_ADDRESS GetTlasGpuVA() const {
+		return m_tlasBuffer ? m_tlasBuffer->GetGPUVirtualAddress() : 0;
+	}
+	uint32_t GetInstanceCount() const { return m_tlasInstanceCount; }
 
 	/// Dispatch reflection rays for water pixels.
 	/// Output: half-resolution reflection texture.
@@ -41,6 +59,12 @@ public:
 	                             const DirectX::XMMATRIX& invViewProj,
 	                             const DirectX::XMFLOAT3& cameraPos,
 	                             float waterSurfaceY);
+
+	/// F1 検証: primary ray のヒット距離 vs ラスタ深度を色分けして HDR RTV へフルスクリーン描画。
+	/// 緑=一致(TLAS正), 赤=不一致, 青=RT取りこぼし。inline RayQuery(fullscreen PS)。
+	void RenderDebugPrimary(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv,
+	                        ID3D12Resource* depthResource,
+	                        const DirectX::XMMATRIX& invViewProj, const DirectX::XMFLOAT3& cameraPos);
 
 	/// Bindless heap index of the reflection output texture (SRV).
 	uint32_t GetReflectionSrvIdx() const { return m_reflectionSrvIdx; }
@@ -55,12 +79,15 @@ private:
 	bool m_valid = false;
 	uint32_t m_screenW = 0, m_screenH = 0;
 
-	// BLAS list
+	// BLAS list (scratch NOT retained here — see m_buildScratch)
 	struct BLASEntry {
 		ComPtr<ID3D12Resource> blasBuffer;
-		ComPtr<ID3D12Resource> scratchBuffer;
 	};
 	std::vector<BLASEntry> m_blasList;
+
+	// Transient scratch for the one-time static build (BLAS + TLAS). Held until GPU-idle,
+	// then freed via ReleaseBuildScratch() — fixes the old per-BLAS permanent-scratch VRAM leak.
+	std::vector<ComPtr<ID3D12Resource>> m_buildScratch;
 
 	// TLAS
 	ComPtr<ID3D12Resource> m_tlasBuffer;
@@ -68,6 +95,7 @@ private:
 	ComPtr<ID3D12Resource> m_instanceDescBuffer; // upload heap for D3D12_RAYTRACING_INSTANCE_DESC
 	uint32_t m_tlasMaxInstances = 0;
 	uint32_t m_tlasSrvIdx = UINT32_MAX;
+	uint32_t m_tlasInstanceCount = 0;
 
 	// Reflection output (half-res RGBA16F)
 	ComPtr<ID3D12Resource> m_reflectionTexture;
@@ -85,8 +113,14 @@ private:
 	D3D12_GPU_VIRTUAL_ADDRESS m_hitGroupRecord = 0;
 	uint32_t m_shaderRecordSize = 0;
 
-	// Global root signature for RT shaders
+	// Global root signature for RT shaders (dormant DispatchRays path)
 	ComPtr<ID3D12RootSignature> m_globalRootSig;
+
+	// F1 debug: primary-ray hit-distance visualization (fullscreen PS + inline RayQuery)
+	ComPtr<ID3D12RootSignature>  m_debugRootSig;
+	ComPtr<ID3D12PipelineState>  m_debugPso;
+	ComPtr<ID3D12DescriptorHeap> m_debugHeap;   // [0] = scene depth SRV
+	bool CreateDebugPipeline(ID3D12Device5* device);
 
 	// Constants
 	struct RTConstants {
