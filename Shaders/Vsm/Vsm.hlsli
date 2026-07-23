@@ -24,6 +24,34 @@ uint Vsm_SelectLevel(float2 lightXY, float2 camLightXY, uint levelCount, float b
     return min(lvl, levelCount - 1u);
 }
 
+// ============================================================
+//  フットプリント(スクリーン導関数)LOD — UE5級VSMの根本修正 (Phase 1)。
+//  距離ベース Vsm_SelectLevel はアイレベル擦過で地面がスクリーンを埋めると、近傍の広い光空間面積へ
+//  細レベルを刻印しページ数が爆発する。フットプリントLODは「1スクリーンピクセルが覆う光空間幅 f」を
+//  texelWorld(L)>=f となる最小レベルに対応させる（テクスチャmip選択と同じ）。ceil で粗い方向へ丸める
+//  ため1画素あたりテクセル数≤1 → 要求ページ総数がスクリーンピクセル数で上限化。擦過/遠方の地面は f が
+//  大きく自動的に粗レベルを選ぶので、9216プールに対し数百〜~2000ページに収まる（>4倍余裕）。
+//  dLdx/dLdy: 光空間XYのスクリーンX/Y方向偏微分（サンプラ=ddx/ddy, マーカー=隣接画素有限差分）。
+//  texelWorld0: level0 の world m/texel（= Vsm_LevelCenterExtent[0].w）。
+// ============================================================
+uint Vsm_SelectLevelFootprint(float2 dLdx, float2 dLdy, float texelWorld0, uint levelCount)
+{
+    float f = max(max(abs(dLdx.x), abs(dLdx.y)), max(abs(dLdy.x), abs(dLdy.y)));
+    float lvl = ceil(log2(max(f / max(texelWorld0, 1e-6f), 1.0f)));
+    return (uint)min(max(lvl, 0.0f), (float)(levelCount - 1u));
+}
+
+// 合成: max(距離レベル, フットプリントレベル)。俯瞰では地面がカメラを向くため footprint<=distance となり
+// max=distance ＝ 現行と完全一致（構造的な非回帰保証）。アイレベルの擦過地面のみ footprint が距離を上回り、
+// 粗レベルへ引き上げてページ数を抑える。マーカー/サンプラ/デバッグは同一式を共有し丸め(ceil)を一致させる。
+uint Vsm_SelectLevelCombined(float2 lightXY, float2 camLightXY, uint levelCount, float baseExtent,
+                             float2 dLdx, float2 dLdy, float texelWorld0)
+{
+    uint ld = Vsm_SelectLevel(lightXY, camLightXY, levelCount, baseExtent);
+    uint lf = Vsm_SelectLevelFootprint(dLdx, dLdy, texelWorld0, levelCount);
+    return max(ld, lf);
+}
+
 // V5b 真トロイダル: origin=窓原点(整数ページ座標), pageWorld=1ページの世界幅。
 // スロット = 絶対ページ mod vppr（= (origin + 窓内オフセット) & (vppr-1)）。これによりスロットは
 // **世界固定**（カメラ移動で origin が変わっても同じ世界ページは同じスロット）＝永続キャッシュが移動でも成立。

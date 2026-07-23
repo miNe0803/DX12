@@ -56,6 +56,10 @@ public:
     // 有効化/太陽変化時は次回描画で一度だけリセット（PageTable←0xFFFF, Counter←0, アトラス全クリア）。
     void SetCacheMode(bool on);
     bool GetCacheMode() const { return m_cacheMode; }
+    // Phase 1 フットプリント(スクリーン導関数)LOD（DX12_VSM_FPLOD）。マーカー(CS)・サンプラ(TownPS)・
+    // デバッグPS が同一値を参照する単一ソース。OFF=従来の距離LOD＝現行とビット一致（非回帰）。
+    void SetFootprintLod(bool on) { m_footprintLod = on; }
+    bool GetFootprintLod() const { return m_footprintLod; }
     void RequestCacheReset() { m_cacheNeedsReset = true; }   // 太陽変化・視点ワープ時など
     // 物理プール使用量（FIFOリングなので実使用は cap で頭打ち）。m_lastAllocCount は単調 seq なので clamp。
     uint32_t LastResidentPages() const { return m_lastAllocCount < kPhysicalPages ? m_lastAllocCount : kPhysicalPages; }
@@ -64,6 +68,9 @@ public:
     // depthResource は DEPTH_WRITE 状態で渡す。
     void MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthResource);
     uint32_t LastRequestedPages() const { return m_lastRequestCount; }
+    // Phase 0 計測: レベル別の要求ページ数（アイレベル崩壊の溢れがどのレベルで起きているかを証明する）。
+    // 読戻しは MarkPages 内で 120 フレームに1回集計（throttle）。挙動には影響しない純計測。
+    const uint32_t* LastRequestedPerLevel() const { return m_lastRequestPerLevel; }
 
     // V3a: 要求ページに物理ページを割当て、ページテーブル(vp→phys)と逆引き(phys→vp)を書く。
     // MarkPages の後に呼ぶ。
@@ -180,6 +187,7 @@ private:
     ComPtr<ID3D12PipelineState> m_markPso;
     uint32_t m_markFrame = 0;
     uint32_t m_lastRequestCount = 0;
+    uint32_t m_lastRequestPerLevel[kLevels] = {};   // Phase 0: レベル別要求ページ数（純計測）
     uint32_t m_dbgThrottle = 0;
 
     // V3a: 物理割当
@@ -193,6 +201,8 @@ private:
     uint32_t m_allocFrame = 0;
     uint32_t m_lastAllocCount = 0;
 
+    // Phase 1: フットプリント(スクリーン導関数)LOD。既定OFF＝距離LOD＝現行と同一（非回帰）。Init で DX12_VSM_FPLOD を読む。
+    bool m_footprintLod = false;
     // V5b 永続キャッシュ
     bool m_cacheMode = false;         // DX12_VSM_CACHE / Scene::SetVsm... 経由
     bool m_cacheNeedsReset = true;    // 次回描画で PageTable/Counter/アトラスを初期化

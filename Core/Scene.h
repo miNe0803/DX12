@@ -55,8 +55,11 @@ public:
 	bool GetVsmShadowDebug() const;
 	void SetVsmCache(bool on);                 // V5b 永続キャッシュ（移動時は新規ページのみ描画＝軽量）
 	bool GetVsmCache() const;
+	void SetVsmFootprintLod(bool on);          // Phase 1: フットプリントLOD（アイレベル擦過の崩壊を解消）
+	bool GetVsmFootprintLod() const;
 	uint32_t GetVsmLastPairCount() const;      // 直近フレームの (caster,page) ペア数（診断）
 	uint32_t GetVsmResidentPages() const;      // V5b: 常駐ページ高水位（cap 4096）
+	uint32_t GetVsmRequestedPages() const;     // Phase 0: 直近の要求ページ総数（フットプリントLOD効果の可視化）
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

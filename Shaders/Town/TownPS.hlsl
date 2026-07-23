@@ -48,13 +48,13 @@ cbuffer VsmCB : register(b3, space0)
     float4 Vsm_DepthDim;
     float4 Vsm_LevelCenterExtent[8];
 };
-cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint3 _vsmPad; };
+// gVsmFpLod: Phase 1 フットプリントLOD の ON/OFF（マーカー/デバッグとロックステップ）。OFF=従来の距離LOD。
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint2 _vsmPad; };
 
-// 1タップ: ライト空間XYを完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
-float VsmShadowTap(float2 lxy, float lz)
+// 1タップ: 呼び出し側が選んだレベル L で完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
+// L・bias はタップ毎に再計算せず引数受け取り（フットプリントLOD/スロープバイアスは画素単位=全タップ共通）。
+float VsmShadowTap(float2 lxy, float lz, uint L, float bias)
 {
-    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld → extent0=pw0*vppr
-    uint L = Vsm_SelectLevel(lxy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
     float2 uvp;
     uint2 vp = Vsm_VirtualPage(lxy, Vsm_LevelCenterExtent[L].xy, Vsm_LevelCenterExtent[L].z, (uint)Vsm_Params.z, uvp);
     uint idx = Vsm_PageTableIndex(L, vp, (uint)Vsm_Params.z);
@@ -63,25 +63,65 @@ float VsmShadowTap(float2 lxy, float lz)
     float2 auv = Vsm_PhysicalUV(phys, uvp, (uint)Vsm_Params.w);
     float stored = Vsm_Atlas.SampleLevel(Vsm_Smp, auv, 0);
     float mine = Vsm_NormalizeDepth(lz, Vsm_ZParams.x, Vsm_ZParams.y);
-    return (mine - 0.004f <= stored) ? 1.0f : 0.0f;
+    return (mine - bias <= stored) ? 1.0f : 0.0f;
 }
 // 8タップ ライト空間PCF（各タップ再アドレッシング=スパース安全）。1=光,0=影。
-float SampleSunShadowVSM(float3 worldPos)
+// 指定レベル L で 8-tap ライト空間PCF。戻り: 0..1（影率, 1=光）, 全タップ未割当なら -1。
+// slope=受光面と光の成す角のtan（スロープスケールバイアス用）。
+float VsmPcfLevel(float3 ls, uint L, float slope)
 {
-    float3 ls = mul(float4(worldPos, 1.0f), Vsm_LightView).xyz;
-    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld → extent0=pw0*vppr
-    uint L = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, (uint)Vsm_Params.x, base);
-    float radius = Vsm_LevelCenterExtent[L].w * 1.5f;   // texelWorld×1.5
+    float texelW = Vsm_LevelCenterExtent[L].w;
+    float radius = texelW * 1.5f;   // texelWorld×1.5（ペナンブラ幅）
+    // スロープスケール深度バイアス: 傾斜(grazing)ほど1texelあたり深度変化が大→バイアス増。
+    // peter-panning(平面の浮き)と acne(傾斜の自己影)を同時回避。base 1.5 texel + slope 2.5 texel。
+    float bias = (texelW * (1.5f + 2.5f * slope)) / max(Vsm_ZParams.y - Vsm_ZParams.x, 1e-3f) + 3e-6f;
     const int TAPS = 8;
     float sum = 0.0f, wsum = 0.0f;
     [unroll] for (int t = 0; t < TAPS; ++t)
     {
         float ang = (t + 0.5f) * (6.2831853f / TAPS);
         float r = sqrt((t + 0.5f) / TAPS) * radius;
-        float s = VsmShadowTap(ls.xy + float2(cos(ang), sin(ang)) * r, ls.z);
+        float s = VsmShadowTap(ls.xy + float2(cos(ang), sin(ang)) * r, ls.z, L, bias);
         if (s >= 0.0f) { sum += s; wsum += 1.0f; }
     }
-    return (wsum < 0.5f) ? -1.0f : (sum / wsum);   // 全未割当 → -1（VSM非カバー＝CSMへフォールバック）
+    return (wsum < 0.5f) ? -1.0f : (sum / wsum);
+}
+
+float SampleSunShadowVSM(float3 worldPos, float ndotl)
+{
+    float3 ls = mul(float4(worldPos, 1.0f), Vsm_LightView).xyz;
+    float base = Vsm_LevelCenterExtent[0].z * Vsm_Params.z;   // V5b: .z=pageWorld → extent0=pw0*vppr
+    // フットプリントLOD: worldPos の光空間XYのスクリーン導関数で1画素の光空間フットプリントを得る。
+    // ★導関数は一様制御フローでのみ有効 → [unroll]ループ・分岐の前に関数入口で無条件に評価（安全）。
+    float2 dLdx = ddx(ls.xy);
+    float2 dLdy = ddy(ls.xy);
+    uint levels = (uint)Vsm_Params.x;
+    float tw0 = Vsm_LevelCenterExtent[0].w;
+    // 連続LOD（footprint=log2, 整数化しない）と distance LOD の max。これの小数部で隣接レベルをブレンド。
+    float f = max(max(abs(dLdx.x), abs(dLdx.y)), max(abs(dLdy.x), abs(dLdy.y)));
+    float lodFp = (gVsmFpLod != 0u) ? log2(max(f / max(tw0, 1e-6f), 1.0f)) : 0.0f;
+    // 距離LODを連続化。旧: (float)Vsm_SelectLevel は整数 ceil のため、遠方のカメラ正対面では
+    // lod=lodDist が正確な整数 → frac=0 → トリリニアが無効化され、クリップマップ窓境界(2^Lc のリング)を
+    // カメラ移動で跨ぐ瞬間にレベルが hard フリップ（解像度/ペナンブラが2倍段差）＝「遠影チカチカ」＆
+    // 「移動するとカスケード境界がリング状にスウィープ」の主因。floor は被覆レベル Lc のまま（細レベルは
+    // 遠点に届かないので粗方向 Lc+1 へのみブレンド）、窓外縁で C0 連続に Lc→Lc+1 へ遷移させ段差を溶かす。
+    float dCheb = max(abs(ls.x - Vsm_ZParams.z), abs(ls.y - Vsm_ZParams.w)) * 2.0f;
+    uint  Lc = Vsm_SelectLevel(ls.xy, Vsm_ZParams.zw, levels, base);   // ceil 被覆レベル
+    float edge = saturate((dCheb / max(base, 1e-3f) / exp2((float)Lc) - 0.5f) * 2.0f);  // 0=窓中央, 1=窓外縁
+    float lodDist = (float)Lc + edge;
+    float lod = clamp(max(lodDist, lodFp), 0.0f, (float)(levels - 1u));
+    uint  L0 = (uint)floor(lod);
+    uint  L1 = min(L0 + 1u, levels - 1u);
+    float w  = lod - (float)L0;   // ブレンド係数（0=L0, 1=L1）
+    float slope = clamp(sqrt(max(1.0f - ndotl * ndotl, 0.0f)) / max(ndotl, 0.15f), 0.0f, 6.0f);
+    // トリリニア: 隣接クリップマップレベルをブレンドし、レベル境界の解像度/ペナンブラ段差（移動時に
+    // 同心リングとしてスウィープして目立つ「カスケード境界」）を滑らかにする。±1帯が両レベルをマーク済。
+    float s0 = VsmPcfLevel(ls, L0, slope);
+    float s1 = (w > 0.01f && L1 != L0) ? VsmPcfLevel(ls, L1, slope) : s0;
+    if (s0 < 0.0f && s1 < 0.0f) return -1.0f;   // 両レベル未割当 → CSMフォールバック
+    if (s0 < 0.0f) return s1;                    // 片方のみ割当 → そちらを使用（境界の穴を防ぐ）
+    if (s1 < 0.0f) return s0;
+    return lerp(s0, s1, w);
 }
 
 cbuffer SceneCB : register(b1, space0)
@@ -205,10 +245,14 @@ float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
 {
     if (gUseVsm != 0u)
     {
-        float s = SampleSunShadowVSM(worldPos);
-        if (s >= 0.0f) return s;   // VSM がこの画素をカバー
+        // スロープスケールバイアス用に受光面と太陽の角度余弦を渡す（SunDirection=光へ向かう方向, 正規化）。
+        float ndotl = saturate(dot(Nw, normalize(SunDirection.xyz)));
+        float s = SampleSunShadowVSM(worldPos, ndotl);
+        // VSM主軸: 被覆画素は VSM の影。非被覆(>512m 等ごく僅か)は lit 扱い。CSMカスケードは VSM ON時
+        // キャスタ描画をスキップ(空)なので参照しない＝二重計算を排除。VSMは0-512mを世界固定で covers。
+        return (s >= 0.0f) ? s : 1.0f;
     }
-    return SampleSunShadowSoft(worldPos, Nw, svpos);   // 非VSM or VSM未割当 → CSM
+    return SampleSunShadowSoft(worldPos, Nw, svpos);   // VSM OFF → 従来CSM（キャスタ描画あり）
 }
 
 // 点光源 1 灯の寄与

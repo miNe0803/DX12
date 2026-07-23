@@ -44,10 +44,13 @@ bool VsmSystem::Init(ID3D12Device* device, DescriptorHeap* sceneHeap, uint32_t w
         if (h) m_atlasSrvGpu = h->HandleGPU;
     }
 
+    // Phase 1: フットプリントLOD は既定ON（アイレベル崩壊を根絶する主軸経路）。DX12_VSM_FPLOD=0 で無効化可。
+    { char e[8]; DWORD n = GetEnvironmentVariableA("DX12_VSM_FPLOD", e, sizeof(e)); m_footprintLod = (n == 0) || (atoi(e) != 0); }
+
     m_valid = true;
-    DebugLog("[VSM] Init OK: atlas %ux%u (%u pages), pageTable %u entries, %u levels, baseExtent %.1fm\n",
+    DebugLog("[VSM] Init OK: atlas %ux%u (%u pages), pageTable %u entries, %u levels, baseExtent %.1fm, fpLod=%d\n",
         kAtlasPagesPerRow * kPageSize, kAtlasPagesPerRow * kPageSize, kPhysicalPages,
-        kTotalVirtualPages, kLevels, kBaseExtent);
+        kTotalVirtualPages, kLevels, kBaseExtent, (int)m_footprintLod);
     return true;
 }
 
@@ -208,7 +211,7 @@ bool VsmSystem::CreateMarkPipeline(ID3D12Device* device)
     params[1].InitAsDescriptorTable(1, &srvR);
     CD3DX12_DESCRIPTOR_RANGE uavR; uavR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
     params[2].InitAsDescriptorTable(1, &uavR);
-    params[3].InitAsConstants(1, 1);   // b1: gMaxMarkLevel（これより遠いレベルの画素はページ要求しない→CSM）
+    params[3].InitAsConstants(2, 1);   // b1: gMaxMarkLevel, gUseFootprintLod（Phase 1）
     D3D12_ROOT_SIGNATURE_DESC rs = {}; rs.NumParameters = 4; rs.pParameters = params;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
@@ -274,15 +277,18 @@ void VsmSystem::MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthR
     cmd->SetComputeRootDescriptorTable(1, gbase);
     D3D12_GPU_DESCRIPTOR_HANDLE gUav = gbase; gUav.ptr += m_markStride;
     cmd->SetComputeRootDescriptorTable(2, gUav);
-    // VSMを近距離の連続レベルに限定（これより遠い=高レベルの画素はページ要求せず→町側でCSM）。
-    // これでプール溢れ(密な遠景視界)による散在パッチ/ブロック破綻を防ぎ、近VSM＋遠CSMの綺麗な境界にする。
-    // 既定 6（レベル0-6 ≒ 近~256m を VSM高精細、以遠=遠景背景のみ CSM）。VSM主軸化: プール 9216 に拡大したので
-    // 町全体を VSM で賄える。グレージング地面(level5=4316,level7≈5-6k)も 9216 内に収容。touch-LRU で回転も可視保護。
-    // DX12_VSM_MAXLEVEL で調整（大=VSM遠くまで, 小=近だけVSM・遠CSM）。
+    // VSM が担うクリップマップの最大レベル。既定 7（=全8レベル 0-7, 最大到達 512m を VSM がカバー）。
+    // 【遠影チカチカ対策 / Phase 3 被覆拡張】以前は 6 で level7 画素が CSM に落ち、フットプリントLODは
+    // 視点依存なので移動中に far 画素が level6/7 境界を跨いで「世界固定VSM ↔ 視点依存CSM」を往復し、
+    // その切替がチカチカに見えた。7 にすると可視範囲は全て世界固定VSM（移動でも縁がクロールしない）で、
+    // CSM は未割当/溢れ時のみの安全網になる。フットプリントLODが要求ページ数を有界化するので 9216 内に収まる。
+    // DX12_VSM_MAXLEVEL で調整（小さくすると近だけVSM・遠CSM＝旧挙動）。
     static uint32_t s_maxMarkLevel = [] {
-        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 6u;
+        char e[16]; return GetEnvironmentVariableA("DX12_VSM_MAXLEVEL", e, sizeof(e)) > 0 ? (uint32_t)atoi(e) : 7u;
     }();
-    cmd->SetComputeRoot32BitConstants(3, 1, &s_maxMarkLevel, 0);
+    // Phase 1: b1 = { gMaxMarkLevel, gUseFootprintLod }。フットプリントLOD は単一ソース m_footprintLod。
+    uint32_t markConsts[2] = { s_maxMarkLevel, m_footprintLod ? 1u : 0u };
+    cmd->SetComputeRoot32BitConstants(3, 2, markConsts, 0);
     cmd->Dispatch((m_w + 7) / 8, (m_h + 7) / 8, 1);
 
     auto dBack = CD3DX12_RESOURCE_BARRIER::Transition(depthResource,
@@ -310,10 +316,23 @@ void VsmSystem::MarkPages(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depthR
         if (SUCCEEDED(m_requestReadback[oldest]->Map(0, &rr, &p)) && p)
         {
             const uint32_t* d = reinterpret_cast<const uint32_t*>(p);
-            uint32_t cnt = 0; for (uint32_t i = 0; i < kTotalVirtualPages; ++i) if (d[i]) ++cnt;
+            // Phase 0: レベル別に集計（要求バッファは level*kVirtualPagesPerLevel + slot 配置）。
+            // アイレベル崩壊の溢れがどのレベルで起きるか（例: L5≈4316, L4≈4146）を証明するための計測。
+            uint32_t cnt = 0;
+            for (uint32_t L = 0; L < kLevels; ++L)
+            {
+                uint32_t bcnt = 0;
+                const uint32_t bstart = L * kVirtualPagesPerLevel;
+                for (uint32_t j = 0; j < kVirtualPagesPerLevel; ++j) if (d[bstart + j]) ++bcnt;
+                m_lastRequestPerLevel[L] = bcnt;
+                cnt += bcnt;
+            }
             m_lastRequestCount = cnt;
             D3D12_RANGE wr{ 0, 0 }; m_requestReadback[oldest]->Unmap(0, &wr);
-            printf("[VSM] requested pages this frame = %u / %u\n", cnt, kTotalVirtualPages);
+            printf("[VSM] requested pages this frame = %u / %u (pool=%u)\n", cnt, kTotalVirtualPages, kPhysicalPages);
+            printf("[VSM]  per-level:");
+            for (uint32_t L = 0; L < kLevels; ++L) printf(" L%u=%u", L, m_lastRequestPerLevel[L]);
+            printf("\n");
             fflush(stdout);
         }
     }
@@ -1311,15 +1330,16 @@ bool VsmSystem::CreateShadowDebugPipeline(ID3D12Device* device)
     }
 
     CD3DX12_DESCRIPTOR_RANGE srv; srv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);  // t0,t1,t2
-    CD3DX12_ROOT_PARAMETER p[2];
+    CD3DX12_ROOT_PARAMETER p[3];
     p[0].InitAsConstantBufferView(0);                                   // b0 VsmCB
     p[1].InitAsDescriptorTable(1, &srv, D3D12_SHADER_VISIBILITY_PIXEL);
+    p[2].InitAsConstants(1, 1, 0, D3D12_SHADER_VISIBILITY_PIXEL);       // b1 gVsmFpLod（Phase 1: 本番と同期）
     D3D12_STATIC_SAMPLER_DESC smp = {};
     smp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
     smp.AddressU = smp.AddressV = smp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     smp.ShaderRegister = 0; smp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 2; rs.pParameters = p; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &smp;
+    rs.NumParameters = 3; rs.pParameters = p; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &smp;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
     { if (err) printf("VSM shadowDbg RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
@@ -1390,6 +1410,7 @@ void VsmSystem::RenderShadowDebug(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESC
     cmd->SetGraphicsRootSignature(m_shadowDbgRS.Get());
     cmd->SetGraphicsRootConstantBufferView(0, GetConstantsAddress());
     cmd->SetGraphicsRootDescriptorTable(1, m_shadowDbgHeap->GetGPUDescriptorHandleForHeapStart());
+    { uint32_t fp = m_footprintLod ? 1u : 0u; cmd->SetGraphicsRoot32BitConstants(2, 1, &fp, 0); }   // Phase 1: 本番と同期
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
 

@@ -104,8 +104,8 @@ public:
 
     // V4: 太陽シャドウを VSM からサンプルするためのバインド（Draw 前に毎フレーム設定）。useVsm=false で従来CSM。
     void SetVsmBindings(D3D12_GPU_VIRTUAL_ADDRESS vsmCB, D3D12_GPU_VIRTUAL_ADDRESS pageTableVA,
-                        D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv, bool useVsm)
-    { m_vsmCBAddr = vsmCB; m_vsmPageTableVA = pageTableVA; m_vsmAtlasSrv = atlasSrv; m_useVsm = useVsm; }
+                        D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv, bool useVsm, bool fpLod = false)
+    { m_vsmCBAddr = vsmCB; m_vsmPageTableVA = pageTableVA; m_vsmAtlasSrv = atlasSrv; m_useVsm = useVsm; m_vsmFpLod = fpLod; }
 
 private:
     struct SubMesh
@@ -131,7 +131,8 @@ private:
         DirectX::XMFLOAT3 localPos;         // BuildLocal の平行移動 ( 距離カリング用 )
         DirectX::XMFLOAT3 worldCenter{ 0,0,0 }; // ワールド中心 ( 視錐台カリング用 )
         float worldRadius = 0.0f;           // ワールド境界球半径
-        bool  isFoliage = false;            // 植栽（診断/カリング用）
+        bool  isFoliage = false;            // 植栽（診断/カリング用。メインパスは foliage PSO で描画）
+        bool  isTree = false;               // 木（大型植栽）。isFoliage だが影キャスタには含める（他の小植栽は影を落とさない）
         D3D12_GPU_DESCRIPTOR_HANDLE overrideTable{ 0 }; // slot0 上書き ( 無ければ .ptr==0 )
         bool overrideGlass = false;
         bool castShadow = true;
@@ -211,6 +212,7 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS m_vsmPageTableVA = 0;
     D3D12_GPU_DESCRIPTOR_HANDLE m_vsmAtlasSrv = { 0 };
     bool m_useVsm = false;
+    bool m_vsmFpLod = false;   // Phase 1: フットプリントLOD を TownPS(b4 gVsmFpLod)へ渡す（本番サンプラの切替）
     size_t m_loadedMeshes = 0;
     size_t m_missingMeshes = 0;
 

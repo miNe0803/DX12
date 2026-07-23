@@ -1505,7 +1505,18 @@ bool Scene::Init()
 			XMFLOAT3 cw; char ovEv[8]; char drEv[8]; char pdEv[8];
 			bool wantOverview = (GetEnvironmentVariableA("DX12_TOWN_OVERVIEW", ovEv, sizeof(ovEv)) > 0);
 			XMFLOAT3 dr;
-			if (GetEnvironmentVariableA("DX12_LOOK_PUDDLE", pdEv, sizeof(pdEv)) > 0 && s_town->FirstCrosswalkWorld(cw))
+			char eyeEv[8];
+			// VSM アイレベル崩壊の厳密再現（診断用）: ユーザ報告の視点を正確に再構築。
+			// Pos(-42.35,1.84,2.23), Forward(-0.409,-0.233,-0.882)。GetViewMatrix は Y のみ反転
+			// (実forward=(td.x,-td.y,td.z)/dist) なので LookAt の目標方向は (Fx,-Fy,Fz)。
+			// DX12_LOOK_EYE=1 でこの草地すれすれ視点に固定 → 要求ページ数を計測する。
+			if (GetEnvironmentVariableA("DX12_LOOK_EYE", eyeEv, sizeof(eyeEv)) > 0)
+			{
+				const XMVECTOR eyePos = XMVectorSet(-42.35f, 1.84f, 2.23f, 0.0f);
+				g_Camera->SetPosition(eyePos);
+				g_Camera->LookAt(XMVectorAdd(eyePos, XMVectorSet(-0.409f, 0.233f, -0.882f, 0.0f)));
+			}
+			else if (GetEnvironmentVariableA("DX12_LOOK_PUDDLE", pdEv, sizeof(pdEv)) > 0 && s_town->FirstCrosswalkWorld(cw))
 			{
 				// 水たまりを浅い視線角で見る（SSRが建物/木を映す検証用）。低く・遠くから見下ろし。
 				// LookAt は垂直反転仕様のため注視点 Y を鏡像化（2*camY - targetY）。
@@ -1595,8 +1606,11 @@ void Scene::SetVsmShadowDebug(bool on) { s_vsmShadowDebug = on; s_vsmGateInit = 
 bool Scene::GetVsmShadowDebug() const { return s_vsmShadowDebug; }
 void Scene::SetVsmCache(bool on) { s_vsmCache = on; s_vsmGateInit = true; }   // 次フレームの SetCacheMode で反映（切替時に内部リセット）
 bool Scene::GetVsmCache() const { return s_vsmCache; }
+void Scene::SetVsmFootprintLod(bool on) { if (s_vsm) s_vsm->SetFootprintLod(on); }   // マーカー/サンプラ/デバッグを次フレームでロックステップ切替
+bool Scene::GetVsmFootprintLod() const { return s_vsm && s_vsm->GetFootprintLod(); }
 uint32_t Scene::GetVsmLastPairCount() const { return s_vsm ? s_vsm->LastPairCount() : 0u; }
 uint32_t Scene::GetVsmResidentPages() const { return s_vsm ? s_vsm->LastResidentPages() : 0u; }
+uint32_t Scene::GetVsmRequestedPages() const { return s_vsm ? s_vsm->LastRequestedPages() : 0u; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -1950,6 +1964,12 @@ void Scene::Draw()
 			commandList->SetGraphicsRootSignature(s_shadow->GetShadowRootSignature());
 			commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+			// VSM主軸時（既定）: 町/木/建物の影は全てVSMアトラスが担うので、CSMカスケードへの
+			// キャスタ描画をスキップ（クリア＋SRV遷移のみ）＝同じ~4000キャスタをCSM4面+VSMアトラスへ描く
+			// 二重描画を排除。町PS(SampleSunShadowHybrid)は VSM非被覆画素を lit 扱いにしCSMを参照しない。
+			// DX12_VSM=0 でVSMを切ると従来通りCSMがキャスタを描画する。
+			if (s_vsmEnabled) { s_shadow->EndShadowPass(commandList, cascade); continue; }
+
 			XMMATRIX lightVP = s_shadow->GetLightVPTransposed(cascade);
 			lightVP = XMMatrixTranspose(lightVP);
 
@@ -2248,7 +2268,8 @@ void Scene::Draw()
 		if (s_vsm && s_vsm->IsValid())
 			s_town->SetVsmBindings(s_vsm->GetRenderedConstantsAddress(),   // V5b Stage0: 描画時の中心で引く→移動の揺れ消
 				s_vsm->GetPageTable()->GetGPUVirtualAddress(),
-				s_vsm->GetAtlasSrvGpu(), s_vsmEnabled && s_vsmAtlasReady);   // ランタイムトグル + アトラス準備後のみ
+				s_vsm->GetAtlasSrvGpu(), s_vsmEnabled && s_vsmAtlasReady,   // ランタイムトグル + アトラス準備後のみ
+				s_vsm->GetFootprintLod());   // Phase 1: フットプリントLOD をサンプラ(TownPS)へロックステップ配線
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),
 			envHandle,
@@ -2260,6 +2281,7 @@ void Scene::Draw()
 
 	// ---- Water Pass: 水面プレーン（テレインメッシュを Y=水位に固定して描画）----
 	if (waterPipelineState && waterPipelineState->IsValid() && m_terrainSharedVB && m_terrainSharedIB
+
 		&& terrainConstantBuffer[currentIndex] && s_terrainMaskHandle)
 	{
 		GPU_CMD_BEGIN_EVENT(commandList, 60, 120, 200, L"Water Pass");
@@ -2644,7 +2666,8 @@ void Scene::Draw()
 	if (!s_vsmGateInit)
 	{
 		char ev[8];
-		s_vsmEnabled     = GetEnvironmentVariableA("DX12_VSM",        ev, sizeof(ev)) > 0;
+		// VSM を既定ON（常用の主軸影）。DX12_VSM=0 で明示的に無効化＝従来CSMに戻す。
+		{ DWORD n = GetEnvironmentVariableA("DX12_VSM", ev, sizeof(ev)); s_vsmEnabled = (n == 0) || (ev[0] != '0'); }
 		s_vsmAtlasDebug  = GetEnvironmentVariableA("DX12_VSM_ATLAS",  ev, sizeof(ev)) > 0;
 		s_vsmShadowDebug = GetEnvironmentVariableA("DX12_VSM_SHADOW", ev, sizeof(ev)) > 0;
 		s_vsmForceRender = GetEnvironmentVariableA("DX12_VSM_NOCACHE", ev, sizeof(ev)) > 0;

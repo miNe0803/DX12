@@ -643,7 +643,7 @@ void TownScene::DrawDepth(ID3D12GraphicsCommandList* cmd, const XMMATRIX& lightV
     const uint32_t kMaxCasters = 8000;   // 純粋な安全網（実キャスタ < これ）
     for (const Instance& inst : m_instances)
     {
-        if (!inst.castShadow || inst.isFoliage) continue;       // 地面/植栽は落とさない
+        if (!inst.castShadow || (inst.isFoliage && !inst.isTree)) continue;  // 地面/小植栽は落とさない。木は落とす
         if (!inst.model || inst.model->subs.empty()) continue;
 
         // カメラからの距離でシェルカリング（回転不変＝カメラ回転で影が点滅しない）
@@ -692,7 +692,7 @@ void TownScene::BuildCasterRecords()
     recs.reserve(m_instances.size());
     for (const Instance& inst : m_instances)
     {
-        if (!inst.castShadow || inst.isFoliage) continue;         // DrawDepth と同条件
+        if (!inst.castShadow || (inst.isFoliage && !inst.isTree)) continue;  // DrawDepth と同条件（木は影キャスタ）
         if (!inst.model || inst.model->subs.empty()) continue;
         auto it = modelId.find(inst.model);
         uint32_t mid;
@@ -1138,6 +1138,9 @@ bool TownScene::ParseT3D()
                         lmName.find("grass") != std::string::npos || lmName.find("leaves") != std::string::npos ||
                         lmName.find("plant") != std::string::npos || lmName.find("bush") != std::string::npos ||
                         lmName.find("ivy") != std::string::npos || lmName.find("hedge") != std::string::npos);
+                    // 木は大型で影が目立つので影キャスタに含める（他の小植栽=花/芝は落とさない=従来通り）。
+                    // 街灯(lamps_tree_light)は木ではないので除外。
+                    inst.isTree = (lmName.find("tree") != std::string::npos && lmName.find("tree_light") == std::string::npos);
 
                     // 街灯/ランプ器具 → 点光源の配置位置（電球位置へ +4m）
                     if (lmName.find("tarppost") != std::string::npos || lmName.find("lamps_tree_light") != std::string::npos ||
@@ -1281,7 +1284,7 @@ bool TownScene::CreateRootSignature()
     params[11].InitAsConstantBufferView(3, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b3 space0 VsmCB
     params[12].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t11 space0 VSM PageTable (root SRV)
     params[13].InitAsDescriptorTable(1, &rangeVsmAtlas, D3D12_SHADER_VISIBILITY_PIXEL); // t12 space0 VSM Atlas
-    params[14].InitAsConstants(1, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 gUseVsm (1 uint)
+    params[14].InitAsConstants(2, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod}
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[3];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -1545,15 +1548,16 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
 
     // V4: VSM バインド。param14(gUseVsm)は常に設定（TownPSが必ず参照）。11-13はVSM有効時のみ。
     // 反射パスではVSMを使わない（アトラス状態はメインパス前提のため）。
-    uint32_t useVsm = 0u;
+    // b4 = { gUseVsm, gVsmFpLod }。フットプリントLOD はサンプラ(TownPS)をマーカー(CS)とロックステップで切替。
+    uint32_t vsmFlags[2] = { 0u, m_vsmFpLod ? 1u : 0u };
     if (m_vsmCBAddr && m_vsmAtlasSrv.ptr)
     {
         cmd->SetGraphicsRootConstantBufferView(11, m_vsmCBAddr);
         cmd->SetGraphicsRootShaderResourceView(12, m_vsmPageTableVA);
         cmd->SetGraphicsRootDescriptorTable(13, m_vsmAtlasSrv);
-        useVsm = (m_useVsm && !refl) ? 1u : 0u;
+        vsmFlags[0] = (m_useVsm && !refl) ? 1u : 0u;
     }
-    cmd->SetGraphicsRoot32BitConstants(14, 1, &useVsm, 0);
+    cmd->SetGraphicsRoot32BitConstants(14, 2, vsmFlags, 0);
 
     const UINT frame = g_Engine->CurrentBackBufferIndex();
     // メイン(0)/反射(1)で別領域を使い、同フレーム2回の Draw がワールドCBを踏み合わないようにする。

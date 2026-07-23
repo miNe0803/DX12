@@ -198,8 +198,17 @@ void DebugUI::Draw()
 						ImGui::TextDisabled(cache
 							? "ON=世界固定＋FIFO退去＋タイルクリアで移動でも影破綻なし・軽量（推奨）。"
 							: "OFF=毎フレーム全ページ再描画（移動で~5FPS。比較/診断用）。");
+						// Phase 1/2: フットプリント(スクリーン導関数)LOD。アイレベル擦過の崩壊を根絶。
+						bool fpLod = g_Scene->GetVsmFootprintLod();
+						if (ImGui::Checkbox("Footprint LOD (UE5型, アイレベル崩壊を解消): 画面導関数でレベル選択", &fpLod))
+							g_Scene->SetVsmFootprintLod(fpLod);
+						ImGui::TextDisabled(fpLod
+							? "ON=1画素≈1シャドウテクセルでページ数がスクリーン依存に有界化（擦過でも崩壊せず）。"
+							: "OFF=従来の距離LOD（アイレベル擦過で地面がプールを溢れさせ崩壊）。A/B比較可。");
 						ImGui::Text("(caster,page) pairs this frame: %u", g_Scene->GetVsmLastPairCount());
-						ImGui::Text("resident pages (cache): %u / 4096", g_Scene->GetVsmResidentPages());
+						ImGui::Text("resident pages (cache): %u / 9216", g_Scene->GetVsmResidentPages());
+						ImGui::Text("requested pages this frame: %u / 9216 pool  [%s]",
+							g_Scene->GetVsmRequestedPages(), fpLod ? "footprint" : "distance");
 						ImGui::Separator();
 						ImGui::TextUnformatted("--- 検証ビュー（HDR を上書き表示）---");
 						bool atlas = g_Scene->GetVsmAtlasDebug();
