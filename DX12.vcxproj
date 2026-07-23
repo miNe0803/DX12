@@ -780,4 +780,20 @@ exit /B 0</Command>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <!-- ============================================================
+       確実解決: 実行時DLL不足 (0xc0000135 STATUS_DLL_NOT_FOUND) の恒久対策。
+       vcpkg 自動配置や PostBuildEvent はリンク時にしか走らず、DLLが欠けても
+       ビルドが up-to-date だと補充されない。この Target は毎ビルド後に必ず走り
+       (AfterTargets=Build)、必要DLLを OutDir へ冪等コピーする最終防波堤。
+       Debug は vcpkg debug/bin 全DLL + WinPixEventRuntime(configに依らずrelease bin)。
+       ============================================================ -->
+  <Target Name="EnsureRuntimeDlls" AfterTargets="Build">
+    <ItemGroup>
+      <_VsmRtDll Condition="'$(Configuration)'=='Debug'" Include="C:\vcpkg\installed\x64-windows\debug\bin\*.dll" />
+      <_VsmRtDll Condition="'$(Configuration)'=='Debug'" Include="C:\vcpkg\installed\x64-windows\bin\WinPixEventRuntime.dll" />
+      <_VsmRtDll Condition="'$(Configuration)'=='Release'" Include="C:\vcpkg\installed\x64-windows\bin\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_VsmRtDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" ContinueOnError="true" />
+    <Message Importance="high" Text="[EnsureRuntimeDlls] runtime DLLs synced to $(OutDir)" />
+  </Target>
 </Project>
