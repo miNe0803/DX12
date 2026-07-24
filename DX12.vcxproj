@@ -208,6 +208,7 @@ exit /B 0</Command>
     <ClInclude Include="Source\Graphics\GtaoSystem.h" />
     <ClInclude Include="Source\Graphics\RtaoSystem.h" />
     <ClInclude Include="Source\Graphics\DdgiSystem.h" />
+    <ClInclude Include="Source\Graphics\RtReflectionSystem.h" />
     <ClInclude Include="Source\Graphics\VsmSystem.h" />
     <ClInclude Include="Source\Graphics\TerrainGpuCullSystem.h" />
     <ClInclude Include="Source\Graphics\PostProcessSystem.h" />
@@ -254,6 +255,7 @@ exit /B 0</Command>
     <ClCompile Include="Source\Graphics\GtaoSystem.cpp" />
     <ClCompile Include="Source\Graphics\RtaoSystem.cpp" />
     <ClCompile Include="Source\Graphics\DdgiSystem.cpp" />
+    <ClCompile Include="Source\Graphics\RtReflectionSystem.cpp" />
     <ClCompile Include="Source\Graphics\VsmSystem.cpp" />
     <ClCompile Include="Source\Graphics\TerrainGpuCullSystem.cpp" />
     <ClCompile Include="Source\Graphics\TreeGpuCullSystem.cpp" />
@@ -497,6 +499,13 @@ exit /B 0</Command>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
       <ObjectFileName>$(OutDir)Ddgi_ProbeUpdate_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\RT\RtReflection_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)RtReflection_CS.cso</ObjectFileName>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
     </FxCompile>

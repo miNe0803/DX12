@@ -77,6 +77,10 @@ public:
 	uint32_t GetGiInstanceCount() const;       // TLAS インスタンス数（監視用）
 	void SetDdgiIntensity(float v);            // DDGI 全体スケール（明るさ調整）
 	float GetDdgiIntensity() const;
+	// 仕上げ: レイトレース反射（RTR）。ONで濡れ地面/水たまりが本物のRT反射（画面外も映る）。
+	void SetRtrEnabled(bool on);
+	bool GetRtrEnabled() const;
+	bool RtrAvailable() const;
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

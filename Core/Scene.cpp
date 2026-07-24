@@ -40,6 +40,7 @@
 #include "Graphics/GtaoSystem.h"
 #include "Graphics/RtaoSystem.h"
 #include "Graphics/DdgiSystem.h"
+#include "Graphics/RtReflectionSystem.h"
 #include "Graphics/VsmSystem.h"
 #include "Graphics/RayTracingManager.h"   // DXR-GI F1: TLAS基盤
 #include "Graphics/TreeVegetation.h"
@@ -77,6 +78,8 @@ static RtaoSystem* s_rtao = nullptr; // Phase R: レイトレースAO（TLAS存�
 static bool s_rtaoEnabled = false;   // RTAO 有効（DX12_RTAO で初期化。ONでGTAOを置換。既定OFF＝GTAO経路不変）
 static DdgiSystem* s_ddgi = nullptr; // Phase G: DDGI拡散GI（TLAS存在時のみ生成）
 static bool s_ddgiEnabled = false;   // DDGI 有効（DX12_DDGI で初期化。ONで町の偽ambientを実GIに置換。既定OFF＝不変）
+static RtReflectionSystem* s_rtr = nullptr; // 仕上げ: レイトレース反射（TLAS存在時のみ生成）
+static bool s_rtrEnabled = false;    // RTR 有効（DX12_RTR で初期化。ONで濡れ地面が本物のRT反射に。既定OFF）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -445,6 +448,7 @@ Scene::~Scene()
 	if (s_gtao) { s_gtao->Shutdown(); delete s_gtao; s_gtao = nullptr; }
 	if (s_rtao) { s_rtao->Shutdown(); delete s_rtao; s_rtao = nullptr; }
 	if (s_ddgi) { s_ddgi->Shutdown(); delete s_ddgi; s_ddgi = nullptr; }
+	if (s_rtr) { s_rtr->Shutdown(); delete s_rtr; s_rtr = nullptr; }
 	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
 	if (s_rtManager) { s_rtManager->Shutdown(); delete s_rtManager; s_rtManager = nullptr; }
 	s_reflValid = false;
@@ -1628,6 +1632,15 @@ bool Scene::Init()
 					if (!s_ddgi->Init(g_Engine->Device(), s_town->BoundsMin(), s_town->BoundsMax()))
 					{ delete s_ddgi; s_ddgi = nullptr; s_ddgiEnabled = false; }
 				}
+				// 仕上げ: TLAS がある時だけ RTR（レイトレース反射）を生成
+				{
+					char rrEv[8];
+					s_rtrEnabled = (GetEnvironmentVariableA("DX12_RTR", rrEv, sizeof(rrEv)) > 0) && (rrEv[0] != '0');
+					D3D12_VIEWPORT vpR = g_Engine->GetViewport();
+					s_rtr = new RtReflectionSystem();
+					if (!s_rtr->Init(g_Engine->Device(), descriptorHeap, (UINT)vpR.Width, (UINT)vpR.Height))
+					{ delete s_rtr; s_rtr = nullptr; s_rtrEnabled = false; }
+				}
 			}
 		}
 		else { delete s_rtManager; s_rtManager = nullptr; }
@@ -1694,6 +1707,9 @@ uint32_t Scene::GetDdgiProbeCount() const { return s_ddgi ? s_ddgi->ProbeCount()
 uint32_t Scene::GetGiInstanceCount() const { return s_rtManager ? s_rtManager->GetInstanceCount() : 0u; }
 void Scene::SetDdgiIntensity(float v) { if (s_ddgi) s_ddgi->SetIntensity(v); }
 float Scene::GetDdgiIntensity() const { return s_ddgi ? s_ddgi->GetIntensity() : 0.0f; }
+void Scene::SetRtrEnabled(bool on) { s_rtrEnabled = on; }
+bool Scene::GetRtrEnabled() const { return s_rtrEnabled; }
+bool Scene::RtrAvailable() const { return s_rtr && s_rtr->IsValid() && s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0 && s_envCubemapHandle; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -2856,6 +2872,30 @@ void Scene::Draw()
 		}
 	}
 
+	// ---- 仕上げ: レイトレース反射（RTR）。SSR の反射ソースを生成（SSR より前に実行）----
+	if (s_rtrEnabled && RtrAvailable() && g_Camera)
+	{
+		float rAspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
+		XMVECTOR rDet;
+		XMMATRIX rInvVP = XMMatrixInverse(&rDet, g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(rAspect));
+		XMFLOAT3 rCam; XMStoreFloat3(&rCam, g_Camera->GetPosition());
+		XMFLOAT3 rSunDir(0.0f, 1.0f, 0.0f);
+		auto* rsc = sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetPtr<SceneConstants>() : nullptr;
+		if (rsc) rSunDir = XMFLOAT3(rsc->SunDirection.x, rsc->SunDirection.y, rsc->SunDirection.z);
+		const float rSunScale = 3.0f;
+		XMFLOAT3 rSunCol(
+			s_atmosphereParams.sunColorR * s_atmosphereParams.sunIntensity * rSunScale,
+			s_atmosphereParams.sunColorG * s_atmosphereParams.sunIntensity * rSunScale,
+			s_atmosphereParams.sunColorB * s_atmosphereParams.sunIntensity * rSunScale);
+		float rGiInt = s_ddgi ? s_ddgi->GetIntensity() : 1.0f;
+		s_rtr->Execute(postCommandList, g_Engine->GetDepthStencilResource(),
+			s_rtManager->GetTlasGpuVA(), s_envCubemapHandle->HandleGPU,
+			s_town->GeometryInfoVA(), s_town->InstanceGeoBaseVA(),
+			s_ddgi ? s_ddgi->GetCbVA() : 0, s_ddgi ? s_ddgi->GetReadBufferVA() : 0,
+			(s_ddgiEnabled && s_ddgi && s_ddgi->IsReady()),
+			rInvVP, rCam, rSunCol, rSunDir, rGiInt);
+	}
+
 	// ---- SSR 濡れた水たまり反射（Atmosphere 前 = 反射の上に霧が乗る）----
 	{ char e[8]; if (GetEnvironmentVariableA("DX12_NO_PUDDLE", e, sizeof(e)) > 0) goto skipPuddle; }
 	if (s_ssr && s_ssr->IsValid() && s_town)
@@ -2889,7 +2929,8 @@ void Scene::Draw()
 			s_ssr->Execute(postCommandList,
 				g_Engine->GetHdrColorResource(), g_Engine->GetHdrRtvCpuHandle(),
 				g_Engine->GetDepthStencilResource(), s_prefilterCubemap.Get(),
-				s_reflColor ? s_reflColor.Get() : s_prefilterCubemap.Get(),  // 平面反射カラー
+				(s_rtrEnabled && s_rtr) ? s_rtr->GetReflectionResource()
+					: (s_reflColor ? s_reflColor.Get() : s_prefilterCubemap.Get()),  // RTR時=RT反射, 既定=平面反射カラー
 				noiseRes,                                                     // 水たまり分布ノイズ
 				sceneCbAddr, pp);
 		}

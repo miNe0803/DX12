@@ -253,6 +253,18 @@ void DebugUI::Draw()
 					}
 					else ImGui::TextDisabled("  DDGI 利用不可（DdgiSystem 未生成）。");
 					ImGui::Separator();
+					ImGui::TextUnformatted("--- RT Reflections（レイトレース反射・仕上げ）---");
+					if (g_Scene->RtrAvailable())
+					{
+						bool rtr = g_Scene->GetRtrEnabled();
+						if (ImGui::Checkbox("RT Reflections (DX12_RTR)", &rtr))
+							g_Scene->SetRtrEnabled(rtr);
+						ImGui::TextDisabled(rtr
+							? "  ON=濡れ地面/水たまりに本物のRT反射（画面外の建物も映る）。太陽+DDGI+空で陰影。"
+							: "  OFF=従来の平面ミラー反射（画面内のみ）。");
+					}
+					else ImGui::TextDisabled("  RTR 利用不可（TLAS無し）。");
+					ImGui::Separator();
 					ImGui::TextUnformatted("--- RTAO（レイトレースAO, GTAO置換）---");
 					if (g_Scene->RtaoAvailable())
 					{
