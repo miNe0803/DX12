@@ -26,7 +26,7 @@ void CameraSystem::Update(Camera* camera, float dt, entt::registry& registry)
 	auto view = registry.view<PlayerComponent, TransformComponent>();
 	for (auto entity : view)
 	{
-		const auto& player = view.get<PlayerComponent>(entity);
+		auto& player = view.get<PlayerComponent>(entity);
 		if (!player.FollowCamera)
 			continue;
 
@@ -62,6 +62,7 @@ void CameraSystem::Update(Camera* camera, float dt, entt::registry& registry)
 			if (GetAsyncKeyState(VK_DOWN) & 0x8000)  s_orbitPitch -= kKeySpeed * dt;
 		}
 		s_orbitPitch = std::clamp(s_orbitPitch, -0.20f, 1.20f);   // 真下/真上に回り込みすぎない
+		player.CameraYaw = s_orbitYaw;   // PlayerSystem のカメラ相対移動へ共有
 
 		// オービット位置（プレイヤー中心）。
 		const XMFLOAT3 pp = transform.Position;

@@ -18,14 +18,21 @@ void PlayerSystem::Update(entt::registry& registry, float dt)
 		auto& player = view.get<PlayerComponent>(entity);
 		auto& transform = view.get<TransformComponent>(entity);
 
-		// WASD ワールド軸移動。追従カメラは -Z 背後固定なので W=+Z が「奥へ」＝直感的。
+		// カメラ相対 WASD 移動。W=カメラの向いてる奥、S=手前、A/D=カメラ基準の左右。
+		// CameraYaw は CameraSystem がオービット角を書き込む（前フレーム値＝1フレーム遅延, 実用上問題なし）。
 		if (!uiCapture)
 		{
-			float mx = 0.0f, mz = 0.0f;
-			if (Keyboard_IsKeyDown(KK_W)) mz += 1.0f;
-			if (Keyboard_IsKeyDown(KK_S)) mz -= 1.0f;
-			if (Keyboard_IsKeyDown(KK_D)) mx += 1.0f;
-			if (Keyboard_IsKeyDown(KK_A)) mx -= 1.0f;
+			float inF = 0.0f, inR = 0.0f;
+			if (Keyboard_IsKeyDown(KK_W)) inF += 1.0f;
+			if (Keyboard_IsKeyDown(KK_S)) inF -= 1.0f;
+			if (Keyboard_IsKeyDown(KK_D)) inR += 1.0f;
+			if (Keyboard_IsKeyDown(KK_A)) inR -= 1.0f;
+			// カメラ前方(画面奥)=(-sinYaw, cosYaw), 右=(cosYaw, sinYaw)。yaw=0 で 前方=+Z/右=+X（背後カメラ）。
+			const float yaw = player.CameraYaw;
+			const float fx = -sinf(yaw), fz = cosf(yaw);
+			const float rx = cosf(yaw), rz = sinf(yaw);
+			float mx = fx * inF + rx * inR;
+			float mz = fz * inF + rz * inR;
 			float len = sqrtf(mx * mx + mz * mz);
 			if (len > 1e-4f)
 			{

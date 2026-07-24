@@ -12,4 +12,7 @@ struct PlayerComponent
 	// true のとき CameraSystem が TPS 風に追従（false なら Camera::Update のみ＝自由視点）
 	bool FollowCamera = false;
 	DirectX::XMFLOAT3 CameraOffset = { 0.0f, 1.8f, -4.0f };
+
+	// CameraSystem がオービット yaw(rad) を毎フレーム書き込む。PlayerSystem がカメラ相対WASD移動に使う。
+	float CameraYaw = 0.0f;
 };
