@@ -8,7 +8,7 @@ class DescriptorHeap;
 
 // DXR 仕上げ: レイトレース反射（RTR）。各スクリーン画素で深度→ワールド復元し、地面(≈水平)なら
 // 水面法線で反射レイを TLAS へ飛ばし、ヒットを DDGI と同じ陰影（太陽+DDGI間接+空）で色付け。
-// half-res RGBA16F を出力し、既存 SsrSystem の反射ソースを差し替える（水たまりマスク/合成は不変）。
+// full-res RGBA16F を出力し、既存 SsrSystem の反射ソースを差し替える（水たまりマスク/合成は不変）。
 // 従来の平面ミラー反射（画面内のみ）に対し「画面外ジオメトリも映る」本物のRT反射。
 // TLAS 存在時(DX12_GI)のみ生成。既定OFF(DX12_RTR)。DDGI 無効時は太陽+空のみ。
 class RtReflectionSystem
@@ -31,11 +31,11 @@ public:
 
 private:
     bool m_valid = false;
-    UINT m_fullW = 0, m_fullH = 0, m_halfW = 0, m_halfH = 0;
+    UINT m_fullW = 0, m_fullH = 0;
     uint32_t m_frameIndex = 0;
 
     DescriptorHeap* m_heap = nullptr;                 // 共有ヒープ（非所有）
-    ComPtr<ID3D12Resource> m_target;                  // half-res RGBA16F（UAV書き→SRV読み）
+    ComPtr<ID3D12Resource> m_target;                  // full-res RGBA16F（UAV書き→SRV読み）
     D3D12_RESOURCE_STATES  m_targetState = D3D12_RESOURCE_STATE_COMMON;
     uint32_t m_depthSrvIdx = 0, m_reflUavIdx = 0;     // 共有ヒープ内 index
     D3D12_GPU_DESCRIPTOR_HANDLE m_depthSrvGpu{ 0 }, m_reflUavGpu{ 0 };

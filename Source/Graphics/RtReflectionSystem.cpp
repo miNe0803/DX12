@@ -13,12 +13,13 @@ bool RtReflectionSystem::Init(ID3D12Device* device, DescriptorHeap* sharedHeap, 
     if (!device || !sharedHeap) return false;
     m_heap = sharedHeap;
     m_fullW = fullW; m_fullH = fullH;
-    m_halfW = (fullW + 1) / 2; m_halfH = (fullH + 1) / 2;
 
-    // half-res RGBA16F 反射ターゲット（UAV書き→SRV読み）
+    // full-res RGBA16F 反射ターゲット（UAV書き→SRV読み）。
+    // 水面は平面ミラー＝鏡面反射なので half-res の拡大ボケが目立つ。フル解像度＋単一鏡面レイで
+    // planar 反射と同等のシャープさにする（コスト増は 4レイ→1レイの削減でほぼ相殺）。
     {
         auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-        auto rd = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT, m_halfW, m_halfH, 1, 1, 1, 0,
+        auto rd = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT, m_fullW, m_fullH, 1, 1, 1, 0,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_target))))
@@ -106,7 +107,7 @@ bool RtReflectionSystem::Init(ID3D12Device* device, DescriptorHeap* sharedHeap, 
     }
 
     m_valid = true;
-    printf("RtReflectionSystem::Init: OK (refl %ux%u RGBA16F)\n", m_halfW, m_halfH);
+    printf("RtReflectionSystem::Init: OK (refl %ux%u RGBA16F, full-res mirror)\n", m_fullW, m_fullH);
     return true;
 }
 
@@ -132,15 +133,15 @@ void RtReflectionSystem::Execute(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         cb->SunDir = sunDir;
         cb->TMin = 0.03f;
         cb->SunColor = XMFLOAT4(sunColorScaled.x, sunColorScaled.y, sunColorScaled.z, 0.0f);
-        cb->InvRes = XMFLOAT2(1.0f / m_halfW, 1.0f / m_halfH);
+        cb->InvRes = XMFLOAT2(1.0f / m_fullW, 1.0f / m_fullH);
         cb->NormalBias = 0.05f;
         cb->TMax = 100000.0f;
         cb->GiIntensity = giIntensity;
         cb->GroundNyMin = 0.5f;   // 上向き≈水平のみ反射（壁は除外）
         cb->UseDdgi = useDdgi ? 1u : 0u;
         cb->FrameIndex = m_frameIndex;
-        cb->Roughness = 0.06f;    // R2: 濡れ路面の軽い光沢拡がり
-        cb->RayCount = 4u;        // コーンジッタ平均本数
+        cb->Roughness = 0.0f;     // 鏡面（水面は平面ミラー）。光沢ボケは SSR 側の水膜ブラーが担う
+        cb->RayCount = 1u;        // 単一鏡面レイ＝シャープ&ノイズレス（コーンジッタの拡がりを排除）
     }
 
     // バリア: refl -> UAV, depth -> NON_PIXEL_SRV
@@ -167,7 +168,7 @@ void RtReflectionSystem::Execute(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
     cmd->SetComputeRootDescriptorTable(6, envCubemapGpuHandle);
     cmd->SetComputeRootDescriptorTable(7, m_depthSrvGpu);
     cmd->SetComputeRootDescriptorTable(8, m_reflUavGpu);
-    cmd->Dispatch((m_halfW + 7) / 8, (m_halfH + 7) / 8, 1);
+    cmd->Dispatch((m_fullW + 7) / 8, (m_fullH + 7) / 8, 1);
 
     // バリア: refl -> PIXEL_SRV（SsrSystem が読む）, depth 復帰
     {

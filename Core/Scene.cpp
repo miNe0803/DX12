@@ -1649,9 +1649,10 @@ bool Scene::Init()
 				// 仕上げ: レイトレース影＋ガラスRT反射（新規システム不要＝町PS内RayQuery。フラグのみ）
 				{
 					char rsEv[8];
-					// RT完全置換影/ガラスRT反射は既定OFF（前者はTLAS除外の木の影が消える, 後者はRT反射）。実験用トグル。
+					// RT完全置換影は既定OFF（TLAS除外の木の影が消えるため。実験用トグル）。
 					s_rtShadowEnabled = (GetEnvironmentVariableA("DX12_RTSHADOW", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
-					s_glassRtrEnabled = (GetEnvironmentVariableA("DX12_GLASSRTR", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
+					// ガラスRT反射は既定ON（DX12_GLASSRTR=0 で無効）。ガラス窓に画面外の街を映す。DDGI ON前提。
+					s_glassRtrEnabled = !((GetEnvironmentVariableA("DX12_GLASSRTR", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] == '0'));
 					// 近傍RT接触影は既定ON（DX12_RTCONTACT=0 で無効）。VSMを基本に残し接地を締める（木の影は保持）。
 					s_rtContactEnabled = !((GetEnvironmentVariableA("DX12_RTCONTACT", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] == '0'));
 				}
