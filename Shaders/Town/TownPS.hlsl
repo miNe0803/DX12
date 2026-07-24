@@ -62,7 +62,7 @@ cbuffer DdgiCB : register(b5, space0)
     uint3  gDdgiDims;    float gDdgiNormalBias;
     float3 gDdgiSunDir;  float gDdgiEmaAlpha;
     float4 gDdgiSunColor;
-    uint   gDdgiRayCount; float3 _ddgiPad;
+    uint   gDdgiRayCount; float gDdgiIntensity; float2 _ddgiPad;
 };
 
 // 1タップ: 呼び出し側が選んだレベル L で完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
@@ -420,7 +420,7 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
     //          gUseDdgi=0 では irr のまま＝従来の偽ambientとバイト一致。
     if (gUseDdgi != 0)
         irr = Ddgi_SampleField(Ddgi_Probes, In.worldPos + N * gDdgiNormalBias, Nw,
-                               gDdgiOrigin, gDdgiSpacing, gDdgiDims);
+                               gDdgiOrigin, gDdgiSpacing, gDdgiDims) * gDdgiIntensity;
     float3 Famb = F0 + (max((1.0f - roughness).xxx, F0) - F0) * pow(1.0f - NdotV, 5.0f);
     float3 kDamb = (1.0f - Famb) * (1.0f - metallic);
     float3 diffuseIBL = irr * albedo * kDamb;

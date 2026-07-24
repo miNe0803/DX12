@@ -27,6 +27,7 @@ bool DdgiSystem::Init(ID3D12Device* device, const XMFLOAT3& boundsMin, const XMF
     m_params.normalBias = 0.3f;      // 町サンプル時のワールド法線オフセット（壁漏れ緩和の初期値）
     m_params.emaAlpha = 0.08f;       // 時間混合率
     m_params.rayCount = 32;          // 1プローブあたりのレイ本数
+    m_params.giIntensity = 2.0f;     // 町サンプル時の全体スケール（偽1.35ブースト撤去分を補い調整可）
     m_params.frameIndex = 0;
     m_params.sunDir = XMFLOAT3(0, 1, 0);
     m_params.sunColor = XMFLOAT4(0, 0, 0, 0);

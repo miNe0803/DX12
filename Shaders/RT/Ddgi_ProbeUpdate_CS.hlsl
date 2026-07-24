@@ -15,7 +15,7 @@ cbuffer DdgiCB : register(b0)
     uint3  gGridDims;    float gNormalBias;
     float3 gSunDir;      float gEmaAlpha;    // gSunDir: 太陽へ向かう方向（G-b用）
     float4 gSunColor;                        // rgb = 太陽色×強度（G-b用）
-    uint   gRayCount;    float3 _pad;
+    uint   gRayCount;    float gGiIntensity; float2 _pad;   // gGiIntensity は町側で使用（CSは未使用）
 };
 
 RaytracingAccelerationStructure Scene : register(t0);
@@ -25,13 +25,13 @@ RWStructuredBuffer<ProbeSH>     CurSH  : register(u0);
 TextureCube g_Prefilter  : register(t2);
 TextureCube g_Irradiance : register(t3);
 SamplerState g_Sampler   : register(s0);
-// G-b: ヒット面フェッチ。GeoInfo[InstGeoBase[instID]+geomIdx] → VB/IB を ResourceDescriptorHeap で bindless 取得。
-struct GeoInfo { uint vbIdx; uint ibIdx; };
+// G-b: ヒット面フェッチ。GeoInfo[InstGeoBase[instID]+geomIdx] → VB/IB/baseTex を bindless 取得。
+struct GeoInfo { uint vbIdx; uint ibIdx; uint baseTexIdx; };
 StructuredBuffer<GeoInfo> g_GeoInfo     : register(t5);
 StructuredBuffer<uint>    g_InstGeoBase : register(t6);
 
 static const float DDGI_PI = 3.14159265359f;
-static const uint  DDGI_VTX_STRIDE = 84u;   // sizeof(Vertex): Position@0
+static const uint  DDGI_VTX_STRIDE = 84u;   // sizeof(Vertex): Position@0, Normal@12, UV@24
 
 float RadicalInverseVdC(uint bits)
 {
@@ -109,6 +109,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float3 Nhit = normalize(cross(w1 - w0, w2 - w0));
             if (dot(Nhit, -dir) < 0.0f) Nhit = -Nhit;   // プローブ側を向く
 
+            // 実マテリアル色でバウンス（レンガ=暖色, 緑=緑…）＝物理的に色付きの間接光。
+            // UV をバリセントリック補間→ベーステクスチャを高mip(平均色)で bindless サンプル。
+            float2 uv0 = asfloat(vb.Load2(tri.x * DDGI_VTX_STRIDE + 24u));
+            float2 uv1 = asfloat(vb.Load2(tri.y * DDGI_VTX_STRIDE + 24u));
+            float2 uv2 = asfloat(vb.Load2(tri.z * DDGI_VTX_STRIDE + 24u));
+            float2 bc = q.CommittedTriangleBarycentrics();
+            float2 hitUV = uv0 * (1.0f - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
+            Texture2D baseTex = ResourceDescriptorHeap[gi.baseTexIdx];
+            float3 albedo = baseTex.SampleLevel(g_Sampler, hitUV, 4.0f).rgb;   // 高mip=面の平均色（GI向き）
+
             float NdotL = max(0.0f, dot(Nhit, gSunDir));
             float sunVis = 1.0f;
             if (NdotL > 0.0f)
@@ -123,7 +133,6 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 sq.Proceed();
                 if (sq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) sunVis = 0.0f;
             }
-            float3 albedo = 0.5f;   // フラット（マテリアル別アルベドは将来）
             float3 sunBounce = (albedo / DDGI_PI) * gSunColor.rgb * NdotL * sunVis;
             // G-c 多重バウンス: ヒット面の前フレームirradiance(=E/π)からの拡散放射 albedo*irr を加算。
             // 光がフレームを跨いで再帰＝2次以降のバウンス。albedo<1 でエネルギーは収束（暴走しない）。

@@ -761,7 +761,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
 
     // Phase G-b: ヒット面フェッチ用の GeoInfo{vbBindlessIdx, ibBindlessIdx}（BLASジオメトリ順に一致）
     //  と、per-instance の GeoInfo 基底 index。VB/IB を RAW SRV として共有ヒープへ登録し bindless index を得る。
-    struct GeoInfoCpu { uint32_t vbIdx; uint32_t ibIdx; };
+    struct GeoInfoCpu { uint32_t vbIdx; uint32_t ibIdx; uint32_t baseTexIdx; };
     std::vector<GeoInfoCpu> geoInfos;
     std::vector<uint32_t> instGeoBase;   // insts と並列
     auto regRaw = [&](ID3D12Resource* res, UINT byteSize) -> uint32_t
@@ -778,6 +778,11 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         m_heap->CreateSRVAt(idx, res, d);
         return idx;
     };
+    // matTable(t0-t4 の先頭=ベーステクスチャ) の GPU ハンドルから bindless ヒープ index を逆算。
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuHeapStart = m_heap ? m_heap->GetHeap()->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{ 0 };
+    UINT srvInc = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto texIdx = [&](D3D12_GPU_DESCRIPTOR_HANDLE h) -> uint32_t
+    { return (h.ptr && gpuHeapStart.ptr && srvInc) ? (uint32_t)((h.ptr - gpuHeapStart.ptr) / srvInc) : 0u; };
 
     // 1) ユニークモデル毎に 1 BLAS。同時に GeoInfo（同ジオメトリ順）を構築。
     std::unordered_map<TownModel*, uint32_t> modelBlas;
@@ -802,6 +807,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
             geos.push_back(g);
             GeoInfoCpu gi; gi.vbIdx = regRaw(s.vbRes.Get(), s.vbv.SizeInBytes);
             gi.ibIdx = regRaw(s.ibRes.Get(), s.indexCount * 4u);
+            gi.baseTexIdx = texIdx(s.matTable);   // ベーステクスチャの bindless index（色付きバウンス用）
             geoInfos.push_back(gi);
         }
         if (geos.empty()) continue;
@@ -833,7 +839,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
     //    GI は地面が主要な受光/バウンス面なので TLAS に必須（除外すると地面バウンスが出ない）。
     XMFLOAT4X4 gT; XMStoreFloat4x4(&gT, XMMatrixTranspose(GlobalG()));
     auto addWorldGeo = [&](ID3D12Resource* vb, const D3D12_VERTEX_BUFFER_VIEW& vbv,
-                           ID3D12Resource* ib, UINT indexCount)
+                           ID3D12Resource* ib, UINT indexCount, D3D12_GPU_DESCRIPTOR_HANDLE matTable)
     {
         if (!vb || !ib || indexCount == 0 || vbv.StrideInBytes == 0) return;
         RTGeometry g{};
@@ -843,16 +849,18 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         uint32_t blas = rtm->AddBLAS(cmd, &g, 1);
         uint32_t base = (uint32_t)geoInfos.size();
         GeoInfoCpu gi; gi.vbIdx = regRaw(vb, vbv.SizeInBytes); gi.ibIdx = regRaw(ib, indexCount * 4u);
+        gi.baseTexIdx = texIdx(matTable);
         geoInfos.push_back(gi);
         RTInstance ri{}; std::memcpy(&ri.transform, &gT, sizeof(float) * 12);
         ri.blasIndex = blas; ri.instanceMask = 0xFF; ri.flags = 0;
         insts.push_back(ri);
         instGeoBase.push_back(base);
     };
-    addWorldGeo(m_roadVBRes.Get(), m_roadVbv, m_roadIBRes.Get(), m_roadIbv.SizeInBytes / 4u);
+    D3D12_GPU_DESCRIPTOR_HANDLE roadMat = m_roadDraws.empty() ? D3D12_GPU_DESCRIPTOR_HANDLE{ 0 } : m_roadDraws[0].matTable;
+    addWorldGeo(m_roadVBRes.Get(), m_roadVbv, m_roadIBRes.Get(), m_roadIbv.SizeInBytes / 4u, roadMat);
     if (!roadOnly)
         for (const LandMesh& lm : m_landscapes)
-            addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount);
+            addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount, lm.matTable);
 
     rtm->BuildTLAS(cmd, insts.data(), (uint32_t)insts.size());
 

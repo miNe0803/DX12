@@ -21,8 +21,11 @@ public:
         DirectX::XMUINT3  gridDims;    float    normalBias;
         DirectX::XMFLOAT3 sunDir;      float    emaAlpha;
         DirectX::XMFLOAT4 sunColor;    // rgb = 太陽色×強度（G-b）
-        uint32_t rayCount; float _pad[3];
+        uint32_t rayCount; float giIntensity; float _pad[2];   // giIntensity: 町サンプル時の全体スケール
     };
+
+    void SetIntensity(float v) { m_params.giIntensity = v; }
+    float GetIntensity() const { return m_params.giIntensity; }
 
     bool Init(ID3D12Device* device, const DirectX::XMFLOAT3& boundsMin, const DirectX::XMFLOAT3& boundsMax);
     void Shutdown();

@@ -244,8 +244,11 @@ void DebugUI::Draw()
 						if (ImGui::Checkbox("DDGI diffuse GI (DX12_DDGI)", &ddgi))
 							g_Scene->SetDdgiEnabled(ddgi);
 						ImGui::Text("  probes: %u  |  %s", g_Scene->GetDdgiProbeCount(), g_Scene->GetDdgiReady() ? "ready" : "warming up...");
+						float giInt = g_Scene->GetDdgiIntensity();
+						if (ImGui::SliderFloat("  GI intensity", &giInt, 0.5f, 5.0f, "%.2f"))
+							g_Scene->SetDdgiIntensity(giInt);
 						ImGui::TextDisabled(ddgi
-							? "  ON=SH-L1プローブ場+太陽バウンス+多重バウンス（偽sky-tint/1.35ブースト無効）。"
+							? "  ON=実マテリアル色で色付きバウンス（レンガ暖色/緑…）+太陽+多重バウンス。強度で明るさ調整。"
 							: "  OFF=従来の偽ambient(sky-tint+1.35)。ONで実GIに置換。");
 					}
 					else ImGui::TextDisabled("  DDGI 利用不可（DdgiSystem 未生成）。");

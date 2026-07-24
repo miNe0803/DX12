@@ -1692,6 +1692,8 @@ bool Scene::DdgiAvailable() const { return s_ddgi && s_ddgi->IsValid() && s_rtMa
 bool Scene::GetDdgiReady() const { return s_ddgi && s_ddgi->IsReady(); }
 uint32_t Scene::GetDdgiProbeCount() const { return s_ddgi ? s_ddgi->ProbeCount() : 0u; }
 uint32_t Scene::GetGiInstanceCount() const { return s_rtManager ? s_rtManager->GetInstanceCount() : 0u; }
+void Scene::SetDdgiIntensity(float v) { if (s_ddgi) s_ddgi->SetIntensity(v); }
+float Scene::GetDdgiIntensity() const { return s_ddgi ? s_ddgi->GetIntensity() : 0.0f; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
