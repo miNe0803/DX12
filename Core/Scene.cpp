@@ -81,6 +81,7 @@ static bool s_ddgiEnabled = false;   // DDGI 有効（DX12_DDGI で初期化。O
 static RtReflectionSystem* s_rtr = nullptr; // 仕上げ: レイトレース反射（TLAS存在時のみ生成）
 static bool s_rtrEnabled = false;    // RTR 有効（DX12_RTR で初期化。ONで濡れ地面が本物のRT反射に。既定OFF）
 static bool s_rtShadowEnabled = false; // レイトレース影（DX12_RTSHADOW。ONで町PSがVSM/CSMの代わりにシャドウレイ。既定OFF）
+static bool s_glassRtrEnabled = false; // ガラスRT反射（DX12_GLASSRTR。ONでガラスがSSRの代わりにRT反射。既定OFF）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -1642,10 +1643,11 @@ bool Scene::Init()
 					if (!s_rtr->Init(g_Engine->Device(), descriptorHeap, (UINT)vpR.Width, (UINT)vpR.Height))
 					{ delete s_rtr; s_rtr = nullptr; s_rtrEnabled = false; }
 				}
-				// 仕上げ: レイトレース影（新規システム不要＝町PS内RayQuery。フラグのみ）
+				// 仕上げ: レイトレース影＋ガラスRT反射（新規システム不要＝町PS内RayQuery。フラグのみ）
 				{
 					char rsEv[8];
 					s_rtShadowEnabled = (GetEnvironmentVariableA("DX12_RTSHADOW", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
+					s_glassRtrEnabled = (GetEnvironmentVariableA("DX12_GLASSRTR", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
 				}
 			}
 		}
@@ -1719,6 +1721,9 @@ bool Scene::RtrAvailable() const { return s_rtr && s_rtr->IsValid() && s_rtManag
 void Scene::SetRtShadowEnabled(bool on) { s_rtShadowEnabled = on; }
 bool Scene::GetRtShadowEnabled() const { return s_rtShadowEnabled; }
 bool Scene::RtShadowAvailable() const { return s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
+void Scene::SetGlassRtrEnabled(bool on) { s_glassRtrEnabled = on; }
+bool Scene::GetGlassRtrEnabled() const { return s_glassRtrEnabled; }
+bool Scene::GlassRtrAvailable() const { return s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -2384,10 +2389,11 @@ void Scene::Draw()
 				s_ddgiEnabled && s_ddgi->IsReady());
 		else
 			s_town->SetDdgiBindings(0, 0, false);   // ダミーへフォールバック
-		// 仕上げ: レイトレース影を町へバインド（TLAS があり DX12_RTSHADOW の時のみ有効）。
+		// 仕上げ: レイトレース影＋ガラス反射を町へバインド（TLAS がある時のみ、フラグで各々ON）。
 		{
-			bool rtShadowOk = s_rtShadowEnabled && s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0;
-			s_town->SetRtShadowBindings(rtShadowOk ? s_rtManager->GetTlasGpuVA() : 0, rtShadowOk);
+			bool tlasOk = s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0;
+			s_town->SetRtBindings(tlasOk ? s_rtManager->GetTlasGpuVA() : 0,
+				s_rtShadowEnabled && tlasOk, s_glassRtrEnabled && tlasOk);
 		}
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),

@@ -85,6 +85,10 @@ public:
 	void SetRtShadowEnabled(bool on);
 	bool GetRtShadowEnabled() const;
 	bool RtShadowAvailable() const;
+	// 仕上げ: ガラスRT反射。ONでガラスがSSRの代わりにRT反射（画面外の街も映る）。
+	void SetGlassRtrEnabled(bool on);
+	bool GetGlassRtrEnabled() const;
+	bool GlassRtrAvailable() const;
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

@@ -277,6 +277,18 @@ void DebugUI::Draw()
 					}
 					else ImGui::TextDisabled("  RT Shadows 利用不可（TLAS無し）。");
 					ImGui::Separator();
+					ImGui::TextUnformatted("--- Glass RT Reflections（ガラスRT反射・仕上げ）---");
+					if (g_Scene->GlassRtrAvailable())
+					{
+						bool grt = g_Scene->GetGlassRtrEnabled();
+						if (ImGui::Checkbox("Glass RT Reflections (DX12_GLASSRTR)", &grt))
+							g_Scene->SetGlassRtrEnabled(grt);
+						ImGui::TextDisabled(grt
+							? "  ON=ガラスがTLASへ反射レイ（画面外の街も映る, ヒットはDDGI色）。DDGI ON推奨。"
+							: "  OFF=従来のSSR+空反射（画面内のみ）。");
+					}
+					else ImGui::TextDisabled("  Glass RTR 利用不可（TLAS無し）。");
+					ImGui::Separator();
 					ImGui::TextUnformatted("--- RTAO（レイトレースAO, GTAO置換）---");
 					if (g_Scene->RtaoAvailable())
 					{

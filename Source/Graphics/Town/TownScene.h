@@ -113,9 +113,9 @@ public:
     void SetDdgiBindings(D3D12_GPU_VIRTUAL_ADDRESS ddgiCB, D3D12_GPU_VIRTUAL_ADDRESS probeBufferVA, bool useDdgi)
     { m_ddgiCBAddr = ddgiCB; m_ddgiProbeVA = probeBufferVA; m_useDdgi = useDdgi; }
 
-    // 仕上げ: レイトレース太陽影。tlasVA を PS 内 RayQuery 用に供給。useRtShadow=false で VSM/CSM のまま。
-    void SetRtShadowBindings(D3D12_GPU_VIRTUAL_ADDRESS tlasVA, bool useRtShadow)
-    { m_rtShadowTlasVA = tlasVA; m_useRtShadow = useRtShadow; }
+    // 仕上げ: レイトレース太陽影＋ガラス反射。tlasVA を PS 内 RayQuery 用に供給（t14）。
+    void SetRtBindings(D3D12_GPU_VIRTUAL_ADDRESS tlasVA, bool useRtShadow, bool useGlassRtr)
+    { m_rtShadowTlasVA = tlasVA; m_useRtShadow = useRtShadow; m_useGlassRtr = useGlassRtr; }
 
     // DXR-GI F1: 静的町ジオメトリを RT へ登録（モデル毎に1 BLAS、フォリッジ除外）し TLAS を一度構築。
     // ロード後に ID3D12GraphicsCommandList4 上で1回呼ぶ（実行→GPU-idle→rtm->ReleaseBuildScratch() の前）。
@@ -240,8 +240,9 @@ private:
     bool m_useDdgi = false;
     ComPtr<ID3D12Resource> m_ddgiDummyCB;   // OFF時の b5 ダミー
     ComPtr<ID3D12Resource> m_ddgiDummySH;   // OFF時の t13 ダミー（48B）。RTShadow OFF時の t14 ダミーVAにも流用。
-    D3D12_GPU_VIRTUAL_ADDRESS m_rtShadowTlasVA = 0;   // 仕上げ: レイトレース影の TLAS VA
+    D3D12_GPU_VIRTUAL_ADDRESS m_rtShadowTlasVA = 0;   // 仕上げ: レイトレース影/ガラス反射の TLAS VA(t14)
     bool m_useRtShadow = false;
+    bool m_useGlassRtr = false;
     ComPtr<ID3D12Resource> m_geomInfoRes;      // Phase G-b: GeoInfo{vbIdx,ibIdx} × geoCount
     ComPtr<ID3D12Resource> m_instGeoBaseRes;   // Phase G-b: uint base × TLAS instanceCount
     size_t m_loadedMeshes = 0;

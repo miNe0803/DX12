@@ -1436,7 +1436,7 @@ bool TownScene::CreateRootSignature()
     params[11].InitAsConstantBufferView(3, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b3 space0 VsmCB
     params[12].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t11 space0 VSM PageTable (root SRV)
     params[13].InitAsDescriptorTable(1, &rangeVsmAtlas, D3D12_SHADER_VISIBILITY_PIXEL); // t12 space0 VSM Atlas
-    params[14].InitAsConstants(4, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow}
+    params[14].InitAsConstants(5, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow, gUseGlassRtr}
     // Phase G: DDGI 拡散GI（gUseDdgi=0 時は TownPS が未使用＝従来のambientと同一動作）。
     params[15].InitAsConstantBufferView(5, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b5 space0 DdgiCB（格子params）
     params[16].InitAsShaderResourceView(13, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t13 space0 プローブSH（root SRV）
@@ -1706,7 +1706,7 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
     // V4: VSM バインド。param14(gUseVsm)は常に設定（TownPSが必ず参照）。11-13はVSM有効時のみ。
     // 反射パスではVSMを使わない（アトラス状態はメインパス前提のため）。
     // b4 = { gUseVsm, gVsmFpLod }。フットプリントLOD はサンプラ(TownPS)をマーカー(CS)とロックステップで切替。
-    uint32_t flags[4] = { 0u, m_vsmFpLod ? 1u : 0u, 0u, 0u };   // {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow}
+    uint32_t flags[5] = { 0u, m_vsmFpLod ? 1u : 0u, 0u, 0u, 0u };   // {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow, gUseGlassRtr}
     if (m_vsmCBAddr && m_vsmAtlasSrv.ptr)
     {
         cmd->SetGraphicsRootConstantBufferView(11, m_vsmCBAddr);
@@ -1723,13 +1723,14 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
         cmd->SetGraphicsRootShaderResourceView(16, probeVA);
         flags[2] = (m_useDdgi && m_ddgiCBAddr && m_ddgiProbeVA) ? 1u : 0u;
     }
-    // 仕上げ: レイトレース影。param 17(t14 TLAS)は常に有効VA（実 or ダミー）。gUseRtShadow は TLASありのみ。
+    // 仕上げ: レイトレース影＋ガラス反射。param 17(t14 TLAS)は常に有効VA（実 or ダミー）。フラグは TLASありのみ。
     {
         D3D12_GPU_VIRTUAL_ADDRESS tlasVA = m_rtShadowTlasVA ? m_rtShadowTlasVA : m_ddgiDummySH->GetGPUVirtualAddress();
         cmd->SetGraphicsRootShaderResourceView(17, tlasVA);
         flags[3] = (m_useRtShadow && m_rtShadowTlasVA && !refl) ? 1u : 0u;   // 反射パスでは影は VSM/CSM のまま
+        flags[4] = (m_useGlassRtr && m_rtShadowTlasVA && !refl) ? 1u : 0u;   // ガラスRT反射（反射パスでは不使用）
     }
-    cmd->SetGraphicsRoot32BitConstants(14, 4, flags, 0);
+    cmd->SetGraphicsRoot32BitConstants(14, 5, flags, 0);
 
     const UINT frame = g_Engine->CurrentBackBufferIndex();
     // メイン(0)/反射(1)で別領域を使い、同フレーム2回の Draw がワールドCBを踏み合わないようにする。

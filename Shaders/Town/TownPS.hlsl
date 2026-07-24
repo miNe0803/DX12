@@ -51,7 +51,7 @@ cbuffer VsmCB : register(b3, space0)
 // gVsmFpLod: Phase 1 フットプリントLOD の ON/OFF（マーカー/デバッグとロックステップ）。OFF=従来の距離LOD。
 // gUseDdgi: Phase G DDGI 拡散GI の ON/OFF（0 で従来の偽ambient経路＝バイト一致）。
 // gUseRtShadow: レイトレース影 ON/OFF（1 で VSM/CSM の代わりに TLAS へシャドウレイ）。
-cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; uint gUseRtShadow; };
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; uint gUseRtShadow; uint gUseGlassRtr; };
 
 // レイトレース太陽影: 町 TLAS へ inline RayQuery（PS内, SM6.6）。関数定義は SceneCB(SunDirection) 後方に。
 RaytracingAccelerationStructure Scene_RT : register(t14, space0);
@@ -286,6 +286,24 @@ float RtSunShadow(float3 worldPos, float3 Nw, float2 svpos)
     return vis / (float)N;
 }
 
+// レイトレース ガラス反射: 反射方向へ TLAS を叩き、ヒットは DDGI irradiance(色付き=太陽+空+バウンス済)を
+// 近似反射色に、miss は prefilter 空。GeometryInfo 不要（既存の Scene_RT t14 + DDGI t13/b5 を再利用）。
+float3 RtGlassRefl(float3 worldPos, float3 R, float3 skyFallback)
+{
+    RayDesc ray; ray.Origin = worldPos + R * 0.05f; ray.Direction = R; ray.TMin = 0.02f; ray.TMax = 100000.0f;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(Scene_RT, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, ray);
+    q.Proceed();
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        float3 hitPos = worldPos + R * q.CommittedRayT();
+        if (gUseDdgi != 0)
+            return Ddgi_SampleField(Ddgi_Probes, hitPos, -R, gDdgiOrigin, gDdgiSpacing, gDdgiDims) * gDdgiIntensity * 0.5f;
+        return skyFallback * 0.4f;   // DDGI無し: 近似の暗めフォールバック
+    }
+    return g_Prefilter.SampleLevel(g_Sampler, R, 0).rgb;   // 空（鏡面）
+}
+
 float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
 {
     if (gUseRtShadow != 0u)
@@ -390,6 +408,8 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
         float ssrW = 0.0f;
         float3 ssr = ScreenSpaceReflect(In.worldPos, Rg, ssrW);
         float3 envRefl = lerp(skyRefl, ssr, ssrW);
+        if (gUseGlassRtr != 0u)
+            envRefl = RtGlassRefl(In.worldPos, Rg, skyRefl);   // RT反射（画面外の街も映る）
 
         // ガラスも太陽の影を受ける（従来は影を参照せず、屋根の影の下でもガラスに太陽ハイライトが
         // 出ていた＝「太陽が2つある」ように見える光漏れ。太陽由来の項を shadow で減衰）。
