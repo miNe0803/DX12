@@ -68,6 +68,13 @@ public:
 	void SetRtaoEnabled(bool on);
 	bool GetRtaoEnabled() const;
 	bool RtaoAvailable() const;                // RtaoSystem生成済＋TLAS有効か（UI活性判定）
+	// Phase G: DDGI 拡散GI（ONで町の偽ambientを実プローブirradiance＋太陽バウンスへ置換）。
+	void SetDdgiEnabled(bool on);
+	bool GetDdgiEnabled() const;
+	bool DdgiAvailable() const;                // DdgiSystem生成済＋TLAS有効か
+	bool GetDdgiReady() const;                 // ≥2フレーム蓄積済（町がサンプル開始）
+	uint32_t GetDdgiProbeCount() const;
+	uint32_t GetGiInstanceCount() const;       // TLAS インスタンス数（監視用）
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

@@ -1582,7 +1582,10 @@ bool Scene::Init()
 	// GPU-idle→scratch解放。既定OFF＝TLAS未構築で無コスト・描画は完全に従来通り（バイト一致）。
 	{
 		char ev[8];
-		s_giEnabled = (GetEnvironmentVariableA("DX12_GI", ev, sizeof(ev)) > 0) && (ev[0] != '0');
+		// 既定ON: TLAS を毎起動構築し、RTAO/DDGI を ImGui からいつでも切替可能にする（RTAO/DDGI 自体は
+		// 既定OFFなので描画は不変・ロードコストのみ）。DX12_GI=0 で完全無効化（構築せずゼロコスト）。
+		DWORD giN = GetEnvironmentVariableA("DX12_GI", ev, sizeof(ev));
+		s_giEnabled = !(giN > 0 && ev[0] == '0');
 		s_giDebugView = (GetEnvironmentVariableA("DX12_GI_DEBUG", ev, sizeof(ev)) > 0);  // 初期値（ImGuiで切替可）
 	}
 	if (s_giEnabled && s_town && g_Engine->GetFeatureSupport().raytracingSupported)
@@ -1683,6 +1686,12 @@ bool Scene::GetGiEnabled() const { return s_giEnabled && s_rtManager && s_rtMana
 void Scene::SetRtaoEnabled(bool on) { s_rtaoEnabled = on; }
 bool Scene::GetRtaoEnabled() const { return s_rtaoEnabled; }
 bool Scene::RtaoAvailable() const { return s_rtao && s_rtao->IsValid() && s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
+void Scene::SetDdgiEnabled(bool on) { s_ddgiEnabled = on; }
+bool Scene::GetDdgiEnabled() const { return s_ddgiEnabled; }
+bool Scene::DdgiAvailable() const { return s_ddgi && s_ddgi->IsValid() && s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
+bool Scene::GetDdgiReady() const { return s_ddgi && s_ddgi->IsReady(); }
+uint32_t Scene::GetDdgiProbeCount() const { return s_ddgi ? s_ddgi->ProbeCount() : 0u; }
+uint32_t Scene::GetGiInstanceCount() const { return s_rtManager ? s_rtManager->GetInstanceCount() : 0u; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {

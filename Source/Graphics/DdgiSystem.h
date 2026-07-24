@@ -28,6 +28,7 @@ public:
     void Shutdown();
     bool IsValid() const { return m_valid; }
     bool IsReady() const { return m_valid && m_framesAccum >= 2; }   // ≥2フレーム蓄積後に町がサンプル
+    uint32_t ProbeCount() const { return m_params.probeCount; }
 
     // 毎フレーム: プローブ更新を記録（POST CL 推奨＝町は前フレームのバッファを読む）。
     // envCubemapGpuHandle: s_envCubemapHandle->HandleGPU（共有ヒープの t2-t4 テーブル基底）。

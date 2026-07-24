@@ -234,38 +234,44 @@ void DebugUI::Draw()
 			{
 				if (g_Scene->GetGiEnabled())
 				{
-					ImGui::TextDisabled("TLAS 構築済（DX12_GI=1 で起動）。280 BLAS / 4120 instances。");
+					ImGui::Text("TLAS: built  |  %u instances", g_Scene->GetGiInstanceCount());
+					ImGui::TextDisabled("下のトグルをライブで ON/OFF して差を確認（軒下/路地/壁際で顕著）。");
+					ImGui::Separator();
+					ImGui::TextUnformatted("--- DDGI 拡散GI（偽ambient を実GIに置換）---");
+					if (g_Scene->DdgiAvailable())
+					{
+						bool ddgi = g_Scene->GetDdgiEnabled();
+						if (ImGui::Checkbox("DDGI diffuse GI (DX12_DDGI)", &ddgi))
+							g_Scene->SetDdgiEnabled(ddgi);
+						ImGui::Text("  probes: %u  |  %s", g_Scene->GetDdgiProbeCount(), g_Scene->GetDdgiReady() ? "ready" : "warming up...");
+						ImGui::TextDisabled(ddgi
+							? "  ON=SH-L1プローブ場+太陽バウンス+多重バウンス（偽sky-tint/1.35ブースト無効）。"
+							: "  OFF=従来の偽ambient(sky-tint+1.35)。ONで実GIに置換。");
+					}
+					else ImGui::TextDisabled("  DDGI 利用不可（DdgiSystem 未生成）。");
+					ImGui::Separator();
+					ImGui::TextUnformatted("--- RTAO（レイトレースAO, GTAO置換）---");
+					if (g_Scene->RtaoAvailable())
+					{
+						bool rtao = g_Scene->GetRtaoEnabled();
+						if (ImGui::Checkbox("RTAO (DX12_RTAO)", &rtao))
+							g_Scene->SetRtaoEnabled(rtao);
+						ImGui::TextDisabled(rtao
+							? "  ON=TLASへ半球遮蔽レイ→HDRに乗算（GTAO停止）。隅/軒下/接地の陰が正確化。"
+							: "  OFF=従来のスクリーン空間GTAO。ONでレイトレースAOに置換。");
+					}
+					else ImGui::TextDisabled("  RTAO 利用不可（RtaoSystem 未生成）。");
 					ImGui::Separator();
 					ImGui::TextUnformatted("--- F1 検証ビュー（HDR を上書き表示）---");
 					bool giDbg = g_Scene->GetGiDebug();
 					if (ImGui::Checkbox("Primary-ray hit-distance check", &giDbg))
 						g_Scene->SetGiDebug(giDbg);
-					ImGui::TextDisabled("緑=RTヒット距離とラスタ深度が一致（AS/変換が正しい）。");
-					ImGui::TextDisabled("赤=不一致 / 青=RT miss だがラスタは地物あり / 暗=空。");
-					ImGui::TextDisabled("※道路の赤は「道路プレーンと地形ハイトフィールドの重なり」。road-only(DX12_GI_ROADONLY=1)");
-					ImGui::TextDisabled("  では道路は緑＝ジオメトリ/変換は正しい。地形併存時に RT が道路でなく地形にコミット");
-					ImGui::TextDisabled("  するだけの検証ビュー上の見え方で、GI 的には両面とも正しい位置＝無害。");
-					ImGui::Separator();
-					ImGui::TextUnformatted("--- Phase R: RTAO（レイトレースAO）---");
-					if (g_Scene->RtaoAvailable())
-					{
-						bool rtao = g_Scene->GetRtaoEnabled();
-						if (ImGui::Checkbox("RTAO (ray-traced AO, replaces GTAO)", &rtao))
-							g_Scene->SetRtaoEnabled(rtao);
-						ImGui::TextDisabled(rtao
-							? "ON=TLASへ半球遮蔽レイ→HDRに乗算（GTAOは停止）。隅/軒下/接地の陰が正確化。"
-							: "OFF=従来のスクリーン空間GTAO。ONでレイトレースAOに置換（二重遮蔽なし）。");
-					}
-					else
-					{
-						ImGui::TextDisabled("RTAO 利用不可（RtaoSystem未生成 or TLAS無効）。");
-					}
+					ImGui::TextDisabled("  緑=RT一致 / 赤=不一致(道路の赤=地形重なり,無害) / 青=RT miss / 暗=空。");
 				}
 				else
 				{
-					ImGui::TextDisabled("DXR-GI 無効。TLAS は起動時のみ構築されるため、");
-					ImGui::TextDisabled("環境変数 DX12_GI=1 を付けて起動すると有効化されます。");
-					ImGui::TextDisabled("（例: DX12_GI=1 で起動 → ここのチェックで検証ビューを ON/OFF）");
+					ImGui::TextDisabled("DXR-GI 無効（DX12_GI=0 で起動されています）。");
+					ImGui::TextDisabled("DX12_GI 未指定で起動すれば既定でTLAS構築＝ここで切替可能になります。");
 				}
 			}
 			ImGui::EndTabItem();
