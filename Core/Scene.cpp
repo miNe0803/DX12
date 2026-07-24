@@ -39,6 +39,7 @@
 #include "Graphics/SsrSystem.h"
 #include "Graphics/GtaoSystem.h"
 #include "Graphics/RtaoSystem.h"
+#include "Graphics/DdgiSystem.h"
 #include "Graphics/VsmSystem.h"
 #include "Graphics/RayTracingManager.h"   // DXR-GI F1: TLAS基盤
 #include "Graphics/TreeVegetation.h"
@@ -74,6 +75,8 @@ static bool s_giEnabled = false;     // DXR-GI 有効（DX12_GI で初期化。F
 static bool s_giDebugView = false;   // F1 検証ビュー表示（ImGui/DX12_GI_DEBUG）。TLAS構築(s_giEnabled)が前提
 static RtaoSystem* s_rtao = nullptr; // Phase R: レイトレースAO（TLAS存在時のみ生成）。GTAOと排他
 static bool s_rtaoEnabled = false;   // RTAO 有効（DX12_RTAO で初期化。ONでGTAOを置換。既定OFF＝GTAO経路不変）
+static DdgiSystem* s_ddgi = nullptr; // Phase G: DDGI拡散GI（TLAS存在時のみ生成）
+static bool s_ddgiEnabled = false;   // DDGI 有効（DX12_DDGI で初期化。ONで町の偽ambientを実GIに置換。既定OFF＝不変）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -441,6 +444,7 @@ Scene::~Scene()
 	if (s_ssr) { s_ssr->Shutdown(); delete s_ssr; s_ssr = nullptr; }
 	if (s_gtao) { s_gtao->Shutdown(); delete s_gtao; s_gtao = nullptr; }
 	if (s_rtao) { s_rtao->Shutdown(); delete s_rtao; s_rtao = nullptr; }
+	if (s_ddgi) { s_ddgi->Shutdown(); delete s_ddgi; s_ddgi = nullptr; }
 	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
 	if (s_rtManager) { s_rtManager->Shutdown(); delete s_rtManager; s_rtManager = nullptr; }
 	s_reflValid = false;
@@ -1613,6 +1617,14 @@ bool Scene::Init()
 					if (!s_rtao->Init(g_Engine->Device(), (UINT)vpAo.Width, (UINT)vpAo.Height))
 					{ delete s_rtao; s_rtao = nullptr; s_rtaoEnabled = false; }
 				}
+				// Phase G: TLAS がある時だけ DDGI を生成（OFF時は無コスト・町ambient不変）
+				{
+					char ddEv[8];
+					s_ddgiEnabled = (GetEnvironmentVariableA("DX12_DDGI", ddEv, sizeof(ddEv)) > 0) && (ddEv[0] != '0');
+					s_ddgi = new DdgiSystem();
+					if (!s_ddgi->Init(g_Engine->Device(), s_town->BoundsMin(), s_town->BoundsMax()))
+					{ delete s_ddgi; s_ddgi = nullptr; s_ddgiEnabled = false; }
+				}
 			}
 		}
 		else { delete s_rtManager; s_rtManager = nullptr; }
@@ -2330,6 +2342,12 @@ void Scene::Draw()
 				s_vsm->GetPageTable()->GetGPUVirtualAddress(),
 				s_vsm->GetAtlasSrvGpu(), s_vsmEnabled && s_vsmAtlasReady,   // ランタイムトグル + アトラス準備後のみ
 				s_vsm->GetFootprintLod());   // Phase 1: フットプリントLOD をサンプラ(TownPS)へロックステップ配線
+		// Phase G: DDGI を町へバインド（前フレームの完了バッファを参照。≥2フレーム蓄積後のみ有効化）。
+		if (s_ddgi && s_ddgi->IsValid())
+			s_town->SetDdgiBindings(s_ddgi->GetCbVA(), s_ddgi->GetReadBufferVA(),
+				s_ddgiEnabled && s_ddgi->IsReady());
+		else
+			s_town->SetDdgiBindings(0, 0, false);   // ダミーへフォールバック
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),
 			envHandle,
@@ -2775,6 +2793,16 @@ void Scene::Draw()
 			s_rtManager->RenderDebugPrimary(postCommandList, g_Engine->GetHdrRtvCpuHandle(),
 				g_Engine->GetDepthStencilResource(), invVP, cam);
 		}
+	}
+
+	// ---- Phase G: DDGI プローブ更新（postCL。町は前フレームの完了バッファを参照＝1フレーム遅延はEMAで不可視）----
+	if (s_ddgiEnabled && s_ddgi && s_ddgi->IsValid() && s_rtManager && s_rtManager->IsValid()
+		&& s_rtManager->GetInstanceCount() > 0 && s_envCubemapHandle && descriptorHeap)
+	{
+		// G-a は空のみ放射輝度なので太陽引数は未使用（G-b で実sunを配線）。
+		XMFLOAT3 sunColorScaled(0.0f, 0.0f, 0.0f), sunDir(0.0f, 1.0f, 0.0f);
+		s_ddgi->Execute(postCommandList, descriptorHeap->GetHeap(), s_rtManager->GetTlasGpuVA(),
+			s_envCubemapHandle->HandleGPU, sunColorScaled, sunDir);
 	}
 
 	// ---- GI: AO を HDR に乗算適用（bloom/tonemap 前）----

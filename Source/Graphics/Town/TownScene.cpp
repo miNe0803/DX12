@@ -285,7 +285,20 @@ bool TownScene::CreateFallbackTextures()
     m_fbNormal   = MakeSolid1x1(m_device, 128, 128, 255, 255); // 接空間 (0,0,1)
     m_fbMR       = MakeSolid1x1(m_device, 0, 204, 0, 255);     // G=rough0.8, B=metal0
     m_fbRoadGrey = MakeSolid1x1(m_device, 58, 56, 56, 255);    // アスファルト下地
-    return m_fbWhite && m_fbNormal && m_fbMR && m_fbRoadGrey;
+
+    // Phase G: DDGI OFF時のダミー（root CBV b5 / root SRV t13 を常に満たす＝GPU検証エラー回避）
+    {
+        auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        auto cbD = CD3DX12_RESOURCE_DESC::Buffer(96);
+        m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &cbD, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_ddgiDummyCB));
+        auto shD = CD3DX12_RESOURCE_DESC::Buffer(48);
+        m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &shD, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_ddgiDummySH));
+        void* mp = nullptr;
+        if (m_ddgiDummyCB && SUCCEEDED(m_ddgiDummyCB->Map(0, nullptr, &mp)) && mp) { memset(mp, 0, 96); m_ddgiDummyCB->Unmap(0, nullptr); }
+        mp = nullptr;
+        if (m_ddgiDummySH && SUCCEEDED(m_ddgiDummySH->Map(0, nullptr, &mp)) && mp) { memset(mp, 0, 48); m_ddgiDummySH->Unmap(0, nullptr); }
+    }
+    return m_fbWhite && m_fbNormal && m_fbMR && m_fbRoadGrey && m_ddgiDummyCB && m_ddgiDummySH;
 }
 
 // path が空/無効ならフォールバックを、有効なら実テクスチャを 1 記述子登録。
@@ -1353,7 +1366,7 @@ bool TownScene::CreateRootSignature()
     rangeDepth.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 9, 0); // t9=シーン深度, t10=シーンカラーコピー(ガラスSSR)
     rangeVsmAtlas.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 12, 0); // t12 space0 VSMアトラス(V4)
 
-    CD3DX12_ROOT_PARAMETER params[15];
+    CD3DX12_ROOT_PARAMETER params[17];
     params[0].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX); // t0 space1 InstanceWorlds (StructuredBuffer)
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);    // b1 Scene
     params[2].InitAsConstantBufferView(2, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // b2 TownParams
@@ -1369,7 +1382,10 @@ bool TownScene::CreateRootSignature()
     params[11].InitAsConstantBufferView(3, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b3 space0 VsmCB
     params[12].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t11 space0 VSM PageTable (root SRV)
     params[13].InitAsDescriptorTable(1, &rangeVsmAtlas, D3D12_SHADER_VISIBILITY_PIXEL); // t12 space0 VSM Atlas
-    params[14].InitAsConstants(2, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod}
+    params[14].InitAsConstants(3, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod, gUseDdgi}
+    // Phase G: DDGI 拡散GI（gUseDdgi=0 時は TownPS が未使用＝従来のambientと同一動作）。
+    params[15].InitAsConstantBufferView(5, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b5 space0 DdgiCB（格子params）
+    params[16].InitAsShaderResourceView(13, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t13 space0 プローブSH（root SRV）
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[3];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -1634,15 +1650,24 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
     // V4: VSM バインド。param14(gUseVsm)は常に設定（TownPSが必ず参照）。11-13はVSM有効時のみ。
     // 反射パスではVSMを使わない（アトラス状態はメインパス前提のため）。
     // b4 = { gUseVsm, gVsmFpLod }。フットプリントLOD はサンプラ(TownPS)をマーカー(CS)とロックステップで切替。
-    uint32_t vsmFlags[2] = { 0u, m_vsmFpLod ? 1u : 0u };
+    uint32_t flags[3] = { 0u, m_vsmFpLod ? 1u : 0u, 0u };   // {gUseVsm, gVsmFpLod, gUseDdgi}
     if (m_vsmCBAddr && m_vsmAtlasSrv.ptr)
     {
         cmd->SetGraphicsRootConstantBufferView(11, m_vsmCBAddr);
         cmd->SetGraphicsRootShaderResourceView(12, m_vsmPageTableVA);
         cmd->SetGraphicsRootDescriptorTable(13, m_vsmAtlasSrv);
-        vsmFlags[0] = (m_useVsm && !refl) ? 1u : 0u;
+        flags[0] = (m_useVsm && !refl) ? 1u : 0u;
     }
-    cmd->SetGraphicsRoot32BitConstants(14, 2, vsmFlags, 0);
+    // Phase G: DDGI バインド。params 15/16 は常に有効VA（実 or ダミー）で満たす。gUseDdgi は常に設定。
+    // DDGI はワールド空間なので反射パスでも有効（In.worldPos は非ミラーの実座標）。
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS ddgiCB = m_ddgiCBAddr ? m_ddgiCBAddr : m_ddgiDummyCB->GetGPUVirtualAddress();
+        D3D12_GPU_VIRTUAL_ADDRESS probeVA = m_ddgiProbeVA ? m_ddgiProbeVA : m_ddgiDummySH->GetGPUVirtualAddress();
+        cmd->SetGraphicsRootConstantBufferView(15, ddgiCB);
+        cmd->SetGraphicsRootShaderResourceView(16, probeVA);
+        flags[2] = (m_useDdgi && m_ddgiCBAddr && m_ddgiProbeVA) ? 1u : 0u;
+    }
+    cmd->SetGraphicsRoot32BitConstants(14, 3, flags, 0);
 
     const UINT frame = g_Engine->CurrentBackBufferIndex();
     // メイン(0)/反射(1)で別領域を使い、同フレーム2回の Draw がワールドCBを踏み合わないようにする。

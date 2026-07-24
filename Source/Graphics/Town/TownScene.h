@@ -108,6 +108,11 @@ public:
                         D3D12_GPU_DESCRIPTOR_HANDLE atlasSrv, bool useVsm, bool fpLod = false)
     { m_vsmCBAddr = vsmCB; m_vsmPageTableVA = pageTableVA; m_vsmAtlasSrv = atlasSrv; m_useVsm = useVsm; m_vsmFpLod = fpLod; }
 
+    // Phase G: DDGI 拡散GI を町へバインド（Draw 前に毎フレーム設定）。useDdgi=false で従来の偽ambient。
+    // ddgiCB/probeBufferVA が 0 のときは内部ダミーを使う（ルートSRV/CBVを常に満たしOFF時バイト一致）。
+    void SetDdgiBindings(D3D12_GPU_VIRTUAL_ADDRESS ddgiCB, D3D12_GPU_VIRTUAL_ADDRESS probeBufferVA, bool useDdgi)
+    { m_ddgiCBAddr = ddgiCB; m_ddgiProbeVA = probeBufferVA; m_useDdgi = useDdgi; }
+
     // DXR-GI F1: 静的町ジオメトリを RT へ登録（モデル毎に1 BLAS、フォリッジ除外）し TLAS を一度構築。
     // ロード後に ID3D12GraphicsCommandList4 上で1回呼ぶ（実行→GPU-idle→rtm->ReleaseBuildScratch() の前）。
     void BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsCommandList4* cmd);
@@ -218,6 +223,12 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE m_vsmAtlasSrv = { 0 };
     bool m_useVsm = false;
     bool m_vsmFpLod = false;   // Phase 1: フットプリントLOD を TownPS(b4 gVsmFpLod)へ渡す（本番サンプラの切替）
+    // Phase G: DDGI バインド（Scene が毎フレーム SetDdgiBindings で設定）
+    D3D12_GPU_VIRTUAL_ADDRESS m_ddgiCBAddr = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS m_ddgiProbeVA = 0;
+    bool m_useDdgi = false;
+    ComPtr<ID3D12Resource> m_ddgiDummyCB;   // OFF時の b5 ダミー
+    ComPtr<ID3D12Resource> m_ddgiDummySH;   // OFF時の t13 ダミー（48B）
     size_t m_loadedMeshes = 0;
     size_t m_missingMeshes = 0;
 

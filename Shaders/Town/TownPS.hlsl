@@ -49,7 +49,21 @@ cbuffer VsmCB : register(b3, space0)
     float4 Vsm_LevelCenterExtent[8];
 };
 // gVsmFpLod: Phase 1 フットプリントLOD の ON/OFF（マーカー/デバッグとロックステップ）。OFF=従来の距離LOD。
-cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint2 _vsmPad; };
+// gUseDdgi: Phase G DDGI 拡散GI の ON/OFF（0 で従来の偽ambient経路＝バイト一致）。
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; };
+
+// ---- Phase G: DDGI 拡散GI（gUseDdgi=1 のとき偽ambient(sky-tint)を実プローブirradianceで置換）----
+#include "../RT/Ddgi.hlsli"
+StructuredBuffer<ProbeSH> Ddgi_Probes : register(t13, space0);
+cbuffer DdgiCB : register(b5, space0)
+{
+    float3 gDdgiOrigin;  uint  gDdgiProbeCount;
+    float3 gDdgiSpacing; uint  gDdgiFrameIndex;
+    uint3  gDdgiDims;    float gDdgiNormalBias;
+    float3 gDdgiSunDir;  float gDdgiEmaAlpha;
+    float4 gDdgiSunColor;
+    uint   gDdgiRayCount; float3 _ddgiPad;
+};
 
 // 1タップ: 呼び出し側が選んだレベル L で完全再アドレッシング→アトラス深度比較。1=光,0=影,-1=未割当。
 // L・bias はタップ毎に再計算せず引数受け取り（フットプリントLOD/スロープバイアスは画素単位=全タップ共通）。
@@ -402,6 +416,11 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
 
     // ---- 間接光 ( cubemap IBL ) ----
     float3 irr = g_Irradiance.Sample(g_Sampler, Nw).rgb;
+    // Phase G: DDGI 有効時は拡散の入射irradianceを実プローブ場で置換（空間変化する本物のGI）。
+    //          gUseDdgi=0 では irr のまま＝従来の偽ambientとバイト一致。
+    if (gUseDdgi != 0)
+        irr = Ddgi_SampleField(Ddgi_Probes, In.worldPos + N * gDdgiNormalBias, Nw,
+                               gDdgiOrigin, gDdgiSpacing, gDdgiDims);
     float3 Famb = F0 + (max((1.0f - roughness).xxx, F0) - F0) * pow(1.0f - NdotV, 5.0f);
     float3 kDamb = (1.0f - Famb) * (1.0f - metallic);
     float3 diffuseIBL = irr * albedo * kDamb;
@@ -415,6 +434,7 @@ void main(in PS_IN In, out float4 outColor : SV_Target)
     // 暫定 GI: 拡散アンビエントを持ち上げ（Lumen の多重バウンス fill を安価に近似）。
     // 日向との差を保つため specular IBL は素のまま。AO で接地/くぼみを締める。
     float ambientBoost = max(Params2.z, 1.0f);
+    if (gUseDdgi != 0) ambientBoost = 1.0f;   // DDGI は物理的な入射光なので人工ブーストを外す
     float3 ambient = (diffuseIBL * iblDiffuse * ambientBoost + specularIBL * iblReflect) * ao;
 
     float3 color = ambient + Lo;
