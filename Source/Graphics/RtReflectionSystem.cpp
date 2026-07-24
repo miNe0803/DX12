@@ -139,6 +139,8 @@ void RtReflectionSystem::Execute(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         cb->GroundNyMin = 0.5f;   // 上向き≈水平のみ反射（壁は除外）
         cb->UseDdgi = useDdgi ? 1u : 0u;
         cb->FrameIndex = m_frameIndex;
+        cb->Roughness = 0.06f;    // R2: 濡れ路面の軽い光沢拡がり
+        cb->RayCount = 4u;        // コーンジッタ平均本数
     }
 
     // バリア: refl -> UAV, depth -> NON_PIXEL_SRV

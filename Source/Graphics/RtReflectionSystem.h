@@ -62,5 +62,8 @@ private:
         float GroundNyMin;               // 132
         uint32_t UseDdgi;                // 136
         uint32_t FrameIndex;             // 140
+        float Roughness;                 // 144
+        uint32_t RayCount;               // 148
+        float _pad2[2];                  // 152
     };
 };
