@@ -23,8 +23,12 @@ void CameraSystem::Update(Camera* camera, float dt, entt::registry& registry)
 		XMVECTOR camPos = XMVectorAdd(playerPos, off);
 		camera->SetPosition(camPos);
 
+		// Camera::LookAt はピッチが上下反転している（エンジン全体が 2*camY-targetY の鏡像で補正）。
+		// TPS 追従でも同じ補正を掛けないと、プレイヤーより下を狙うと逆に空を見上げてしまう。
+		const float camY = XMVectorGetY(camPos);
+		const float desiredY = transform.Position.y + player.Height * 0.8f;
 		XMFLOAT3 lookAt = transform.Position;
-		lookAt.y += player.Height * 0.8f;
+		lookAt.y = 2.0f * camY - desiredY;
 		camera->LookAt(XMLoadFloat3(&lookAt));
 		return;
 	}

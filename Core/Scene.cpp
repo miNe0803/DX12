@@ -575,10 +575,13 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		if (opt.addPlayerComponent)
 		{
 			PlayerComponent pc = {};
-			pc.Height = sourceHeight;
+			pc.Height = sourceHeight * opt.uniformScale;   // ワールド実寸の身長（追従カメラの注視点用）。sourceHeight は未スケール。
 			pc.GroundOffset = groundOffset;
-			pc.FollowCamera = false;
+			char fcEv[8];
+			pc.FollowCamera = !((GetEnvironmentVariableA("DX12_FOLLOWCAM", fcEv, sizeof(fcEv)) > 0) && (fcEv[0] == '0'));   // 既定ON, =0で自由視点(デバッグ)
 			m_registry.emplace<PlayerComponent>(parentEnt, pc);
+			printf("[GAME] player spawned: worldHeight=%.3f (src=%.3f x scale=%.3f) GroundOffset=%.3f followCam=%d\n", pc.Height, sourceHeight, opt.uniformScale, groundOffset, pc.FollowCamera ? 1 : 0);
+			fflush(stdout);
 		}
 	}
 	auto& rootChildren = m_registry.get<ModelGroupRootComponent>(parentEnt).children;
@@ -1405,19 +1408,29 @@ bool Scene::Init()
 		g_Camera->SetPosition(XMVectorSet(0.0f, 30.0f, -60.0f, 0.0f));
 	}
 
-	// [TOWN] プレイヤーモデル(hibana.pmx)の生成は無効化。
-	//constexpr float kPlayerScaleMultiplier = 0.1f;
-	//{
-	//	ModelSpawnOptions player = {};
-	//	player.position = { 0.0f, 0.0f, 0.0f };
-	//	player.uniformScale = kPlayerScaleMultiplier;
-	//	player.rotationY = 0.0f;
-	//	player.foot = ModelSpawnOptions::FootPlacement::SnapFeetToTerrain;
-	//	player.addPlayerComponent = true;
-	//	player.addNprTag = true;
-	//	if (!SpawnModelEntities(L"assets\\hibana\\hibana.pmx", player))
-	//		return false;
-	//}
+	// [GAME] プレイヤー(hibana.pmx)を bind ポーズの動的オブジェクトとして復活。
+	//        スキニングは未実装＝bindポーズだが、rigid instance として移動/回転でき、
+	//        動的TLAS の検証対象になる。追従カメラ+WASD移動は PlayerSystem/CameraSystem。
+	//        読込失敗は致命にせず（町シーンは継続）。DX12_NOPLAYER=1 で無効化。
+	{
+		char npEv[8];
+		bool spawnPlayer = !((GetEnvironmentVariableA("DX12_NOPLAYER", npEv, sizeof(npEv)) > 0) && (npEv[0] != '0'));
+		if (spawnPlayer)
+		{
+			ModelSpawnOptions player = {};
+			player.position = { 0.0f, 0.0f, 0.0f };
+			player.uniformScale = 0.1f;
+			player.rotationY = 0.0f;
+			player.foot = ModelSpawnOptions::FootPlacement::SnapFeetToTerrain;
+			player.addPlayerComponent = true;
+			player.addNprTag = true;
+			if (!SpawnModelEntities(L"assets\\hibana\\hibana.pmx", player))
+			{
+				printf("[GAME] player spawn failed (hibana.pmx) — continuing without player\n");
+				fflush(stdout);
+			}
+		}
+	}
 
 	if (!InitMainPipeline())
 		return false;
@@ -1823,7 +1836,7 @@ void Scene::Update()
 	float dt = 0.016f;
 	// PlayerSystem が毎フレーム Y を地形に合わせる → その後に CameraSystem が追従するのが一貫。
 	// CameraSystem を先にすると TPS 追従が1フレームずれ、地形の上で「引き戻される／遅延」に見えやすい。
-	PlayerSystem::Update(m_registry);
+	PlayerSystem::Update(m_registry, dt);
 	CameraSystem::Update(g_Camera, dt, m_registry);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
