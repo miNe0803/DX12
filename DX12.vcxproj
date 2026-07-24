@@ -206,6 +206,7 @@ exit /B 0</Command>
     <ClInclude Include="Source\Graphics\AtmosphereSystem.h" />
     <ClInclude Include="Source\Graphics\SsrSystem.h" />
     <ClInclude Include="Source\Graphics\GtaoSystem.h" />
+    <ClInclude Include="Source\Graphics\GroundProbeSystem.h" />
     <ClInclude Include="Source\Graphics\RtaoSystem.h" />
     <ClInclude Include="Source\Graphics\DdgiSystem.h" />
     <ClInclude Include="Source\Graphics\RtReflectionSystem.h" />
@@ -253,6 +254,7 @@ exit /B 0</Command>
     <ClCompile Include="Source\Graphics\AtmosphereSystem.cpp" />
     <ClCompile Include="Source\Graphics\SsrSystem.cpp" />
     <ClCompile Include="Source\Graphics\GtaoSystem.cpp" />
+    <ClCompile Include="Source\Graphics\GroundProbeSystem.cpp" />
     <ClCompile Include="Source\Graphics\RtaoSystem.cpp" />
     <ClCompile Include="Source\Graphics\DdgiSystem.cpp" />
     <ClCompile Include="Source\Graphics\RtReflectionSystem.cpp" />
@@ -478,6 +480,13 @@ exit /B 0</Command>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
       <ObjectFileName>$(OutDir)GTAO_CS.cso</ObjectFileName>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="Shaders\RT\GroundProbe_CS.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+      <ObjectFileName>$(OutDir)GroundProbe_CS.cso</ObjectFileName>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
     </FxCompile>

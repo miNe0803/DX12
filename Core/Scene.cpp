@@ -41,6 +41,7 @@
 #include "Graphics/RtaoSystem.h"
 #include "Graphics/DdgiSystem.h"
 #include "Graphics/RtReflectionSystem.h"
+#include "Graphics/GroundProbeSystem.h"
 #include "Graphics/VsmSystem.h"
 #include "Graphics/RayTracingManager.h"   // DXR-GI F1: TLAS基盤
 #include "Graphics/TreeVegetation.h"
@@ -85,6 +86,9 @@ static bool s_glassRtrEnabled = false; // ガラスRT反射（DX12_GLASSRTR。ON
 static bool s_rtContactEnabled = false; // 近傍RT接触影（DX12_RTCONTACT。ONでVSM/CSMの"上に"短レイ接触影をmin合成。推奨だが既定OFF）
 static uint32_t s_playerBlasIndex = 0xFFFFFFFFu; // 動的TLAS: プレイヤーの BLAS index（初期化時に構築）
 static bool s_dynTlasEnabled = true;  // 動的TLAS（DX12_DYNTLAS=0で無効）。キャラ/敵を毎フレームTLASへ載せRT影/反射に反映
+static GroundProbeSystem* s_groundProbe = nullptr; // 接地スナップ: キャラXZ下向きRTレイで地面Y取得
+static float s_probedGroundY = 0.0f;  // 直近に readback した地面Y
+static bool s_probedGroundValid = false;
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -454,6 +458,7 @@ Scene::~Scene()
 	if (s_rtao) { s_rtao->Shutdown(); delete s_rtao; s_rtao = nullptr; }
 	if (s_ddgi) { s_ddgi->Shutdown(); delete s_ddgi; s_ddgi = nullptr; }
 	if (s_rtr) { s_rtr->Shutdown(); delete s_rtr; s_rtr = nullptr; }
+	if (s_groundProbe) { s_groundProbe->Shutdown(); delete s_groundProbe; s_groundProbe = nullptr; }
 	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
 	if (s_rtManager) { s_rtManager->Shutdown(); delete s_rtManager; s_rtManager = nullptr; }
 	s_reflValid = false;
@@ -1697,6 +1702,12 @@ bool Scene::Init()
 					if (!s_rtr->Init(g_Engine->Device(), descriptorHeap, (UINT)vpR.Width, (UINT)vpR.Height))
 					{ delete s_rtr; s_rtr = nullptr; s_rtrEnabled = false; }
 				}
+				// [接地] キャラXZ下向きRTレイで地面Yを取得（per-XZ 接地スナップ）。TLASがある時のみ。
+				{
+					s_groundProbe = new GroundProbeSystem();
+					if (!s_groundProbe->Init(g_Engine->Device(), Engine::FRAME_BUFFER_COUNT))
+					{ delete s_groundProbe; s_groundProbe = nullptr; }
+				}
 				// 仕上げ: レイトレース影＋ガラスRT反射（新規システム不要＝町PS内RayQuery。フラグのみ）
 				{
 					char rsEv[8];
@@ -1872,12 +1883,13 @@ void Scene::Update()
 	TryEnsureTreeGpuCullInit();
 
 	float dt = 0.016f;
-	// [接地] 地形が無い町シーンでは道路レベル(FirstCrosswalkWorld().y)を地面Yとしてプレイヤーへ渡す
-	//        （PlayerSystem が Position.y = GroundY + GroundOffset で足を接地させる）。
+	// [接地] per-XZ RT接地スナップ(GroundProbe)の地面Yを優先。未取得時は道路レベル(FirstCrosswalkWorld().y)へ。
+	//        PlayerSystem が Position.y = GroundY + GroundOffset で足を接地させる。
 	if (s_town)
 	{
 		DirectX::XMFLOAT3 cw;
-		const float groundY = s_town->FirstCrosswalkWorld(cw) ? cw.y : 0.0f;
+		float groundY = s_town->FirstCrosswalkWorld(cw) ? cw.y : 0.0f;   // フォールバック=道路レベル
+		if (s_probedGroundValid) groundY = s_probedGroundY;              // RTプローブのヒットを優先(per-XZ)
 		for (auto e : m_registry.view<PlayerComponent>())
 			m_registry.get<PlayerComponent>(e).GroundY = groundY;
 	}
@@ -2452,6 +2464,31 @@ void Scene::Draw()
 			ComPtr<ID3D12GraphicsCommandList4> cl4;
 			if (SUCCEEDED(commandList->QueryInterface(IID_PPV_ARGS(&cl4))))
 				s_rtManager->RebuildTlasWithDynamic(cl4.Get(), &dyn, 1);
+		}
+	}
+
+	// ---- [接地] per-XZ RT接地スナップ: キャラ頭上少しから下向きにTLAS(静的のみ)へレイ→地面Y ----
+	//      readback は BeginRender のフェンス待ち後なので readback[currentIndex] は2フレーム前の結果＝確定済。
+	//      先に読み(→次フレームUpdateがGroundYへ反映)、その後 現在のキャラXZでディスパッチ→同indexへ書く。
+	if (s_groundProbe && s_groundProbe->IsValid() && s_rtManager && s_rtManager->IsValid()
+		&& s_rtManager->GetInstanceCount() > 0)
+	{
+		float gy = 0.0f;
+		if (s_groundProbe->Read(currentIndex, gy)) { s_probedGroundY = gy; s_probedGroundValid = true; }
+		entt::entity playerRoot = entt::null;
+		for (auto e : m_registry.view<PlayerComponent, TransformComponent>()) { playerRoot = e; break; }
+		if (playerRoot != entt::null)
+		{
+			const auto& tc = m_registry.get<TransformComponent>(playerRoot);
+			static int s_gpLog = 0;
+			if ((s_gpLog++ % 120) == 0)
+			{ printf("[GroundProbe] probedY=%.3f valid=%d  playerXZ=(%.1f,%.1f) playerY=%.3f\n",
+				s_probedGroundY, s_probedGroundValid ? 1 : 0, tc.Position.x, tc.Position.z, tc.Position.y); fflush(stdout); }
+			// 頭上 +1m から下へ 4m 探索（小さな段差の上りをまたぎ、頭上の庇/屋根には当てない）。
+			DirectX::XMFLOAT3 origin(tc.Position.x, tc.Position.y + 1.0f, tc.Position.z);
+			ComPtr<ID3D12GraphicsCommandList4> cl4g;
+			if (SUCCEEDED(commandList->QueryInterface(IID_PPV_ARGS(&cl4g))))
+				s_groundProbe->Execute(cl4g.Get(), s_rtManager->GetTlasGpuVA(), origin, 4.0f, currentIndex);
 		}
 	}
 
