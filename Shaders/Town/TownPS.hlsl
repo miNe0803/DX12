@@ -51,7 +51,8 @@ cbuffer VsmCB : register(b3, space0)
 // gVsmFpLod: Phase 1 フットプリントLOD の ON/OFF（マーカー/デバッグとロックステップ）。OFF=従来の距離LOD。
 // gUseDdgi: Phase G DDGI 拡散GI の ON/OFF（0 で従来の偽ambient経路＝バイト一致）。
 // gUseRtShadow: レイトレース影 ON/OFF（1 で VSM/CSM の代わりに TLAS へシャドウレイ）。
-cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; uint gUseRtShadow; uint gUseGlassRtr; };
+// gRtContact: 近傍RT接触影 ON/OFF（1 で VSM/CSM の"上に"短レイ接触影を min 合成＝置換ではなく上塗り）。
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; uint gUseRtShadow; uint gUseGlassRtr; uint gRtContact; };
 
 // レイトレース太陽影: 町 TLAS へ inline RayQuery（PS内, SM6.6）。関数定義は SceneCB(SunDirection) 後方に。
 RaytracingAccelerationStructure Scene_RT : register(t14, space0);
@@ -286,6 +287,21 @@ float RtSunShadow(float3 worldPos, float3 Nw, float2 svpos)
     return vis / (float)N;
 }
 
+// 近傍 RT 接触影: 太陽方向へ "短い" レイ(最大 tMax m)を1本飛ばし、ごく近くのオクルーダーだけを影扱い。
+// 用途は VSM/CSM のバイアスで浮いた接地部（peter-panning/光漏れ）の締め＝コンタクトシャドウ。
+// 単一レイでノイズレス＆安価（デノイザ無しのPS向き）。TLAS 除外の木は VSM 側が担うため min 合成で無害。
+float RtContactShadow(float3 worldPos, float3 Nw, float tMax)
+{
+    float3 L = normalize(SunDirection.xyz);            // 光へ向かう方向
+    if (dot(Nw, L) <= 0.0f) return 0.0f;               // 太陽の裏面
+    float3 O = worldPos + Nw * 0.03f;                  // 小さめ法線バイアス（接触を潰さない）
+    RayDesc r; r.Origin = O; r.Direction = L; r.TMin = 0.01f; r.TMax = tMax;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(Scene_RT, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, r);
+    q.Proceed();
+    return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;   // 近傍ヒット=接触影
+}
+
 // レイトレース ガラス反射: 反射方向へ TLAS を叩き、ヒットは DDGI irradiance(色付き=太陽+空+バウンス済)を
 // 近似反射色に、miss は prefilter 空。GeometryInfo 不要（既存の Scene_RT t14 + DDGI t13/b5 を再利用）。
 float3 RtGlassRefl(float3 worldPos, float3 R, float3 skyFallback)
@@ -306,8 +322,12 @@ float3 RtGlassRefl(float3 worldPos, float3 R, float3 skyFallback)
 
 float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
 {
+    // RT-only モード（実験用）: VSM/CSM を完全置換。※木/フォリッジは TLAS 除外で影が出ない。
     if (gUseRtShadow != 0u)
-        return RtSunShadow(worldPos, Nw, svpos);   // レイトレース影（VSM/CSM を置換）
+        return RtSunShadow(worldPos, Nw, svpos);
+
+    // --- 基本影 ---: VSM（未割当画素は lit 扱い）。VSM OFF 時は従来 CSM。木の影はここが担う。
+    float baseShadow;
     if (gUseVsm != 0u)
     {
         // スロープスケールバイアス用に受光面と太陽の角度余弦を渡す（SunDirection=光へ向かう方向, 正規化）。
@@ -315,9 +335,29 @@ float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
         float s = SampleSunShadowVSM(worldPos, ndotl);
         // VSM主軸: 被覆画素は VSM の影。非被覆(>512m 等ごく僅か)は lit 扱い。CSMカスケードは VSM ON時
         // キャスタ描画をスキップ(空)なので参照しない＝二重計算を排除。VSMは0-512mを世界固定で covers。
-        return (s >= 0.0f) ? s : 1.0f;
+        baseShadow = (s >= 0.0f) ? s : 1.0f;
     }
-    return SampleSunShadowSoft(worldPos, Nw, svpos);   // VSM OFF → 従来CSM（キャスタ描画あり）
+    else
+    {
+        baseShadow = SampleSunShadowSoft(worldPos, Nw, svpos);   // VSM OFF → 従来CSM（キャスタ描画あり）
+    }
+
+    // --- 近傍 RT 接触影を "上塗り" ---: 短レイの接触影を min 合成（暗くする方向のみ）。
+    // 近傍のみ距離フェード（コストと"接触が効くのは近景"の両面）。木は VSM が担うので TLAS 除外でも無害。
+    if (gRtContact != 0u)
+    {
+        const float kContactTMax = 2.5f;    // 接触判定レイ長(m)＝これ以内のオクルーダーだけ締める
+        const float kFadeStart   = 18.0f;   // ここから効果を弱める(m)
+        const float kFadeEnd     = 40.0f;   // ここで完全に消える(m)
+        float d = distance(worldPos, CameraWorld.xyz);
+        float w = 1.0f - smoothstep(kFadeStart, kFadeEnd, d);
+        if (w > 0.001f)
+        {
+            float rt = RtContactShadow(worldPos, Nw, kContactTMax);
+            baseShadow = min(baseShadow, lerp(1.0f, rt, w));   // RTは近傍で暗くする方向にのみ作用
+        }
+    }
+    return baseShadow;
 }
 
 // 点光源 1 灯の寄与

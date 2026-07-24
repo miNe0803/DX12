@@ -89,6 +89,10 @@ public:
 	void SetGlassRtrEnabled(bool on);
 	bool GetGlassRtrEnabled() const;
 	bool GlassRtrAvailable() const;
+	// 推奨: 近傍RT接触影。ONでVSM/CSM影の"上に"短レイ接触影をmin合成（置換ではなく上塗り＝木の影は保持）。
+	void SetRtContactEnabled(bool on);
+	bool GetRtContactEnabled() const;
+	bool RtContactAvailable() const;
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

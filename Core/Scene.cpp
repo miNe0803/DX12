@@ -82,6 +82,7 @@ static RtReflectionSystem* s_rtr = nullptr; // 仕上げ: レイトレース反�
 static bool s_rtrEnabled = false;    // RTR 有効（DX12_RTR で初期化。ONで濡れ地面が本物のRT反射に。既定OFF）
 static bool s_rtShadowEnabled = false; // レイトレース影（DX12_RTSHADOW。ONで町PSがVSM/CSMの代わりにシャドウレイ。既定OFF）
 static bool s_glassRtrEnabled = false; // ガラスRT反射（DX12_GLASSRTR。ONでガラスがSSRの代わりにRT反射。既定OFF）
+static bool s_rtContactEnabled = false; // 近傍RT接触影（DX12_RTCONTACT。ONでVSM/CSMの"上に"短レイ接触影をmin合成。推奨だが既定OFF）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -1648,6 +1649,7 @@ bool Scene::Init()
 					char rsEv[8];
 					s_rtShadowEnabled = (GetEnvironmentVariableA("DX12_RTSHADOW", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
 					s_glassRtrEnabled = (GetEnvironmentVariableA("DX12_GLASSRTR", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
+					s_rtContactEnabled = (GetEnvironmentVariableA("DX12_RTCONTACT", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
 				}
 			}
 		}
@@ -1724,6 +1726,9 @@ bool Scene::RtShadowAvailable() const { return s_rtManager && s_rtManager->IsVal
 void Scene::SetGlassRtrEnabled(bool on) { s_glassRtrEnabled = on; }
 bool Scene::GetGlassRtrEnabled() const { return s_glassRtrEnabled; }
 bool Scene::GlassRtrAvailable() const { return s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
+void Scene::SetRtContactEnabled(bool on) { s_rtContactEnabled = on; }
+bool Scene::GetRtContactEnabled() const { return s_rtContactEnabled; }
+bool Scene::RtContactAvailable() const { return s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -2393,7 +2398,7 @@ void Scene::Draw()
 		{
 			bool tlasOk = s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0;
 			s_town->SetRtBindings(tlasOk ? s_rtManager->GetTlasGpuVA() : 0,
-				s_rtShadowEnabled && tlasOk, s_glassRtrEnabled && tlasOk);
+				s_rtShadowEnabled && tlasOk, s_glassRtrEnabled && tlasOk, s_rtContactEnabled && tlasOk);
 		}
 		s_town->Draw(commandList,
 			sceneConstantBuffer[currentIndex]->GetAddress(),

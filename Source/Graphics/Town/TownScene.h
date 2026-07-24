@@ -113,9 +113,10 @@ public:
     void SetDdgiBindings(D3D12_GPU_VIRTUAL_ADDRESS ddgiCB, D3D12_GPU_VIRTUAL_ADDRESS probeBufferVA, bool useDdgi)
     { m_ddgiCBAddr = ddgiCB; m_ddgiProbeVA = probeBufferVA; m_useDdgi = useDdgi; }
 
-    // 仕上げ: レイトレース太陽影＋ガラス反射。tlasVA を PS 内 RayQuery 用に供給（t14）。
-    void SetRtBindings(D3D12_GPU_VIRTUAL_ADDRESS tlasVA, bool useRtShadow, bool useGlassRtr)
-    { m_rtShadowTlasVA = tlasVA; m_useRtShadow = useRtShadow; m_useGlassRtr = useGlassRtr; }
+    // 仕上げ: レイトレース太陽影＋ガラス反射＋近傍接触影。tlasVA を PS 内 RayQuery 用に供給（t14）。
+    // useRtShadow=VSM/CSM完全置換(実験用), useRtContact=VSM/CSMの上に短レイ接触影を min 合成(推奨)。
+    void SetRtBindings(D3D12_GPU_VIRTUAL_ADDRESS tlasVA, bool useRtShadow, bool useGlassRtr, bool useRtContact)
+    { m_rtShadowTlasVA = tlasVA; m_useRtShadow = useRtShadow; m_useGlassRtr = useGlassRtr; m_useRtContact = useRtContact; }
 
     // DXR-GI F1: 静的町ジオメトリを RT へ登録（モデル毎に1 BLAS、フォリッジ除外）し TLAS を一度構築。
     // ロード後に ID3D12GraphicsCommandList4 上で1回呼ぶ（実行→GPU-idle→rtm->ReleaseBuildScratch() の前）。
@@ -243,6 +244,7 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS m_rtShadowTlasVA = 0;   // 仕上げ: レイトレース影/ガラス反射の TLAS VA(t14)
     bool m_useRtShadow = false;
     bool m_useGlassRtr = false;
+    bool m_useRtContact = false;   // 近傍RT接触影（VSM/CSMの上塗り）
     ComPtr<ID3D12Resource> m_geomInfoRes;      // Phase G-b: GeoInfo{vbIdx,ibIdx} × geoCount
     ComPtr<ID3D12Resource> m_instGeoBaseRes;   // Phase G-b: uint base × TLAS instanceCount
     size_t m_loadedMeshes = 0;

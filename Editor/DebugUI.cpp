@@ -277,6 +277,18 @@ void DebugUI::Draw()
 					}
 					else ImGui::TextDisabled("  RT Shadows 利用不可（TLAS無し）。");
 					ImGui::Separator();
+					ImGui::TextUnformatted("--- RT Contact Shadows（近傍接触影・推奨）---");
+					if (g_Scene->RtContactAvailable())
+					{
+						bool rtc = g_Scene->GetRtContactEnabled();
+						if (ImGui::Checkbox("RT Contact Shadows (DX12_RTCONTACT)", &rtc))
+							g_Scene->SetRtContactEnabled(rtc);
+						ImGui::TextDisabled(rtc
+							? "  ON=VSM/CSM影の上に短レイ接触影をmin合成（接地の締め）。木の影はVSMが保持。RT Shadowsとは別軸。"
+							: "  OFF。基本影(VSM)を維持したまま近景の接地部だけRTで締める推奨モード。");
+					}
+					else ImGui::TextDisabled("  RT Contact Shadows 利用不可（TLAS無し）。");
+					ImGui::Separator();
 					ImGui::TextUnformatted("--- Glass RT Reflections（ガラスRT反射・仕上げ）---");
 					if (g_Scene->GlassRtrAvailable())
 					{
