@@ -45,8 +45,9 @@ void PlayerSystem::Update(entt::registry& registry, float dt)
 			}
 		}
 
-		// 接地（地形が無ければ GetHeight=0 → y=GroundOffset）。
+		// 接地: 地形があればその高さ、無ければ町の地面(GroundY, Scene が道路レベルを設定)へ足を置く。
 		float ground = TerrainSystem::GetHeight(registry, transform.Position.x, transform.Position.z);
+		if (ground == 0.0f) ground = player.GroundY;   // 地形無し町では GroundY(道路レベル)を使用
 		transform.Position.y = ground + player.GroundOffset;
 	}
 }

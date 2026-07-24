@@ -1872,6 +1872,15 @@ void Scene::Update()
 	TryEnsureTreeGpuCullInit();
 
 	float dt = 0.016f;
+	// [接地] 地形が無い町シーンでは道路レベル(FirstCrosswalkWorld().y)を地面Yとしてプレイヤーへ渡す
+	//        （PlayerSystem が Position.y = GroundY + GroundOffset で足を接地させる）。
+	if (s_town)
+	{
+		DirectX::XMFLOAT3 cw;
+		const float groundY = s_town->FirstCrosswalkWorld(cw) ? cw.y : 0.0f;
+		for (auto e : m_registry.view<PlayerComponent>())
+			m_registry.get<PlayerComponent>(e).GroundY = groundY;
+	}
 	// PlayerSystem が毎フレーム Y を地形に合わせる → その後に CameraSystem が追従するのが一貫。
 	// CameraSystem を先にすると TPS 追従が1フレームずれ、地形の上で「引き戻される／遅延」に見えやすい。
 	PlayerSystem::Update(m_registry, dt);
