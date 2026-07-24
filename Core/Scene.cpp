@@ -1621,7 +1621,8 @@ bool Scene::Init()
 				// Phase R: TLAS が構築できた時だけ RTAO を生成（OFF時は無コスト・GTAO経路不変）
 				{
 					char rtEv[8];
-					s_rtaoEnabled = (GetEnvironmentVariableA("DX12_RTAO", rtEv, sizeof(rtEv)) > 0) && (rtEv[0] != '0');
+					// 既定ON（DX12_RTAO=0 で無効）。TLAS がある時のみ生成されるので GI OFF 時は自動的に不使用。
+					s_rtaoEnabled = !((GetEnvironmentVariableA("DX12_RTAO", rtEv, sizeof(rtEv)) > 0) && (rtEv[0] == '0'));
 					D3D12_VIEWPORT vpAo = g_Engine->GetViewport();
 					s_rtao = new RtaoSystem();
 					if (!s_rtao->Init(g_Engine->Device(), (UINT)vpAo.Width, (UINT)vpAo.Height))
@@ -1630,7 +1631,8 @@ bool Scene::Init()
 				// Phase G: TLAS がある時だけ DDGI を生成（OFF時は無コスト・町ambient不変）
 				{
 					char ddEv[8];
-					s_ddgiEnabled = (GetEnvironmentVariableA("DX12_DDGI", ddEv, sizeof(ddEv)) > 0) && (ddEv[0] != '0');
+					// 既定ON（DX12_DDGI=0 で無効）。町の偽ambientを実プローブGIへ置換。
+					s_ddgiEnabled = !((GetEnvironmentVariableA("DX12_DDGI", ddEv, sizeof(ddEv)) > 0) && (ddEv[0] == '0'));
 					s_ddgi = new DdgiSystem();
 					if (!s_ddgi->Init(g_Engine->Device(), s_town->BoundsMin(), s_town->BoundsMax()))
 					{ delete s_ddgi; s_ddgi = nullptr; s_ddgiEnabled = false; }
@@ -1647,9 +1649,11 @@ bool Scene::Init()
 				// 仕上げ: レイトレース影＋ガラスRT反射（新規システム不要＝町PS内RayQuery。フラグのみ）
 				{
 					char rsEv[8];
+					// RT完全置換影/ガラスRT反射は既定OFF（前者はTLAS除外の木の影が消える, 後者はRT反射）。実験用トグル。
 					s_rtShadowEnabled = (GetEnvironmentVariableA("DX12_RTSHADOW", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
 					s_glassRtrEnabled = (GetEnvironmentVariableA("DX12_GLASSRTR", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
-					s_rtContactEnabled = (GetEnvironmentVariableA("DX12_RTCONTACT", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] != '0');
+					// 近傍RT接触影は既定ON（DX12_RTCONTACT=0 で無効）。VSMを基本に残し接地を締める（木の影は保持）。
+					s_rtContactEnabled = !((GetEnvironmentVariableA("DX12_RTCONTACT", rsEv, sizeof(rsEv)) > 0) && (rsEv[0] == '0'));
 				}
 			}
 		}
