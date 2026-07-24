@@ -69,6 +69,14 @@ float3 Ddgi_SampleField(StructuredBuffer<ProbeSH> probes, float3 wp, float3 n,
         int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         int3 c = base + off;
         float w = (off.x ? t.x : 1.0f - t.x) * (off.y ? t.y : 1.0f - t.y) * (off.z ? t.z : 1.0f - t.z);
+        // G-c 漏れ緩和: シェーディング点の法線から見て「前面」にあるプローブを優遇し、
+        // 壁の裏側（背面）のプローブをほぼ無視＝壁越しの光漏れを抑える（Chebyshev の簡易代替）。
+        float3 probePos = Ddgi_ProbeWorldPos((uint3)c, origin, spacing);
+        float3 toProbe = probePos - wp;
+        float d = length(toProbe);
+        float3 dp = (d > 1e-4f) ? toProbe / d : n;
+        float nw = max(0.0f, dot(dp, n)) * 0.9f + 0.1f;   // 背面は0.1、前面ほど大
+        w *= nw;
         uint idx = Ddgi_ProbeIndex((uint3)c, dims);
         sum += w * SH_EvalIrradiance(probes[idx], n);
         wsum += w;

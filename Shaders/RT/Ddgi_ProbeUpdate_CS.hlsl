@@ -124,7 +124,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 if (sq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) sunVis = 0.0f;
             }
             float3 albedo = 0.5f;   // フラット（マテリアル別アルベドは将来）
-            L = (albedo / DDGI_PI) * gSunColor.rgb * NdotL * sunVis;
+            float3 sunBounce = (albedo / DDGI_PI) * gSunColor.rgb * NdotL * sunVis;
+            // G-c 多重バウンス: ヒット面の前フレームirradiance(=E/π)からの拡散放射 albedo*irr を加算。
+            // 光がフレームを跨いで再帰＝2次以降のバウンス。albedo<1 でエネルギーは収束（暴走しない）。
+            float3 hitPos2 = P + dir * q.CommittedRayT();
+            float3 indirect = albedo * Ddgi_SampleField(PrevSH, hitPos2 + Nhit * gNormalBias, Nhit,
+                                                        gGridOrigin, gGridSpacing, gGridDims);
+            L = sunBounce + indirect;
         }
         else
             L = g_Prefilter.SampleLevel(g_Sampler, dir, 0).rgb; // 空の生放射輝度（roughness0=生env）

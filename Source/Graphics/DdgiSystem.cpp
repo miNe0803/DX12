@@ -18,7 +18,10 @@ bool DdgiSystem::Init(ID3D12Device* device, const XMFLOAT3& boundsMin, const XMF
     const float sx = 4.0f, sy = 3.0f, sz = 4.0f;
     m_params.gridDims = XMUINT3(dx, dy, dz);
     m_params.gridSpacing = XMFLOAT3(sx, sy, sz);
-    float originY = std::clamp(boundsMin.y, -20.0f, 0.0f) - 2.0f;   // 地面やや下から上へ
+    // 地面は概ね Y≈0（建物中心を原点へ再センタ済）。地下に層を無駄遣いしないよう -4m から上へ 48m。
+    // （boundsMin.y は外れ値インスタンスで極端に低いため使わない＝手動アンカ）
+    (void)boundsMin;
+    float originY = -4.0f;
     m_params.gridOrigin = XMFLOAT3(-(float)(dx - 1) * sx * 0.5f, originY, -(float)(dz - 1) * sz * 0.5f);
     m_params.probeCount = dx * dy * dz;
     m_params.normalBias = 0.3f;      // 町サンプル時のワールド法線オフセット（壁漏れ緩和の初期値）
