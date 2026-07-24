@@ -34,6 +34,7 @@ public:
     // sunColorScaled: 太陽色×sunScale（G-b用, G-aは無視）。sunDir: 太陽へ向かう方向。
     void Execute(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* sharedHeap,
         D3D12_GPU_VIRTUAL_ADDRESS tlasGpuVA, D3D12_GPU_DESCRIPTOR_HANDLE envCubemapGpuHandle,
+        D3D12_GPU_VIRTUAL_ADDRESS geomInfoVA, D3D12_GPU_VIRTUAL_ADDRESS instGeoBaseVA,
         const DirectX::XMFLOAT3& sunColorScaled, const DirectX::XMFLOAT3& sunDir);
 
     // 町がサンプルする「直近完了」バッファの VA（＝今フレーム書き込む方の反対）。

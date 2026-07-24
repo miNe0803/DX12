@@ -55,17 +55,21 @@ bool DdgiSystem::Init(ID3D12Device* device, const XMFLOAT3& boundsMin, const XMF
     // --- Root sig: b0 CBV, t0 TLAS(rootSRV), t1 prev(rootSRV), u0 cur(rootUAV), table t2-t4 IBL ---
     {
         CD3DX12_DESCRIPTOR_RANGE iblR; iblR.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 2);   // t2-t4
-        CD3DX12_ROOT_PARAMETER params[5] = {};
+        CD3DX12_ROOT_PARAMETER params[7] = {};
         params[0].InitAsConstantBufferView(0);         // b0
         params[1].InitAsShaderResourceView(0);         // t0 TLAS
         params[2].InitAsShaderResourceView(1);         // t1 prev SH
         params[3].InitAsUnorderedAccessView(0);        // u0 cur SH
         params[4].InitAsDescriptorTable(1, &iblR);     // t2-t4 IBL cubemaps（共有ヒープ）
+        params[5].InitAsShaderResourceView(5);         // t5 GeoInfo（G-b ヒット面フェッチ）
+        params[6].InitAsShaderResourceView(6);         // t6 InstanceGeoBase
         D3D12_STATIC_SAMPLER_DESC samp = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
         samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         D3D12_ROOT_SIGNATURE_DESC rs = {};
-        rs.NumParameters = 5; rs.pParameters = params;
+        rs.NumParameters = 7; rs.pParameters = params;
         rs.NumStaticSamplers = 1; rs.pStaticSamplers = &samp;
+        // G-b: SM6.6 ResourceDescriptorHeap[]（VB/IB を bindless フェッチ）を許可。
+        rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
         ComPtr<ID3DBlob> sig, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
         { if (err) printf("DDGI RootSig: %s\n", (const char*)err->GetBufferPointer()); return false; }
@@ -95,9 +99,10 @@ void DdgiSystem::Shutdown() { m_valid = false; }
 
 void DdgiSystem::Execute(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* sharedHeap,
     D3D12_GPU_VIRTUAL_ADDRESS tlasGpuVA, D3D12_GPU_DESCRIPTOR_HANDLE envCubemapGpuHandle,
+    D3D12_GPU_VIRTUAL_ADDRESS geomInfoVA, D3D12_GPU_VIRTUAL_ADDRESS instGeoBaseVA,
     const XMFLOAT3& sunColorScaled, const XMFLOAT3& sunDir)
 {
-    if (!m_valid || tlasGpuVA == 0 || !sharedHeap) return;
+    if (!m_valid || tlasGpuVA == 0 || !sharedHeap || geomInfoVA == 0 || instGeoBaseVA == 0) return;
     GPU_CMD_BEGIN_EVENT(cmd, 200, 160, 90, L"DDGI probe update");
 
     const int w = m_write;      // 書き込み
@@ -130,6 +135,8 @@ void DdgiSystem::Execute(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* s
     cmd->SetComputeRootShaderResourceView(2, m_probeSH[p]->GetGPUVirtualAddress());
     cmd->SetComputeRootUnorderedAccessView(3, m_probeSH[w]->GetGPUVirtualAddress());
     cmd->SetComputeRootDescriptorTable(4, envCubemapGpuHandle);
+    cmd->SetComputeRootShaderResourceView(5, geomInfoVA);       // t5 GeoInfo
+    cmd->SetComputeRootShaderResourceView(6, instGeoBaseVA);    // t6 InstanceGeoBase
     cmd->Dispatch((m_params.probeCount + 63) / 64, 1, 1);
 
     // cur を町が読めるよう PIXEL|NON_PIXEL_SRV へ

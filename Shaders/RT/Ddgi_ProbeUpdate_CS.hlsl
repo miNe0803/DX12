@@ -25,6 +25,13 @@ RWStructuredBuffer<ProbeSH>     CurSH  : register(u0);
 TextureCube g_Prefilter  : register(t2);
 TextureCube g_Irradiance : register(t3);
 SamplerState g_Sampler   : register(s0);
+// G-b: ヒット面フェッチ。GeoInfo[InstGeoBase[instID]+geomIdx] → VB/IB を ResourceDescriptorHeap で bindless 取得。
+struct GeoInfo { uint vbIdx; uint ibIdx; };
+StructuredBuffer<GeoInfo> g_GeoInfo     : register(t5);
+StructuredBuffer<uint>    g_InstGeoBase : register(t6);
+
+static const float DDGI_PI = 3.14159265359f;
+static const uint  DDGI_VTX_STRIDE = 84u;   // sizeof(Vertex): Position@0
 
 float RadicalInverseVdC(uint bits)
 {
@@ -82,7 +89,43 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
         float3 L;
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
-            L = 0.0f;                                          // G-a: ヒットは無寄与（G-bで太陽バウンス）
+        {
+            // G-b: ヒット面の太陽バウンス。GeometryInfo でヒット三角形の頂点を bindless フェッチ→世界法線。
+            uint instID = q.CommittedInstanceID();
+            uint geomIdx = q.CommittedGeometryIndex();
+            uint prim = q.CommittedPrimitiveIndex();
+            GeoInfo gi = g_GeoInfo[g_InstGeoBase[instID] + geomIdx];
+            ByteAddressBuffer vb = ResourceDescriptorHeap[gi.vbIdx];
+            ByteAddressBuffer ib = ResourceDescriptorHeap[gi.ibIdx];
+            uint3 tri = uint3(ib.Load(prim * 12u), ib.Load(prim * 12u + 4u), ib.Load(prim * 12u + 8u));
+            float3 p0 = asfloat(vb.Load3(tri.x * DDGI_VTX_STRIDE));
+            float3 p1 = asfloat(vb.Load3(tri.y * DDGI_VTX_STRIDE));
+            float3 p2 = asfloat(vb.Load3(tri.z * DDGI_VTX_STRIDE));
+            // 世界位置で外積＝非一様スケールでも正しい幾何法線（逆転置不要）。
+            float3x4 o2w = q.CommittedObjectToWorld3x4();
+            float3 w0 = mul(o2w, float4(p0, 1.0f));
+            float3 w1 = mul(o2w, float4(p1, 1.0f));
+            float3 w2 = mul(o2w, float4(p2, 1.0f));
+            float3 Nhit = normalize(cross(w1 - w0, w2 - w0));
+            if (dot(Nhit, -dir) < 0.0f) Nhit = -Nhit;   // プローブ側を向く
+
+            float NdotL = max(0.0f, dot(Nhit, gSunDir));
+            float sunVis = 1.0f;
+            if (NdotL > 0.0f)
+            {
+                float3 hitPos = P + dir * q.CommittedRayT();
+                RayDesc s;
+                s.Origin = hitPos + Nhit * 0.05f;   // 面から浮かせてコプラナ自己遮蔽回避
+                s.Direction = gSunDir;
+                s.TMin = 0.02f; s.TMax = 100000.0f;
+                RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> sq;
+                sq.TraceRayInline(Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, s);
+                sq.Proceed();
+                if (sq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) sunVis = 0.0f;
+            }
+            float3 albedo = 0.5f;   // フラット（マテリアル別アルベドは将来）
+            L = (albedo / DDGI_PI) * gSunColor.rgb * NdotL * sunVis;
+        }
         else
             L = g_Prefilter.SampleLevel(g_Sampler, dir, 0).rgb; // 空の生放射輝度（roughness0=生env）
         SH_ProjectAddRadiance(acc, dir, L);

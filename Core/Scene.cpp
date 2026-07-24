@@ -2797,12 +2797,20 @@ void Scene::Draw()
 
 	// ---- Phase G: DDGI プローブ更新（postCL。町は前フレームの完了バッファを参照＝1フレーム遅延はEMAで不可視）----
 	if (s_ddgiEnabled && s_ddgi && s_ddgi->IsValid() && s_rtManager && s_rtManager->IsValid()
-		&& s_rtManager->GetInstanceCount() > 0 && s_envCubemapHandle && descriptorHeap)
+		&& s_rtManager->GetInstanceCount() > 0 && s_envCubemapHandle && descriptorHeap && s_town)
 	{
-		// G-a は空のみ放射輝度なので太陽引数は未使用（G-b で実sunを配線）。
-		XMFLOAT3 sunColorScaled(0.0f, 0.0f, 0.0f), sunDir(0.0f, 1.0f, 0.0f);
+		// G-b: 実太陽（SceneConstants の方向 + atmosphere 色 × sunScale 3.0）でヒットの太陽バウンスを計算。
+		XMFLOAT3 sunDir(0.0f, 1.0f, 0.0f);
+		auto* dsc = sceneConstantBuffer[currentIndex] ? sceneConstantBuffer[currentIndex]->GetPtr<SceneConstants>() : nullptr;
+		if (dsc) sunDir = XMFLOAT3(dsc->SunDirection.x, dsc->SunDirection.y, dsc->SunDirection.z);
+		const float sunScale = 3.0f;
+		XMFLOAT3 sunColorScaled(
+			s_atmosphereParams.sunColorR * s_atmosphereParams.sunIntensity * sunScale,
+			s_atmosphereParams.sunColorG * s_atmosphereParams.sunIntensity * sunScale,
+			s_atmosphereParams.sunColorB * s_atmosphereParams.sunIntensity * sunScale);
 		s_ddgi->Execute(postCommandList, descriptorHeap->GetHeap(), s_rtManager->GetTlasGpuVA(),
-			s_envCubemapHandle->HandleGPU, sunColorScaled, sunDir);
+			s_envCubemapHandle->HandleGPU, s_town->GeometryInfoVA(), s_town->InstanceGeoBaseVA(),
+			sunColorScaled, sunDir);
 	}
 
 	// ---- GI: AO を HDR に乗算適用（bloom/tonemap 前）----

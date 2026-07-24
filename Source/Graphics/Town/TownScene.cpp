@@ -759,14 +759,36 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
     char roEv[8];
     const bool roadOnly = (GetEnvironmentVariableA("DX12_GI_ROADONLY", roEv, sizeof(roEv)) > 0);
 
-    // 1) ユニークモデル毎に 1 BLAS。
+    // Phase G-b: ヒット面フェッチ用の GeoInfo{vbBindlessIdx, ibBindlessIdx}（BLASジオメトリ順に一致）
+    //  と、per-instance の GeoInfo 基底 index。VB/IB を RAW SRV として共有ヒープへ登録し bindless index を得る。
+    struct GeoInfoCpu { uint32_t vbIdx; uint32_t ibIdx; };
+    std::vector<GeoInfoCpu> geoInfos;
+    std::vector<uint32_t> instGeoBase;   // insts と並列
+    auto regRaw = [&](ID3D12Resource* res, UINT byteSize) -> uint32_t
+    {
+        if (!m_heap || !res || byteSize < 4) return 0u;
+        uint32_t idx = m_heap->AllocateIndex();
+        D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
+        d.Format = DXGI_FORMAT_R32_TYPELESS;
+        d.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        d.Buffer.FirstElement = 0;
+        d.Buffer.NumElements = byteSize / 4u;
+        d.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        m_heap->CreateSRVAt(idx, res, d);
+        return idx;
+    };
+
+    // 1) ユニークモデル毎に 1 BLAS。同時に GeoInfo（同ジオメトリ順）を構築。
     std::unordered_map<TownModel*, uint32_t> modelBlas;
+    std::unordered_map<TownModel*, uint32_t> modelGeoBase;
     for (auto& kv : m_cache)
     {
         TownModel* model = kv.second;
         if (!model || model->subs.empty()) continue;
         std::vector<RTGeometry> geos;
         geos.reserve(model->subs.size());
+        uint32_t base = (uint32_t)geoInfos.size();
         for (const SubMesh& s : model->subs)
         {
             if (s.glass || !s.vbRes || !s.ibRes || s.indexCount == 0) continue;   // ガラスは光を遮らない
@@ -778,9 +800,13 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
             g.indexBuffer  = s.ibRes.Get();
             g.indexCount   = s.indexCount;
             geos.push_back(g);
+            GeoInfoCpu gi; gi.vbIdx = regRaw(s.vbRes.Get(), s.vbv.SizeInBytes);
+            gi.ibIdx = regRaw(s.ibRes.Get(), s.indexCount * 4u);
+            geoInfos.push_back(gi);
         }
         if (geos.empty()) continue;
         modelBlas[model] = rtm->AddBLAS(cmd, geos.data(), (uint32_t)geos.size());
+        modelGeoBase[model] = base;
     }
 
     // 2) インスタンス毎に 1 TLAS エントリ。worldT = transpose(BuildLocal*G) は D3D12 の
@@ -800,6 +826,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         ri.instanceMask = 0xFF;
         ri.flags = 0;
         insts.push_back(ri);
+        instGeoBase.push_back(modelGeoBase[inst.model]);
     }
 
     // 3) 地面/道路プレーン + 地形メッシュ（GlobalG 変換で 1 インスタンスずつ）。
@@ -814,9 +841,13 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         g.vertexCount = vbv.SizeInBytes / vbv.StrideInBytes;
         g.indexBuffer = ib; g.indexCount = indexCount;
         uint32_t blas = rtm->AddBLAS(cmd, &g, 1);
+        uint32_t base = (uint32_t)geoInfos.size();
+        GeoInfoCpu gi; gi.vbIdx = regRaw(vb, vbv.SizeInBytes); gi.ibIdx = regRaw(ib, indexCount * 4u);
+        geoInfos.push_back(gi);
         RTInstance ri{}; std::memcpy(&ri.transform, &gT, sizeof(float) * 12);
         ri.blasIndex = blas; ri.instanceMask = 0xFF; ri.flags = 0;
         insts.push_back(ri);
+        instGeoBase.push_back(base);
     };
     addWorldGeo(m_roadVBRes.Get(), m_roadVbv, m_roadIBRes.Get(), m_roadIbv.SizeInBytes / 4u);
     if (!roadOnly)
@@ -824,8 +855,23 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
             addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount);
 
     rtm->BuildTLAS(cmd, insts.data(), (uint32_t)insts.size());
-    printf("[DXR] RT scene: %zu BLAS (models), %zu TLAS instances (buildings+ground, foliage excluded)\n",
-        rtm->GetInstanceCount() ? (modelBlas.size() + 1 + m_landscapes.size()) : 0, insts.size());
+
+    // Phase G-b: GeoInfo / InstanceGeoBase を UPLOAD バッファへ（更新CSがルートSRVで読む）。
+    auto uploadBuf = [&](const void* data, size_t bytes, ComPtr<ID3D12Resource>& out)
+    {
+        if (bytes == 0) return;
+        auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        auto rd = CD3DX12_RESOURCE_DESC::Buffer(bytes);
+        if (FAILED(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&out)))) return;
+        void* p = nullptr;
+        if (SUCCEEDED(out->Map(0, nullptr, &p)) && p) { memcpy(p, data, bytes); out->Unmap(0, nullptr); }
+    };
+    uploadBuf(geoInfos.data(), geoInfos.size() * sizeof(GeoInfoCpu), m_geomInfoRes);
+    uploadBuf(instGeoBase.data(), instGeoBase.size() * sizeof(uint32_t), m_instGeoBaseRes);
+
+    printf("[DXR] RT scene: %zu BLAS (models), %zu TLAS instances (buildings+ground, foliage excluded), %zu geoInfos\n",
+        rtm->GetInstanceCount() ? (modelBlas.size() + 1 + m_landscapes.size()) : 0, insts.size(), geoInfos.size());
     fflush(stdout);
 }
 

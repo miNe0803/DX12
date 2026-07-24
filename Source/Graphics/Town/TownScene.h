@@ -117,6 +117,13 @@ public:
     // ロード後に ID3D12GraphicsCommandList4 上で1回呼ぶ（実行→GPU-idle→rtm->ReleaseBuildScratch() の前）。
     void BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsCommandList4* cmd);
 
+    // Phase G-b: DDGI 太陽バウンス用。ヒット面の法線/アルベドをフェッチするための
+    // GeoInfo{vbBindlessIdx, ibBindlessIdx}×geo と、per-TLAS-instance の GeoInfo 基底 index。
+    // CommittedInstanceID → InstanceGeoBase[id] + CommittedGeometryIndex で GeoInfo を引き、
+    // ResourceDescriptorHeap[idx] で VB/IB(ByteAddressBuffer) をフェッチ（SM6.6 動的リソース）。
+    D3D12_GPU_VIRTUAL_ADDRESS GeometryInfoVA() const { return m_geomInfoRes ? m_geomInfoRes->GetGPUVirtualAddress() : 0; }
+    D3D12_GPU_VIRTUAL_ADDRESS InstanceGeoBaseVA() const { return m_instGeoBaseRes ? m_instGeoBaseRes->GetGPUVirtualAddress() : 0; }
+
 private:
     struct SubMesh
     {
@@ -229,6 +236,8 @@ private:
     bool m_useDdgi = false;
     ComPtr<ID3D12Resource> m_ddgiDummyCB;   // OFF時の b5 ダミー
     ComPtr<ID3D12Resource> m_ddgiDummySH;   // OFF時の t13 ダミー（48B）
+    ComPtr<ID3D12Resource> m_geomInfoRes;      // Phase G-b: GeoInfo{vbIdx,ibIdx} × geoCount
+    ComPtr<ID3D12Resource> m_instGeoBaseRes;   // Phase G-b: uint base × TLAS instanceCount
     size_t m_loadedMeshes = 0;
     size_t m_missingMeshes = 0;
 
