@@ -9,11 +9,12 @@ public:
 	IndexBuffer(size_t size, const uint32_t* pInitData = nullptr);
 	bool IsValid();
 	D3D12_INDEX_BUFFER_VIEW View() const;
+	ID3D12Resource* GetResource() const { return m_pBuffer.Get(); }   // DXR BLAS ç”¨ã«ç”Ÿãƒªã‚½ãƒ¼ã‚¹ã‚’å…¬é–‹
 
 private:
 	bool m_IsValid = false;
-	ComPtr<ID3D12Resource> m_pBuffer; // ƒCƒ“ƒfƒbƒNƒXƒoƒbƒtƒ@
-	D3D12_INDEX_BUFFER_VIEW m_View; // ƒCƒ“ƒfƒbƒNƒXƒoƒbƒtƒ@ƒrƒ…[
+	ComPtr<ID3D12Resource> m_pBuffer; // ï¿½Cï¿½ï¿½ï¿½fï¿½bï¿½Nï¿½Xï¿½oï¿½bï¿½tï¿½@
+	D3D12_INDEX_BUFFER_VIEW m_View; // ï¿½Cï¿½ï¿½ï¿½fï¿½bï¿½Nï¿½Xï¿½oï¿½bï¿½tï¿½@ï¿½rï¿½ï¿½ï¿½[
 
 	IndexBuffer(const IndexBuffer&) = delete;
 	void operator = (const IndexBuffer&) = delete;

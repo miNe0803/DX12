@@ -361,6 +361,19 @@ void RayTracingManager::BuildTLAS(ID3D12GraphicsCommandList4* cmd,
 	cmd->ResourceBarrier(1, &uavBarrier);
 }
 
+void RayTracingManager::RebuildTlasWithDynamic(ID3D12GraphicsCommandList4* cmd,
+	const RTInstance* dynamic, uint32_t dynamicCount)
+{
+	if (m_staticInstances.empty()) return;   // 静的セット未保存なら何もしない（初期構築前）
+	m_rebuildScratch.clear();
+	m_rebuildScratch.reserve(m_staticInstances.size() + dynamicCount);
+	m_rebuildScratch.insert(m_rebuildScratch.end(), m_staticInstances.begin(), m_staticInstances.end());
+	if (dynamic && dynamicCount)
+		m_rebuildScratch.insert(m_rebuildScratch.end(), dynamic, dynamic + dynamicCount);
+	// BuildTLAS はバッファを再利用（容量内なら再確保なし）。PREFER_FAST_TRACE のまま毎フレーム再構築。
+	BuildTLAS(cmd, m_rebuildScratch.data(), static_cast<uint32_t>(m_rebuildScratch.size()));
+}
+
 void RayTracingManager::DispatchWaterReflection(ID3D12GraphicsCommandList4* cmd,
 	ID3D12Resource* depthBuffer, const XMMATRIX& invViewProj,
 	const XMFLOAT3& cameraPos, float waterSurfaceY)

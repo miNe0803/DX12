@@ -84,7 +84,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         ray.TMax = 100000.0f;
 
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-        q.TraceRayInline(Scene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, ray);
+        q.TraceRayInline(Scene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0x01u, ray);   // 静的のみ(動的キャラ除外)
         q.Proceed();
 
         float3 L;
@@ -129,7 +129,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 s.Direction = gSunDir;
                 s.TMin = 0.02f; s.TMax = 100000.0f;
                 RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> sq;
-                sq.TraceRayInline(Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, s);
+                sq.TraceRayInline(Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0x01u, s);   // 静的のみ
                 sq.Proceed();
                 if (sq.CommittedStatus() == COMMITTED_TRIANGLE_HIT) sunVis = 0.0f;
             }

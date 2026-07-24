@@ -83,6 +83,8 @@ static bool s_rtrEnabled = false;    // RTR 有効（DX12_RTR で初期化。ON�
 static bool s_rtShadowEnabled = false; // レイトレース影（DX12_RTSHADOW。ONで町PSがVSM/CSMの代わりにシャドウレイ。既定OFF）
 static bool s_glassRtrEnabled = false; // ガラスRT反射（DX12_GLASSRTR。ONでガラスがSSRの代わりにRT反射。既定OFF）
 static bool s_rtContactEnabled = false; // 近傍RT接触影（DX12_RTCONTACT。ONでVSM/CSMの"上に"短レイ接触影をmin合成。推奨だが既定OFF）
+static uint32_t s_playerBlasIndex = 0xFFFFFFFFu; // 動的TLAS: プレイヤーの BLAS index（初期化時に構築）
+static bool s_dynTlasEnabled = true;  // 動的TLAS（DX12_DYNTLAS=0で無効）。キャラ/敵を毎フレームTLASへ載せRT影/反射に反映
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -1623,6 +1625,42 @@ bool Scene::Init()
 				SUCCEEDED(list.As(&list4)))
 			{
 				s_town->BuildRayTracingScene(s_rtManager, list4.Get());
+
+				// [動的TLAS] プレイヤー(ModelGroup)の子メッシュから 1 BLAS を構築（bindポーズ・剛体）。
+				// 毎フレーム TLAS を「静的町 + このキャラ動的インスタンス」で再構築し RT接触影/反射に載せる。
+				{
+					char dtEv[8];
+					s_dynTlasEnabled = !((GetEnvironmentVariableA("DX12_DYNTLAS", dtEv, sizeof(dtEv)) > 0) && (dtEv[0] == '0'));
+					entt::entity playerRoot = entt::null;
+					for (auto e : m_registry.view<PlayerComponent, ModelGroupRootComponent>()) { playerRoot = e; break; }
+					if (playerRoot != entt::null)
+					{
+						std::vector<RTGeometry> geos;
+						const auto& root = m_registry.get<ModelGroupRootComponent>(playerRoot);
+						for (entt::entity c : root.children)
+						{
+							if (!m_registry.all_of<MeshRendererComponent>(c)) continue;
+							const auto& mrc = m_registry.get<MeshRendererComponent>(c);
+							if (!mrc.pVB || !mrc.pIB || mrc.IndexCount == 0) continue;
+							D3D12_VERTEX_BUFFER_VIEW vbv = mrc.pVB->View();
+							if (vbv.StrideInBytes == 0) continue;
+							RTGeometry g{};
+							g.vertexBuffer = mrc.pVB->GetResource();
+							g.vertexStride = vbv.StrideInBytes;
+							g.vertexCount  = vbv.SizeInBytes / vbv.StrideInBytes;
+							g.indexBuffer  = mrc.pIB->GetResource();
+							g.indexCount   = mrc.IndexCount;
+							if (g.vertexBuffer && g.indexBuffer) geos.push_back(g);
+						}
+						if (!geos.empty())
+						{
+							s_playerBlasIndex = s_rtManager->AddBLAS(list4.Get(), geos.data(), (uint32_t)geos.size());
+							printf("[DXR] player BLAS built: %zu geometries, blasIdx=%u (dynTLAS=%d)\n",
+								geos.size(), s_playerBlasIndex, s_dynTlasEnabled ? 1 : 0);
+							fflush(stdout);
+						}
+					}
+				}
 				list4->Close();
 				ID3D12CommandList* lists[] = { list4.Get() };
 				g_Engine->Queue()->ExecuteCommandLists(1, lists);
@@ -2385,6 +2423,28 @@ void Scene::Draw()
 		(s_shadow && s_shadow->IsValid()) ? s_shadow->GetShadowCBAddress() : 0);
 	GPU_CMD_END_EVENT(commandList);
 	Profiler::GpuMarkDrawMainEnd(commandList);
+
+	// ---- [動的TLAS] キャラ/敵を毎フレーム TLAS へ載せ替え（TLASを読む町フォワード/post効果の前に再構築）----
+	//      静的町 + プレイヤー動的インスタンス(mask 0x02) で再構築。影/反射(0xFFトレース)がキャラを拾う。
+	if (s_dynTlasEnabled && s_playerBlasIndex != 0xFFFFFFFFu && s_rtManager && s_rtManager->IsValid()
+		&& s_rtManager->StaticInstanceCount() > 0)
+	{
+		entt::entity playerRoot = entt::null;
+		for (auto e : m_registry.view<PlayerComponent, TransformComponent>()) { playerRoot = e; break; }
+		if (playerRoot != entt::null)
+		{
+			const auto& tc = m_registry.get<TransformComponent>(playerRoot);
+			DirectX::XMFLOAT4X4 wt; DirectX::XMStoreFloat4x4(&wt, tc.WorldMatrix);   // 転置済(=worldT)→先頭12floatが3x4 object->world
+			RTInstance dyn{};
+			std::memcpy(&dyn.transform, &wt, sizeof(float) * 12);
+			dyn.blasIndex = s_playerBlasIndex;
+			dyn.instanceMask = 0x02u;   // 動的=bit1（影/反射の0xFFトレースが拾う, DDGI/RTAOの0x01トレースは除外）
+			dyn.flags = 0;
+			ComPtr<ID3D12GraphicsCommandList4> cl4;
+			if (SUCCEEDED(commandList->QueryInterface(IID_PPV_ARGS(&cl4))))
+				s_rtManager->RebuildTlasWithDynamic(cl4.Get(), &dyn, 1);
+		}
+	}
 
 	// ---- [TOWN] Unreal T3D 町シーン描画（メイン HDR へ、skybox の前）----
 	static char s_townOffEv[8];

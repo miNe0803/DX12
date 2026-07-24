@@ -105,7 +105,7 @@ void main(uint3 id : SV_DispatchThreadID)
         // 近い遮蔽ほど強く、遠い擦過ヒット（隣接路面/コプラナ面）は弱く数える
         // ＝ 開けた平面の偽遮蔽ムラを抑えつつ接地の陰は保つ（UE風フォールオフ）。
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-        q.TraceRayInline(Scene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, ray);
+        q.TraceRayInline(Scene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0x01u, ray);   // 静的のみ(動的キャラ除外, デノイズ残像防止)
         q.Proceed();
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
         {

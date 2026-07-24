@@ -829,7 +829,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         RTInstance ri{};
         std::memcpy(&ri.transform, &inst.worldT, sizeof(float) * 12);
         ri.blasIndex = it->second;
-        ri.instanceMask = 0xFF;
+        ri.instanceMask = 0x01u;   // 静的=bit0（DDGI/RTAO は静的のみトレース, 動的キャラ=bit1 を除外）
         ri.flags = 0;
         insts.push_back(ri);
         instGeoBase.push_back(modelGeoBase[inst.model]);
@@ -852,7 +852,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         gi.baseTexIdx = texIdx(matTable);
         geoInfos.push_back(gi);
         RTInstance ri{}; std::memcpy(&ri.transform, &gT, sizeof(float) * 12);
-        ri.blasIndex = blas; ri.instanceMask = 0xFF; ri.flags = 0;
+        ri.blasIndex = blas; ri.instanceMask = 0x01u; ri.flags = 0;   // 静的=bit0
         insts.push_back(ri);
         instGeoBase.push_back(base);
     };
@@ -863,6 +863,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
             addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount, lm.matTable);
 
     rtm->BuildTLAS(cmd, insts.data(), (uint32_t)insts.size());
+    rtm->SetStaticInstances(insts.data(), (uint32_t)insts.size());   // 毎フレームの動的再構築で前置する静的セット
 
     // Phase G-b: GeoInfo / InstanceGeoBase を UPLOAD バッファへ（更新CSがルートSRVで読む）。
     auto uploadBuf = [&](const void* data, size_t bytes, ComPtr<ID3D12Resource>& out)

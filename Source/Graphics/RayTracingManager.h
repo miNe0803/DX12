@@ -42,6 +42,17 @@ public:
 	void BuildTLAS(ID3D12GraphicsCommandList4* cmd,
 	               const RTInstance* instances, uint32_t instanceCount);
 
+	/// Save the static instance set so per-frame dynamic rebuilds can prepend it (called after the
+	/// one-time static BuildTLAS). Copy, so the caller's temporary vector can go away.
+	void SetStaticInstances(const RTInstance* instances, uint32_t count)
+	{ m_staticInstances.assign(instances, instances + count); }
+	uint32_t StaticInstanceCount() const { return static_cast<uint32_t>(m_staticInstances.size()); }
+
+	/// Rebuild the TLAS = saved static instances + the given dynamic instances (character/enemies).
+	/// Call once per frame on a CmdList4 BEFORE anything that traces the TLAS this frame.
+	void RebuildTlasWithDynamic(ID3D12GraphicsCommandList4* cmd,
+	                            const RTInstance* dynamic, uint32_t dynamicCount);
+
 	/// Free the transient BLAS/TLAS scratch buffers. Call ONCE after the one-time static build
 	/// command list has been executed AND GPU-idle-waited (scratch must outlive the async build).
 	void ReleaseBuildScratch() { m_buildScratch.clear(); m_tlasScratch.Reset(); }
@@ -96,6 +107,8 @@ private:
 	uint32_t m_tlasMaxInstances = 0;
 	uint32_t m_tlasSrvIdx = UINT32_MAX;
 	uint32_t m_tlasInstanceCount = 0;
+	std::vector<RTInstance> m_staticInstances;   // 静的町インスタンス（毎フレームの動的再構築で前置）
+	std::vector<RTInstance> m_rebuildScratch;    // 再構築用の一時配列（毎フレーム確保を避け使い回し）
 
 	// Reflection output (half-res RGBA16F)
 	ComPtr<ID3D12Resource> m_reflectionTexture;
