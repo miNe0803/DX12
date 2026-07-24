@@ -38,6 +38,7 @@
 #include "Graphics/AtmosphereSystem.h"
 #include "Graphics/SsrSystem.h"
 #include "Graphics/GtaoSystem.h"
+#include "Graphics/RtaoSystem.h"
 #include "Graphics/VsmSystem.h"
 #include "Graphics/RayTracingManager.h"   // DXR-GI F1: TLAS基盤
 #include "Graphics/TreeVegetation.h"
@@ -70,6 +71,9 @@ static GtaoSystem* s_gtao = nullptr;
 static VsmSystem* s_vsm = nullptr;   // VSM本体（V1: 土台のみ。V4でCSM影を置換予定）
 static RayTracingManager* s_rtManager = nullptr;  // DXR-GI: 静的町の BLAS/TLAS（F1で構築, R/G で RTAO/DDGI が利用）
 static bool s_giEnabled = false;     // DXR-GI 有効（DX12_GI で初期化。F1は既定OFF＝TLAS構築せず無コスト・無変更）
+static bool s_giDebugView = false;   // F1 検証ビュー表示（ImGui/DX12_GI_DEBUG）。TLAS構築(s_giEnabled)が前提
+static RtaoSystem* s_rtao = nullptr; // Phase R: レイトレースAO（TLAS存在時のみ生成）。GTAOと排他
+static bool s_rtaoEnabled = false;   // RTAO 有効（DX12_RTAO で初期化。ONでGTAOを置換。既定OFF＝GTAO経路不変）
 static TownScene* s_town = nullptr;   // [TOWN] Unreal T3D 町シーン
 static std::vector<VsmSystem::RenderBatch> s_vsmRenderBatches;   // V3c-m3: 静的 submesh 描画バッチ（init時1回構築）
 static bool s_vsmAtlasReady = false;   // V4: 最初のVSM描画+EndRenderStates後にtrue。町がサンプル可になる（フレーム1のガード）
@@ -436,6 +440,7 @@ Scene::~Scene()
 	if (s_atmosphere) { s_atmosphere->Shutdown(); delete s_atmosphere; s_atmosphere = nullptr; }
 	if (s_ssr) { s_ssr->Shutdown(); delete s_ssr; s_ssr = nullptr; }
 	if (s_gtao) { s_gtao->Shutdown(); delete s_gtao; s_gtao = nullptr; }
+	if (s_rtao) { s_rtao->Shutdown(); delete s_rtao; s_rtao = nullptr; }
 	if (s_vsm) { s_vsm->Shutdown(); delete s_vsm; s_vsm = nullptr; }
 	if (s_rtManager) { s_rtManager->Shutdown(); delete s_rtManager; s_rtManager = nullptr; }
 	s_reflValid = false;
@@ -1574,6 +1579,7 @@ bool Scene::Init()
 	{
 		char ev[8];
 		s_giEnabled = (GetEnvironmentVariableA("DX12_GI", ev, sizeof(ev)) > 0) && (ev[0] != '0');
+		s_giDebugView = (GetEnvironmentVariableA("DX12_GI_DEBUG", ev, sizeof(ev)) > 0);  // 初期値（ImGuiで切替可）
 	}
 	if (s_giEnabled && s_town && g_Engine->GetFeatureSupport().raytracingSupported)
 	{
@@ -1597,6 +1603,16 @@ bool Scene::Init()
 				s_rtManager->ReleaseBuildScratch();   // 非同期構築完了後に一時scratchを解放
 				printf("[DXR] TLAS built: %u instances (GI enabled)\n", s_rtManager->GetInstanceCount());
 				fflush(stdout);
+
+				// Phase R: TLAS が構築できた時だけ RTAO を生成（OFF時は無コスト・GTAO経路不変）
+				{
+					char rtEv[8];
+					s_rtaoEnabled = (GetEnvironmentVariableA("DX12_RTAO", rtEv, sizeof(rtEv)) > 0) && (rtEv[0] != '0');
+					D3D12_VIEWPORT vpAo = g_Engine->GetViewport();
+					s_rtao = new RtaoSystem();
+					if (!s_rtao->Init(g_Engine->Device(), (UINT)vpAo.Width, (UINT)vpAo.Height))
+					{ delete s_rtao; s_rtao = nullptr; s_rtaoEnabled = false; }
+				}
 			}
 		}
 		else { delete s_rtManager; s_rtManager = nullptr; }
@@ -1649,6 +1665,12 @@ bool Scene::GetVsmFootprintLod() const { return s_vsm && s_vsm->GetFootprintLod(
 uint32_t Scene::GetVsmLastPairCount() const { return s_vsm ? s_vsm->LastPairCount() : 0u; }
 uint32_t Scene::GetVsmResidentPages() const { return s_vsm ? s_vsm->LastResidentPages() : 0u; }
 uint32_t Scene::GetVsmRequestedPages() const { return s_vsm ? s_vsm->LastRequestedPages() : 0u; }
+void Scene::SetGiDebug(bool on) { s_giDebugView = on; }
+bool Scene::GetGiDebug() const { return s_giDebugView; }
+bool Scene::GetGiEnabled() const { return s_giEnabled && s_rtManager && s_rtManager->IsValid(); }
+void Scene::SetRtaoEnabled(bool on) { s_rtaoEnabled = on; }
+bool Scene::GetRtaoEnabled() const { return s_rtaoEnabled; }
+bool Scene::RtaoAvailable() const { return s_rtao && s_rtao->IsValid() && s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0; }
 
 AtmosphereParams& Scene::GetAtmosphereParams()
 {
@@ -2743,10 +2765,8 @@ void Scene::Draw()
 
 	// ---- DXR-GI F1 検証: primary ray のヒット距離 vs ラスタ深度を色分け（DX12_GI_DEBUG）----
 	// 緑=一致(TLAS正), 赤=不一致, 青=RT取りこぼし。TLAS＋トランスフォームの正しさを確認する。
-	if (s_giEnabled && s_rtManager && s_rtManager->IsValid())
+	if (s_giEnabled && s_giDebugView && s_rtManager && s_rtManager->IsValid())
 	{
-		static bool s_giDebug = [] { char e[8]; return GetEnvironmentVariableA("DX12_GI_DEBUG", e, sizeof(e)) > 0; }();
-		if (s_giDebug)
 		{
 			float aspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
 			XMVECTOR det;
@@ -2757,20 +2777,35 @@ void Scene::Draw()
 		}
 	}
 
-	// ---- GI G0: GTAO（スクリーン空間AO）を HDR に乗算適用（bloom/tonemap 前）----
+	// ---- GI: AO を HDR に乗算適用（bloom/tonemap 前）----
+	//  RTAO(レイトレース) が有効かつ TLAS があればそちらを使い、GTAO(スクリーン空間) は実行しない（二重遮蔽回避）。
+	//  RTAO OFF 時は従来どおり GTAO を実行（DX12_NO_GTAO で無効化可）。
 	{
-		char gtaoEnv[8];
-		bool gtaoOff = GetEnvironmentVariableA("DX12_NO_GTAO", gtaoEnv, sizeof(gtaoEnv)) > 0;
-		if (!gtaoOff && s_gtao && s_gtao->IsValid())
+		const bool rtaoActive = s_rtaoEnabled && s_rtao && s_rtao->IsValid()
+			&& s_rtManager && s_rtManager->IsValid() && s_rtManager->GetInstanceCount() > 0;
+
+		float aoAspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
+		XMVECTOR aoDet;
+		XMMATRIX aoInvVP = XMMatrixInverse(&aoDet,
+			g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(aoAspect));
+		XMFLOAT3 aoCam; XMStoreFloat3(&aoCam, g_Camera->GetPosition());
+
+		if (rtaoActive)
 		{
-			float gtaoAspect = static_cast<float>(WINDOW_WIDTH) / static_cast<float>(WINDOW_HEIGHT);
-			XMVECTOR gtaoDet;
-			XMMATRIX gtaoInvVP = XMMatrixInverse(&gtaoDet,
-				g_Camera->GetViewMatrix() * g_Camera->GetProjectionMatrix(gtaoAspect));
-			XMFLOAT3 gtaoCam; XMStoreFloat3(&gtaoCam, g_Camera->GetPosition());
-			GtaoSystem::Params gp;
-			s_gtao->Execute(postCommandList, g_Engine->GetDepthStencilResource(),
-				g_Engine->GetHdrRtvCpuHandle(), gtaoInvVP, gtaoCam, gp);
+			RtaoSystem::Params rp;
+			s_rtao->Execute(postCommandList, g_Engine->GetDepthStencilResource(),
+				g_Engine->GetHdrRtvCpuHandle(), s_rtManager->GetTlasGpuVA(), aoInvVP, aoCam, rp);
+		}
+		else
+		{
+			char gtaoEnv[8];
+			bool gtaoOff = GetEnvironmentVariableA("DX12_NO_GTAO", gtaoEnv, sizeof(gtaoEnv)) > 0;
+			if (!gtaoOff && s_gtao && s_gtao->IsValid())
+			{
+				GtaoSystem::Params gp;
+				s_gtao->Execute(postCommandList, g_Engine->GetDepthStencilResource(),
+					g_Engine->GetHdrRtvCpuHandle(), aoInvVP, aoCam, gp);
+			}
 		}
 	}
 

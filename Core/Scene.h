@@ -60,6 +60,14 @@ public:
 	uint32_t GetVsmLastPairCount() const;      // 直近フレームの (caster,page) ペア数（診断）
 	uint32_t GetVsmResidentPages() const;      // V5b: 常駐ページ高水位（cap 4096）
 	uint32_t GetVsmRequestedPages() const;     // Phase 0: 直近の要求ページ総数（フットプリントLOD効果の可視化）
+	// DXR-GI F1 検証ビュー（primary ray ヒット距離 vs ラスタ深度の色分け）。TLAS構築(DX12_GI)が前提。
+	void SetGiDebug(bool on);
+	bool GetGiDebug() const;
+	bool GetGiEnabled() const;                 // DX12_GI でTLAS構築済か（UI活性判定）
+	// Phase R: レイトレースAO（RTAO）。ONでGTAOを置換。TLAS(DX12_GI)構築が前提。
+	void SetRtaoEnabled(bool on);
+	bool GetRtaoEnabled() const;
+	bool RtaoAvailable() const;                // RtaoSystem生成済＋TLAS有効か（UI活性判定）
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

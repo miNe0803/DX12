@@ -740,6 +740,12 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
 {
     if (!rtm || !cmd) return;
 
+    // 診断（task#47）: DX12_GI_ROADONLY=1 で道路のみ TLAS 登録（建物/地形をスキップ）。
+    // これで道路が緑になれば「道路の赤 = 地形との同一平面オーバーラップ（RT が道路でなく
+    // 地形にコミット）」が確定。依然赤なら道路固有のジオメトリ/変換ずれ。
+    char roEv[8];
+    const bool roadOnly = (GetEnvironmentVariableA("DX12_GI_ROADONLY", roEv, sizeof(roEv)) > 0);
+
     // 1) ユニークモデル毎に 1 BLAS。
     std::unordered_map<TownModel*, uint32_t> modelBlas;
     for (auto& kv : m_cache)
@@ -770,6 +776,7 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
     insts.reserve(m_instances.size());
     for (const Instance& inst : m_instances)
     {
+        if (roadOnly) break;   // 診断: 道路のみ登録
         if (!inst.model || !inst.castShadow) continue;
         if (inst.isFoliage) continue;   // 花/低木/木は AS から除外（不透明クアッド=黒ハロー）
         auto it = modelBlas.find(inst.model);
@@ -799,8 +806,9 @@ void TownScene::BuildRayTracingScene(RayTracingManager* rtm, ID3D12GraphicsComma
         insts.push_back(ri);
     };
     addWorldGeo(m_roadVBRes.Get(), m_roadVbv, m_roadIBRes.Get(), m_roadIbv.SizeInBytes / 4u);
-    for (const LandMesh& lm : m_landscapes)
-        addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount);
+    if (!roadOnly)
+        for (const LandMesh& lm : m_landscapes)
+            addWorldGeo(lm.vbRes.Get(), lm.vbv, lm.ibRes.Get(), lm.indexCount);
 
     rtm->BuildTLAS(cmd, insts.data(), (uint32_t)insts.size());
     printf("[DXR] RT scene: %zu BLAS (models), %zu TLAS instances (buildings+ground, foliage excluded)\n",
