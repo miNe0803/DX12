@@ -81,6 +81,10 @@ public:
 	void SetRtrEnabled(bool on);
 	bool GetRtrEnabled() const;
 	bool RtrAvailable() const;
+	// 仕上げ: レイトレース影。ONで町PSがVSM/CSMの代わりにシャドウレイ（接触影/ソフト半影）。
+	void SetRtShadowEnabled(bool on);
+	bool GetRtShadowEnabled() const;
+	bool RtShadowAvailable() const;
 
 	/// モデルグループ（親＋子メッシュ）の削除を予約。次フレームの Update 先頭で安全に削除される。
 	void RequestDestroyEntity(entt::entity root);

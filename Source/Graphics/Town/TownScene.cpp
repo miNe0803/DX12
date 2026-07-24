@@ -1420,7 +1420,7 @@ bool TownScene::CreateRootSignature()
     rangeDepth.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 9, 0); // t9=シーン深度, t10=シーンカラーコピー(ガラスSSR)
     rangeVsmAtlas.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 12, 0); // t12 space0 VSMアトラス(V4)
 
-    CD3DX12_ROOT_PARAMETER params[17];
+    CD3DX12_ROOT_PARAMETER params[18];
     params[0].InitAsShaderResourceView(0, 1, D3D12_SHADER_VISIBILITY_VERTEX); // t0 space1 InstanceWorlds (StructuredBuffer)
     params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);    // b1 Scene
     params[2].InitAsConstantBufferView(2, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // b2 TownParams
@@ -1436,10 +1436,12 @@ bool TownScene::CreateRootSignature()
     params[11].InitAsConstantBufferView(3, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b3 space0 VsmCB
     params[12].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t11 space0 VSM PageTable (root SRV)
     params[13].InitAsDescriptorTable(1, &rangeVsmAtlas, D3D12_SHADER_VISIBILITY_PIXEL); // t12 space0 VSM Atlas
-    params[14].InitAsConstants(3, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod, gUseDdgi}
+    params[14].InitAsConstants(4, 4, 0, D3D12_SHADER_VISIBILITY_PIXEL);         // b4 space0 {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow}
     // Phase G: DDGI 拡散GI（gUseDdgi=0 時は TownPS が未使用＝従来のambientと同一動作）。
     params[15].InitAsConstantBufferView(5, 0, D3D12_SHADER_VISIBILITY_PIXEL);   // b5 space0 DdgiCB（格子params）
     params[16].InitAsShaderResourceView(13, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t13 space0 プローブSH（root SRV）
+    // 仕上げ: レイトレース影（gUseRtShadow=0 時は未使用）。TLAS を PS 内 RayQuery 用にルートSRVで供給。
+    params[17].InitAsShaderResourceView(14, 0, D3D12_SHADER_VISIBILITY_PIXEL);  // t14 space0 TLAS（root SRV）
 
     CD3DX12_STATIC_SAMPLER_DESC samplers[3];
     samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -1704,7 +1706,7 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
     // V4: VSM バインド。param14(gUseVsm)は常に設定（TownPSが必ず参照）。11-13はVSM有効時のみ。
     // 反射パスではVSMを使わない（アトラス状態はメインパス前提のため）。
     // b4 = { gUseVsm, gVsmFpLod }。フットプリントLOD はサンプラ(TownPS)をマーカー(CS)とロックステップで切替。
-    uint32_t flags[3] = { 0u, m_vsmFpLod ? 1u : 0u, 0u };   // {gUseVsm, gVsmFpLod, gUseDdgi}
+    uint32_t flags[4] = { 0u, m_vsmFpLod ? 1u : 0u, 0u, 0u };   // {gUseVsm, gVsmFpLod, gUseDdgi, gUseRtShadow}
     if (m_vsmCBAddr && m_vsmAtlasSrv.ptr)
     {
         cmd->SetGraphicsRootConstantBufferView(11, m_vsmCBAddr);
@@ -1721,7 +1723,13 @@ void TownScene::Draw(ID3D12GraphicsCommandList* cmd,
         cmd->SetGraphicsRootShaderResourceView(16, probeVA);
         flags[2] = (m_useDdgi && m_ddgiCBAddr && m_ddgiProbeVA) ? 1u : 0u;
     }
-    cmd->SetGraphicsRoot32BitConstants(14, 3, flags, 0);
+    // 仕上げ: レイトレース影。param 17(t14 TLAS)は常に有効VA（実 or ダミー）。gUseRtShadow は TLASありのみ。
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS tlasVA = m_rtShadowTlasVA ? m_rtShadowTlasVA : m_ddgiDummySH->GetGPUVirtualAddress();
+        cmd->SetGraphicsRootShaderResourceView(17, tlasVA);
+        flags[3] = (m_useRtShadow && m_rtShadowTlasVA && !refl) ? 1u : 0u;   // 反射パスでは影は VSM/CSM のまま
+    }
+    cmd->SetGraphicsRoot32BitConstants(14, 4, flags, 0);
 
     const UINT frame = g_Engine->CurrentBackBufferIndex();
     // メイン(0)/反射(1)で別領域を使い、同フレーム2回の Draw がワールドCBを踏み合わないようにする。

@@ -50,7 +50,11 @@ cbuffer VsmCB : register(b3, space0)
 };
 // gVsmFpLod: Phase 1 フットプリントLOD の ON/OFF（マーカー/デバッグとロックステップ）。OFF=従来の距離LOD。
 // gUseDdgi: Phase G DDGI 拡散GI の ON/OFF（0 で従来の偽ambient経路＝バイト一致）。
-cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; };
+// gUseRtShadow: レイトレース影 ON/OFF（1 で VSM/CSM の代わりに TLAS へシャドウレイ）。
+cbuffer VsmFlag : register(b4, space0) { uint gUseVsm; uint gVsmFpLod; uint gUseDdgi; uint gUseRtShadow; };
+
+// レイトレース太陽影: 町 TLAS へ inline RayQuery（PS内, SM6.6）。関数定義は SceneCB(SunDirection) 後方に。
+RaytracingAccelerationStructure Scene_RT : register(t14, space0);
 
 // ---- Phase G: DDGI 拡散GI（gUseDdgi=1 のとき偽ambient(sky-tint)を実プローブirradianceで置換）----
 #include "../RT/Ddgi.hlsli"
@@ -255,8 +259,37 @@ float2 ParallaxOcclusion(float2 uv, float3 viewTS, float heightScale)
 
 // ハイブリッド太陽影: VSM がカバーする画素は VSM（近~中の高精細・世界固定）、未割当画素（遠景/プール溢れ）は
 // CSM（安価・堅牢なフォールバック）。VSM OFF 時は常に CSM。→ VSM を ON にしても遠景で影が抜けない。
+// レイトレース太陽影（太陽ディスクへ4レイ＝ソフト半影）。TLAS 除外のフォリッジ/木は落とさない点に注意。
+float RtSunShadow(float3 worldPos, float3 Nw, float2 svpos)
+{
+    float3 L = normalize(SunDirection.xyz);            // 光へ向かう方向
+    if (dot(Nw, L) <= 0.0f) return 0.0f;               // 太陽の裏面＝影
+    float3 O = worldPos + Nw * 0.05f;                  // 法線バイアス（アクネ回避）
+    float3 up = abs(L.y) < 0.99f ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 T = normalize(cross(up, L));
+    float3 B = cross(L, T);
+    const float coneR = 0.02f;                         // 太陽角半径相当（ソフトさ）
+    float rot = frac(sin(dot(svpos, float2(12.9898f, 78.233f))) * 43758.5453f) * 6.2831853f;
+    const int N = 4;
+    float vis = 0.0f;
+    [unroll] for (int i = 0; i < N; ++i)
+    {
+        float a = rot + i * (6.2831853f / (float)N);
+        float2 off = float2(cos(a), sin(a)) * coneR * (0.5f + 0.5f * frac(a * 1.37f));
+        float3 dir = normalize(L + T * off.x + B * off.y);
+        RayDesc r; r.Origin = O; r.Direction = dir; r.TMin = 0.02f; r.TMax = 100000.0f;
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+        q.TraceRayInline(Scene_RT, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFFu, r);
+        q.Proceed();
+        vis += (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
+    }
+    return vis / (float)N;
+}
+
 float SampleSunShadowHybrid(float3 worldPos, float3 Nw, float2 svpos)
 {
+    if (gUseRtShadow != 0u)
+        return RtSunShadow(worldPos, Nw, svpos);   // レイトレース影（VSM/CSM を置換）
     if (gUseVsm != 0u)
     {
         // スロープスケールバイアス用に受光面と太陽の角度余弦を渡す（SunDirection=光へ向かう方向, 正規化）。

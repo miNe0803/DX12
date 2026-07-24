@@ -265,6 +265,18 @@ void DebugUI::Draw()
 					}
 					else ImGui::TextDisabled("  RTR 利用不可（TLAS無し）。");
 					ImGui::Separator();
+					ImGui::TextUnformatted("--- RT Shadows（レイトレース影・仕上げ）---");
+					if (g_Scene->RtShadowAvailable())
+					{
+						bool rts = g_Scene->GetRtShadowEnabled();
+						if (ImGui::Checkbox("RT Shadows (DX12_RTSHADOW)", &rts))
+							g_Scene->SetRtShadowEnabled(rts);
+						ImGui::TextDisabled(rts
+							? "  ON=町PSがTLASへシャドウレイ（接触影/ソフト半影, VSM/CSM置換）。※木/フォリッジは非対応(TLAS除外)。"
+							: "  OFF=VSM/CSM影。ONでレイトレース影に置換。");
+					}
+					else ImGui::TextDisabled("  RT Shadows 利用不可（TLAS無し）。");
+					ImGui::Separator();
 					ImGui::TextUnformatted("--- RTAO（レイトレースAO, GTAO置換）---");
 					if (g_Scene->RtaoAvailable())
 					{
