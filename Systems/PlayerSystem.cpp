@@ -31,8 +31,9 @@ void PlayerSystem::Update(entt::registry& registry, float dt)
 			const float yaw = player.CameraYaw;
 			const float fx = -sinf(yaw), fz = cosf(yaw);
 			const float rx = cosf(yaw), rz = sinf(yaw);
-			float mx = fx * inF + rx * inR;
-			float mz = fz * inF + rz * inR;
+			// 移動方向を反転（ユーザー報告: 移動の向きが逆）。W=手前/S=奥ではなく体感に合わせて反転。
+			float mx = -(fx * inF + rx * inR);
+			float mz = -(fz * inF + rz * inR);
 			float len = sqrtf(mx * mx + mz * mz);
 			if (len > 1e-4f)
 			{

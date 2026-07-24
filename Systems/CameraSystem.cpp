@@ -48,7 +48,7 @@ void CameraSystem::Update(Camera* camera, float dt, entt::registry& registry)
 			if (!s_dragging) { s_dragging = true; s_lastX = mp.x; s_lastY = mp.y; }
 			const long dx = mp.x - s_lastX, dy = mp.y - s_lastY;
 			s_lastX = mp.x; s_lastY = mp.y;
-			s_orbitYaw += static_cast<float>(dx) * kMouseSens;
+			s_orbitYaw -= static_cast<float>(dx) * kMouseSens;   // 右ドラッグ→視点右回り（反転修正）
 			s_orbitPitch += static_cast<float>(dy) * kMouseSens;
 		}
 		else s_dragging = false;
@@ -56,8 +56,8 @@ void CameraSystem::Update(Camera* camera, float dt, entt::registry& registry)
 		// 矢印キーでも回転可能。
 		if (!uiKey)
 		{
-			if (GetAsyncKeyState(VK_RIGHT) & 0x8000) s_orbitYaw += kKeySpeed * dt;
-			if (GetAsyncKeyState(VK_LEFT) & 0x8000)  s_orbitYaw -= kKeySpeed * dt;
+			if (GetAsyncKeyState(VK_RIGHT) & 0x8000) s_orbitYaw -= kKeySpeed * dt;   // マウスと同符号
+			if (GetAsyncKeyState(VK_LEFT) & 0x8000)  s_orbitYaw += kKeySpeed * dt;
 			if (GetAsyncKeyState(VK_UP) & 0x8000)    s_orbitPitch += kKeySpeed * dt;
 			if (GetAsyncKeyState(VK_DOWN) & 0x8000)  s_orbitPitch -= kKeySpeed * dt;
 		}
