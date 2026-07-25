@@ -1888,7 +1888,21 @@ void Scene::Update()
 	if (s_town)
 	{
 		DirectX::XMFLOAT3 cw;
-		float groundY = s_town->FirstCrosswalkWorld(cw) ? cw.y : 0.0f;   // フォールバック=道路レベル
+		const bool haveCw = s_town->FirstCrosswalkWorld(cw);
+		// 一度だけ: プレイヤーを道路(横断歩道)XZへ配置。既定スポーン(0,0,0)は道路より0.77m低い芝生の上で、
+		// 道路プレーンが腰高で横切り「埋まって」見えるため。道路上なら接地プローブが道路面を拾う。
+		static bool s_playerPlacedOnRoad = false;
+		if (haveCw && !s_playerPlacedOnRoad)
+		{
+			for (auto e : m_registry.view<PlayerComponent, TransformComponent>())
+			{
+				auto& tc = m_registry.get<TransformComponent>(e);
+				tc.Position.x = cw.x; tc.Position.z = cw.z;
+			}
+			s_playerPlacedOnRoad = true;
+			s_probedGroundValid = false;   // 新XZで撮り直すまで旧プローブ値を使わない
+		}
+		float groundY = haveCw ? cw.y : 0.0f;   // フォールバック=道路レベル
 		if (s_probedGroundValid) groundY = s_probedGroundY;              // RTプローブのヒットを優先(per-XZ)
 		for (auto e : m_registry.view<PlayerComponent>())
 			m_registry.get<PlayerComponent>(e).GroundY = groundY;
