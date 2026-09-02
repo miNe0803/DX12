@@ -337,8 +337,14 @@ namespace {
 		void* mapped = nullptr;
 		if (FAILED(s_bonePaletteBuffer->Map(0, nullptr, &mapped)) || !mapped) { s_bonePaletteBuffer.Reset(); return false; }
 		s_bonePaletteMapped = static_cast<DirectX::XMFLOAT4X4*>(mapped);
-		DirectX::XMFLOAT4X4 I; DirectX::XMStoreFloat4x4(&I, DirectX::XMMatrixIdentity());
-		for (uint32_t b = 0; b < kMaxBonesPerPalette; ++b) s_bonePaletteMapped[b] = I;   // Inc1: 全単位=バインドポーズ
+		// Inc1: 単位行列=バインドポーズ。Inc2テスト(DX12_SKINTEST=1): 一様平行移動(+3m Y)＝全身が剛体で
+		//   浮くか確認（転置/列優先の格納規約の検証。綺麗に浮けば規約OK, 歪めば規約ミス）。
+		char stEv[8];
+		const bool skinTest = (GetEnvironmentVariableA("DX12_SKINTEST", stEv, sizeof(stEv)) > 0) && (stEv[0] != '0');
+		DirectX::XMMATRIX skin = skinTest ? DirectX::XMMatrixTranslation(0.0f, 3.0f, 0.0f) : DirectX::XMMatrixIdentity();
+		DirectX::XMFLOAT4X4 P; DirectX::XMStoreFloat4x4(&P, DirectX::XMMatrixTranspose(skin));   // パレットは転置格納
+		for (uint32_t b = 0; b < kMaxBonesPerPalette; ++b) s_bonePaletteMapped[b] = P;
+		if (skinTest) { printf("[Skin] Inc2 test: palette=translate(0,+3,0). キャラ全身が崩れず+3m浮けば格納規約OK\n"); fflush(stdout); }
 		return true;
 	}
 
