@@ -134,6 +134,9 @@ namespace RenderSystem
 		RootSignature* rootSignature,
 		PipelineState* nprOpaquePso,
 		PipelineState* nprTransparentPso,
+		PipelineState* nprSkinnedOpaquePso,        // スキニング: SkinnedVS 版（skinned メッシュ用）
+		PipelineState* nprSkinnedTransparentPso,
+		D3D12_GPU_VIRTUAL_ADDRESS bonePaletteVA,   // ボーン行列パレット(t1,space1) の先頭 VA（Inc1 は全単位）
 		DescriptorHeap* descriptorHeap,
 		D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
 		ID3D12DescriptorHeap* materialHeap,

@@ -118,6 +118,8 @@ RootSignature* rootSignature = nullptr;
 PipelineState* pipelineState = nullptr;
 PipelineState* nprPipelineState = nullptr;
 PipelineState* nprTransparentPipelineState = nullptr;
+PipelineState* nprSkinnedPipelineState = nullptr;            // スキニング: SkinnedVS 版 NPR 不透明
+PipelineState* nprSkinnedTransparentPipelineState = nullptr; // スキニング: SkinnedVS 版 NPR 透明
 RootSignature* terrainRootSignature = nullptr;
 PipelineState* terrainDepthPrepassPipelineState = nullptr;
 PipelineState* terrainPipelineState = nullptr;
@@ -319,6 +321,27 @@ namespace {
 	ComPtr<ID3D12Resource> s_pbrInstanceRingBuffer;
 	InstanceData* s_pbrInstanceRingMapped = nullptr;
 
+	// スキニング: ボーン行列パレット（Inc1 は全単位行列＝バインドポーズ）。SkinnedVS の gBonePalette(t1,space1)。
+	static const uint32_t kMaxBonesPerPalette = 512;   // hibana=401 骨に対し余裕
+	ComPtr<ID3D12Resource> s_bonePaletteBuffer;
+	DirectX::XMFLOAT4X4* s_bonePaletteMapped = nullptr;
+
+	static bool InitBonePaletteBuffer()
+	{
+		const UINT64 byteSize = (UINT64)sizeof(DirectX::XMFLOAT4X4) * kMaxBonesPerPalette;
+		auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		auto rd = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+		HRESULT hr = g_Engine->Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+			D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(s_bonePaletteBuffer.ReleaseAndGetAddressOf()));
+		if (FAILED(hr)) { printf("Scene: bone palette buffer create failed (0x%08X)\n", (unsigned)hr); return false; }
+		void* mapped = nullptr;
+		if (FAILED(s_bonePaletteBuffer->Map(0, nullptr, &mapped)) || !mapped) { s_bonePaletteBuffer.Reset(); return false; }
+		s_bonePaletteMapped = static_cast<DirectX::XMFLOAT4X4*>(mapped);
+		DirectX::XMFLOAT4X4 I; DirectX::XMStoreFloat4x4(&I, DirectX::XMMatrixIdentity());
+		for (uint32_t b = 0; b < kMaxBonesPerPalette; ++b) s_bonePaletteMapped[b] = I;   // Inc1: 全単位=バインドポーズ
+		return true;
+	}
+
 	DescriptorHandle* RegisterPBRMaterial(DescriptorHeap* heap, const Mesh& mesh)
 	{
 		Texture2D* albedoTex = Texture2D::Get(mesh.DiffuseMap);
@@ -426,6 +449,12 @@ Scene::~Scene()
 		s_pbrInstanceRingMapped = nullptr;
 	}
 	s_pbrInstanceRingBuffer.Reset();
+	if (s_bonePaletteBuffer && s_bonePaletteMapped)
+	{
+		s_bonePaletteBuffer->Unmap(0, nullptr);
+		s_bonePaletteMapped = nullptr;
+	}
+	s_bonePaletteBuffer.Reset();
 
 	for (size_t i = 0; i < Engine::FRAME_BUFFER_COUNT; ++i)
 	{
@@ -483,6 +512,10 @@ Scene::~Scene()
 	nprPipelineState = nullptr;
 	delete nprTransparentPipelineState;
 	nprTransparentPipelineState = nullptr;
+	delete nprSkinnedPipelineState;
+	nprSkinnedPipelineState = nullptr;
+	delete nprSkinnedTransparentPipelineState;
+	nprSkinnedTransparentPipelineState = nullptr;
 	delete terrainRootSignature;
 	terrainRootSignature = nullptr;
 	delete terrainDepthPrepassPipelineState;
@@ -659,6 +692,8 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		mrc.NprSphereMode = m.SphereMode;
 		mrc.NprOpacity = m.Opacity;
 		m_registry.emplace<MeshRendererComponent>(entity, mrc);
+		if (!m.Bones.empty())
+			m_registry.emplace<SkinnedMeshComponent>(entity);   // スキニング: ボーン付きメッシュはスキンド経路へ
 		m_registry.emplace<LODComponent>(entity, 0, 0.0f);
 		m_registry.emplace<EditorHierarchyLabelComponent>(entity,
 			EditorHierarchyLabelComponent{ L"Part [" + std::to_wstring(i) + L"]" });
@@ -858,7 +893,9 @@ bool Scene::InitCameraAndFrameBuffers()
 			g_NprGpuTuning.rimVertexNormalBlend, static_cast<float>(g_NprGpuTuning.nprDebugRampView));
 		pbr->NprDebugHdr = XMFLOAT4(0.f, 0.f, 0.f, 0.f);
 	}
-	return InitPbrInstanceRingBuffer();
+	if (!InitPbrInstanceRingBuffer())
+		return false;
+	return InitBonePaletteBuffer();   // スキニング: 単位パレット確保
 }
 
 bool Scene::InitPbrInstanceRingBuffer()
@@ -1146,6 +1183,27 @@ bool Scene::InitMainPipeline()
 	nprTransparentPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO);
 	nprTransparentPipelineState->SetAlphaBlendPremultiplied();
 	nprTransparentPipelineState->Create();
+
+	// スキニング: NPR PSO を SkinnedVS.cso で複製（入力/ルートシグ/カル/ブレンド/深度は同一）。
+	nprSkinnedPipelineState = new PipelineState();
+	nprSkinnedPipelineState->SetInputLayout(Vertex::InputLayout);
+	nprSkinnedPipelineState->SetRootSignature(rootSignature->Get());
+	nprSkinnedPipelineState->SetVS(L"SkinnedVS.cso");
+	nprSkinnedPipelineState->SetPS(L"NPR_PS.cso");
+	nprSkinnedPipelineState->SetCullMode(D3D12_CULL_MODE_BACK);
+	nprSkinnedPipelineState->Create();
+	if (!nprSkinnedPipelineState->IsValid())
+		DebugLog("[Scene] NPR skinned opaque PSO invalid (SkinnedVS.cso?). Skinned char falls back to non-skinned NPR.\n");
+
+	nprSkinnedTransparentPipelineState = new PipelineState();
+	nprSkinnedTransparentPipelineState->SetInputLayout(Vertex::InputLayout);
+	nprSkinnedTransparentPipelineState->SetRootSignature(rootSignature->Get());
+	nprSkinnedTransparentPipelineState->SetVS(L"SkinnedVS.cso");
+	nprSkinnedTransparentPipelineState->SetPS(L"NPR_PS_Transparent.cso");
+	nprSkinnedTransparentPipelineState->SetCullMode(D3D12_CULL_MODE_NONE);
+	nprSkinnedTransparentPipelineState->SetDepthWriteMask(D3D12_DEPTH_WRITE_MASK_ZERO);
+	nprSkinnedTransparentPipelineState->SetAlphaBlendPremultiplied();
+	nprSkinnedTransparentPipelineState->Create();
 
 	// Trees: use a dedicated VS that reads visible-index indirection.
 	treeOpaquePipelineState = new PipelineState();
@@ -2845,6 +2903,9 @@ void Scene::Draw()
 			rootSignature,
 			nprPipelineState,
 			nprTransparentPipelineState,
+			nprSkinnedPipelineState,
+			nprSkinnedTransparentPipelineState,
+			s_bonePaletteBuffer ? s_bonePaletteBuffer->GetGPUVirtualAddress() : 0,
 			descriptorHeap,
 			envHandle,
 			materialHeap,

@@ -62,6 +62,10 @@ struct MeshRendererComponent
 /// NPR（トゥーン）描画対象のモデルルートに付与
 struct NPRTag {};
 
+/// GPUスキニング対象メッシュ（ボーン付き）。Inc1 は「スキンドPSO経路＋ボーンパレット(t1,space1)」への
+/// ルーティング用タグ。Inc3 で実バインド行列/骨階層を扱う際にフィールドを追加する。
+struct SkinnedMeshComponent {};
+
 // 広域パフォーマンス管理（建物、地形、木、草など）
 struct LODComponent
 {

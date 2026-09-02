@@ -914,6 +914,9 @@ void RenderSystem::DrawNprPasses(
 	RootSignature* rootSignature,
 	PipelineState* nprOpaquePso,
 	PipelineState* nprTransparentPso,
+	PipelineState* nprSkinnedOpaquePso,
+	PipelineState* nprSkinnedTransparentPso,
+	D3D12_GPU_VIRTUAL_ADDRESS bonePaletteVA,
 	DescriptorHeap* descriptorHeap,
 	D3D12_GPU_DESCRIPTOR_HANDLE envCubemapHandleGPU,
 	ID3D12DescriptorHeap* materialHeap,
@@ -1002,8 +1005,10 @@ void RenderSystem::DrawNprPasses(
 
 	// RenderDoc: コマンド名は「DrawIndexedInstanced」（D3D12 には非インスタンス版を使っていない）
 	GPU_CMD_BEGIN_EVENT(cmdList, 255, 140, 160, L"NPR draws: opaque (DrawIndexedInstanced)");
-	auto drawOne = [&](entt::entity entity, PipelineState* pso) -> bool {
-		if (!pso || !pso->IsValid())
+	auto drawOne = [&](entt::entity entity, PipelineState* pso, PipelineState* skinnedPso) -> bool {
+		const bool skinned = registry.all_of<SkinnedMeshComponent>(entity) && skinnedPso && skinnedPso->IsValid();
+		PipelineState* usePso = skinned ? skinnedPso : pso;
+		if (!usePso || !usePso->IsValid())
 			return false;
 		if (writeCursor >= sliceEnd)
 		{
@@ -1021,13 +1026,13 @@ void RenderSystem::DrawNprPasses(
 			pbrInstanceMapped[writeCursor]._pad[0] = pbrInstanceMapped[writeCursor]._pad[1] = pbrInstanceMapped[writeCursor]._pad[2] = 0;
 		}
 		const UINT64 batchBaseOffsetBytes = static_cast<UINT64>(writeCursor) * sizeof(InstanceData);
-		cmdList->SetPipelineState(pso->Get());
+		cmdList->SetPipelineState(usePso->Get());
 		cmdList->SetGraphicsRootDescriptorTable(3, mesh.MaterialHandle->HandleGPU);
 		if (envCubemapHandleGPU.ptr != 0)
 			cmdList->SetGraphicsRootDescriptorTable(4, envCubemapHandleGPU);
 		cmdList->SetGraphicsRootShaderResourceView(2, pbrInstanceBuffer->GetGPUVirtualAddress() + batchBaseOffsetBytes);
-		// TreeIndirectVS-only params: defaults for NPR draws.
-		cmdList->SetGraphicsRootShaderResourceView(5, 0);
+		// param5(t1,space1,VERTEX): スキンド描画はボーンパレット, 非スキンド(木含む)は null。
+		cmdList->SetGraphicsRootShaderResourceView(5, skinned ? bonePaletteVA : 0);
 		const UINT treeDefaults[4] = { 0, 0, 0, 0 };
 		cmdList->SetGraphicsRoot32BitConstants(6, 4, treeDefaults, 0);
 		D3D12_VERTEX_BUFFER_VIEW vbView = mesh.pVB->View();
@@ -1046,7 +1051,7 @@ void RenderSystem::DrawNprPasses(
 	{
 		if (!haveOpaque)
 			break;
-		if (!drawOne(it.e, nprOpaquePso))
+		if (!drawOne(it.e, nprOpaquePso, nprSkinnedOpaquePso))
 			break;
 	}
 	GPU_CMD_END_EVENT(cmdList);
@@ -1056,7 +1061,7 @@ void RenderSystem::DrawNprPasses(
 	{
 		if (!haveTrans)
 			break;
-		if (!drawOne(pr.second, nprTransparentPso))
+		if (!drawOne(pr.second, nprTransparentPso, nprSkinnedTransparentPso))
 			break;
 	}
 	GPU_CMD_END_EVENT(cmdList);
