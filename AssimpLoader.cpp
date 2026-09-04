@@ -10,6 +10,8 @@
 #include <system_error>
 #include <functional>
 #include <vector>
+#include <fstream>
+#include <unordered_map>
 #include <Windows.h> // WideCharToMultiByte
 #include <assimp/material.h>
 #include "SharedStruct.h"
@@ -834,6 +836,38 @@ bool AssimpLoader::Load(ImportSettings& settings)
     if (scene->HasAnimations() && settings.outClips)
     {
         LoadAnimations(scene, *settings.outClips);
+    }
+
+    // === TEMP (retarget bridge): dump unique bone names + offset matrices to a file.
+    //     Enable with env DX12_DUMPBONES=<abs filepath>. Rows: name<TAB>16 floats (row-major offsetMatrix).
+    {
+        char dumpPath[1024] = {};
+        if (GetEnvironmentVariableA("DX12_DUMPBONES", dumpPath, sizeof(dumpPath)) > 0 && dumpPath[0])
+        {
+            std::ofstream ofs(dumpPath, std::ios::binary);
+            if (ofs)
+            {
+                std::unordered_map<std::string, XMFLOAT4X4> uniq;
+                std::vector<std::string> order;
+                for (const auto& mesh : settings.meshes)
+                    for (const auto& bone : mesh.Bones)
+                        if (uniq.find(bone.name) == uniq.end())
+                        {
+                            XMFLOAT4X4 f; XMStoreFloat4x4(&f, bone.offsetMatrix);
+                            uniq.emplace(bone.name, f);
+                            order.push_back(bone.name);
+                        }
+                ofs << "# unique_bones " << order.size() << "\n";
+                for (const auto& nm : order)
+                {
+                    const float* p = &uniq[nm]._11;
+                    ofs << nm << "\t";
+                    for (int i = 0; i < 16; ++i) { ofs << p[i]; if (i < 15) ofs << ' '; }
+                    ofs << "\n";
+                }
+                ofs.flush();
+            }
+        }
     }
 
     return true;

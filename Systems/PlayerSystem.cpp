@@ -18,8 +18,17 @@ void PlayerSystem::Update(entt::registry& registry, float dt)
 		auto& player = view.get<PlayerComponent>(entity);
 		auto& transform = view.get<TransformComponent>(entity);
 
+		// '/' キーで走り/歩きトグル（押下エッジ検出）。
+		{
+			static bool s_slashPrev = false;
+			const bool slashNow = !uiCapture && Keyboard_IsKeyDown(KK_OEMQUESTION);
+			if (slashNow && !s_slashPrev) player.RunMode = !player.RunMode;
+			s_slashPrev = slashNow;
+		}
+
 		// カメラ相対 WASD 移動。W=カメラの向いてる奥、S=手前、A/D=カメラ基準の左右。
 		// CameraYaw は CameraSystem がオービット角を書き込む（前フレーム値＝1フレーム遅延, 実用上問題なし）。
+		player.IsMoving = false;
 		if (!uiCapture)
 		{
 			float inF = 0.0f, inR = 0.0f;
@@ -38,10 +47,12 @@ void PlayerSystem::Update(entt::registry& registry, float dt)
 			if (len > 1e-4f)
 			{
 				mx /= len; mz /= len;
-				transform.Position.x += mx * player.WalkSpeed * dt;
-				transform.Position.z += mz * player.WalkSpeed * dt;
+				const float speed = player.RunMode ? player.RunSpeed : player.WalkSpeed;
+				transform.Position.x += mx * speed * dt;
+				transform.Position.z += mz * speed * dt;
 				// モデルの前方軸は -Z（RotationY=0 でカメラを向く）。進行方向 (mx,mz) を向くには atan2(-m)。
 				transform.RotationY = atan2f(-mx, -mz);
+				player.IsMoving = true;
 			}
 		}
 

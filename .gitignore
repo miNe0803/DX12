@@ -372,3 +372,11 @@ FodyWeavers.xsd
 *.wpix
 .vscode/
 .claude/
+# --- Animation library (large; regenerable via tools/anim/) ---
+# Source FBX packs (UE Mannequin + Kawaii) and the sample skinned mesh
+assets/Animations/Characters/
+assets/Animations/KawaiiAnimations/
+assets/Animations/RepresentativeWithMesh/
+# Generated retargeted clips (.skcl, ~2GB) — keep only the small spring-bone rig
+assets/Animations/clips/*
+!assets/Animations/clips/springbones.rig

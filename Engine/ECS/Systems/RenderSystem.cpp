@@ -934,6 +934,7 @@ void RenderSystem::DrawNprPasses(
 	if (!haveOpaque && !haveTrans)
 		return;
 
+
 	struct NprItem
 	{
 		entt::entity e{};

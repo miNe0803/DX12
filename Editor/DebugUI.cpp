@@ -13,6 +13,7 @@
 #include "Graphics/TreeVegetation.h"
 #include "Graphics/PostProcessSettings.h"
 #include "Engine/ECS/Components.h"
+#include "Systems/CharacterAnimator.h"
 #include "NprTuning.h"
 #include "Camera.h"
 
@@ -548,6 +549,117 @@ void DebugUI::Draw()
 			ImGui::EndTabItem();
 		}
 
+		if (ImGui::BeginTabItem("Animation"))
+		{
+			if (!CharacterAnimator::IsReady())
+			{
+				ImGui::TextUnformatted("アニメ未ロード（キャラ未スポーン / clips フォルダ無し）");
+			}
+			else
+			{
+				// 現在の状態
+				ImGui::Text("State: %s   Clip: %s", CharacterAnimator::StateName(), CharacterAnimator::CurrentClipName());
+				float p = CharacterAnimator::CurrentClip01();
+				ImGui::ProgressBar(p, ImVec2(-1, 0));
+
+				// 歩行/走行トグル（'/' キーと同じ）＋ 移動速度表示
+				if (g_Scene)
+				{
+					auto& reg = g_Scene->GetRegistry();
+					for (auto e : reg.view<PlayerComponent>())
+					{
+						auto& pcx = reg.get<PlayerComponent>(e);
+						bool run = pcx.RunMode;
+						if (ImGui::Checkbox("Run mode ( / key )", &run)) pcx.RunMode = run;
+						ImGui::SameLine();
+						ImGui::Text("moving=%d  walk=%.2f run=%.2f m/s", pcx.IsMoving ? 1 : 0, pcx.WalkSpeed, pcx.RunSpeed);
+						break;
+					}
+				}
+
+				// ルートモーション
+				bool rm = CharacterAnimator::GetApplyRootMotion();
+				if (ImGui::Checkbox("Apply root motion (立ち止まって再生すると前進)", &rm))
+					CharacterAnimator::SetApplyRootMotion(rm);
+
+				// スプリングボーン（ランタイム二次運動）
+				ImGui::Separator();
+				if (CharacterAnimator::SpringAvailable())
+				{
+					bool se = CharacterAnimator::GetSpringEnabled();
+					if (ImGui::Checkbox("Spring bones (ランタイム二次運動)", &se))
+						CharacterAnimator::SetSpringEnabled(se);
+					ImGui::SameLine(); ImGui::Text("(%d本)", CharacterAnimator::SpringBoneCount());
+					bool hair, skirt, rigid; CharacterAnimator::GetSpringCategories(hair, skirt, rigid);
+					bool cc = false;
+					cc |= ImGui::Checkbox("髪/リボン/袖", &hair); ImGui::SameLine();
+					cc |= ImGui::Checkbox("スカート", &skirt); ImGui::SameLine();
+					cc |= ImGui::Checkbox("胸/装飾", &rigid);
+					if (cc) CharacterAnimator::SetSpringCategories(hair, skirt, rigid);
+					bool col = CharacterAnimator::GetSpringCollision();
+					if (ImGui::Checkbox("衝突コライダー(脚/胴/頭)でスカート貫通防止", &col))
+						CharacterAnimator::SetSpringCollision(col);
+					float cs = CharacterAnimator::GetColliderScale();
+					if (ImGui::SliderFloat("collider scale (小=膨らみ減)", &cs, 0.3f, 2.0f))
+						CharacterAnimator::SetColliderScale(cs);
+					bool dbg = CharacterAnimator::GetSpringDebugDraw();
+					if (ImGui::Checkbox("Spring bones 可視化 (チェーン線+コライダー球)", &dbg))
+						CharacterAnimator::SetSpringDebugDraw(dbg);
+					float st, dr, gr; CharacterAnimator::GetSpringParams(st, dr, gr);
+					bool ch = false;
+					ch |= ImGui::SliderFloat("stiffness (小=柔/大=追従)", &st, 0.0f, 1.0f);
+					ch |= ImGui::SliderFloat("drag (大=すぐ収束)", &dr, 0.0f, 1.0f);
+					ch |= ImGui::SliderFloat("gravity", &gr, 0.0f, 2.0f);
+					if (ch) CharacterAnimator::SetSpringParams(st, dr, gr);
+					ImGui::TextDisabled("スカートは自動で硬め・rigidはさらに硬め（内部倍率）");
+				}
+				else ImGui::TextUnformatted("Spring rig 未ロード");
+
+				ImGui::Separator();
+				if (CharacterAnimator::HasOverride())
+				{
+					ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Override 再生中");
+					ImGui::SameLine();
+					if (ImGui::Button("状態機械へ戻す (idle/walk/run)")) CharacterAnimator::ClearOverride();
+				}
+				else ImGui::TextUnformatted("状態機械: WASDで walk/run、停止でidle。下のクリップで任意再生。");
+
+				static bool loopOverride = true;
+				ImGui::Checkbox("ループ再生", &loopOverride);
+
+				// --- 種類（グループ）選択: 選ぶとそのグループを一括ロード ---
+				ImGui::Separator();
+				const auto& groups = CharacterAnimator::GroupNames();
+				ImGui::Text("種類（グループ）: %zu 種  現在: [%s]", groups.size(), CharacterAnimator::CurrentGroup());
+				if (!groups.empty())
+				{
+					const char* cur = CharacterAnimator::CurrentGroup();
+					if (ImGui::BeginCombo("##group", (cur && cur[0]) ? cur : "(コアのみ)"))
+					{
+						for (const auto& g : groups)
+							if (ImGui::Selectable(g.c_str(), false))
+								CharacterAnimator::LoadGroup(g);
+						ImGui::EndCombo();
+					}
+					ImGui::SameLine();
+					if (ImGui::SmallButton("コアのみに戻す")) CharacterAnimator::LoadGroup("");
+				}
+				else ImGui::TextDisabled("(clips/groups 未生成。全変換バッチ完了で種類が出ます)");
+
+				ImGui::Separator();
+				ImGui::TextUnformatted("クリップ一覧（クリックで再生）:");
+				ImGui::BeginChild("##cliplist", ImVec2(0, 240), true);
+				const auto& names = CharacterAnimator::ClipNames();
+				for (const auto& nm : names)
+				{
+					if (ImGui::Button(nm.c_str(), ImVec2(160, 0)))
+						CharacterAnimator::PlayOverride(nm, loopOverride);
+				}
+				ImGui::EndChild();
+			}
+			ImGui::EndTabItem();
+		}
+
 		if (ImGui::BeginTabItem("ImGui"))
 		{
 			static bool showDemo = false;
@@ -560,4 +672,50 @@ void DebugUI::Draw()
 	}
 
 	ImGui::End();
+
+	// --- Spring bones デバッグ可視化（前景 draw list に 2D 投影）---
+	if (CharacterAnimator::GetSpringDebugDraw() && g_Scene && g_Camera)
+	{
+		const auto& segs = CharacterAnimator::DebugSegments();
+		const auto& cols = CharacterAnimator::DebugColliders();
+		DirectX::XMMATRIX worldRow = DirectX::XMMatrixIdentity();
+		auto& reg = g_Scene->GetRegistry();
+		for (auto e : reg.view<PlayerComponent, TransformComponent>())
+		{ worldRow = DirectX::XMMatrixTranspose(reg.get<TransformComponent>(e).WorldMatrix); break; }
+		ImGuiIO& io = ImGui::GetIO();
+		const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+		DirectX::XMMATRIX view = g_Camera->GetViewMatrix();
+		DirectX::XMMATRIX proj = g_Camera->GetProjectionMatrix(H > 0.f ? W / H : 1.7778f);
+		DirectX::XMMATRIX wvp = DirectX::XMMatrixMultiply(DirectX::XMMatrixMultiply(worldRow, view), proj);  // row: p*W*V*P
+		auto project = [&](const DirectX::XMFLOAT3& mp, ImVec2& out) -> bool {
+			DirectX::XMVECTOR c = DirectX::XMVector4Transform(DirectX::XMVectorSet(mp.x, mp.y, mp.z, 1.f), wvp);
+			float w = DirectX::XMVectorGetW(c);
+			if (w <= 1e-4f) return false;
+			out = ImVec2((DirectX::XMVectorGetX(c) / w * 0.5f + 0.5f) * W, (1.f - (DirectX::XMVectorGetY(c) / w * 0.5f + 0.5f)) * H);
+			return true;
+		};
+		ImDrawList* dl = ImGui::GetForegroundDrawList();
+		for (const auto& s : segs)
+		{
+			ImVec2 a, b;
+			if (project(s.a, a) && project(s.b, b))
+			{
+				const ImU32 col = (s.category == 2) ? IM_COL32(255, 220, 60, 220)
+					: (s.category == 3) ? IM_COL32(255, 90, 220, 220) : IM_COL32(60, 220, 255, 220);
+				dl->AddLine(a, b, col, 1.5f);
+				dl->AddCircleFilled(b, 2.0f, col);
+			}
+		}
+		for (const auto& cd : cols)
+		{
+			ImVec2 pa, pb;
+			const bool va = project(cd.a, pa), vb = project(cd.b, pb);
+			if (!va) continue;
+			DirectX::XMFLOAT3 off{ cd.a.x + cd.r, cd.a.y, cd.a.z }; ImVec2 e2; float rpix = 6.f;
+			if (project(off, e2)) { const float dx = e2.x - pa.x, dy = e2.y - pa.y; rpix = sqrtf(dx * dx + dy * dy); }
+			const ImU32 gc = IM_COL32(120, 255, 120, 200);
+			dl->AddCircle(pa, rpix, gc, 24, 1.5f);
+			if (vb) { dl->AddCircle(pb, rpix, gc, 24, 1.5f); dl->AddLine(pa, pb, gc, 1.5f); }   // カプセルの背骨
+		}
+	}
 }

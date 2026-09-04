@@ -6,6 +6,11 @@
 struct PlayerComponent
 {
 	float WalkSpeed = 4.0f;
+	float RunSpeed = 7.0f;
+	// 走行/歩行の切替（'/' キーでトグル）。true=走り。
+	bool  RunMode = false;
+	// 今フレーム WASD 入力で移動したか（アニメ状態機械が idle/walk/run の判定に使用）。
+	bool  IsMoving = false;
 	float Height = 1.75f;
 	float GroundOffset = 0.0f;
 	// 立つ地面のワールドY（地形が無い町シーンでは道路レベル。Scene が毎フレーム設定）。

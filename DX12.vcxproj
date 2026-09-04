@@ -217,6 +217,7 @@ exit /B 0</Command>
     <ClInclude Include="Engine\ECS\Systems\TransformSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\LODSystem.h" />
     <ClInclude Include="Systems\PlayerSystem.h" />
+    <ClInclude Include="Systems\CharacterAnimator.h" />
     <ClInclude Include="Systems\CameraSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\RenderSystem.h" />
     <ClInclude Include="Engine\ECS\Systems\TerrainSystem.h" />
@@ -290,6 +291,7 @@ exit /B 0</Command>
     <ClCompile Include="Editor\Windows\ProfilerWindow.cpp" />
     <ClCompile Include="Engine\Profiling\Profiler.cpp" />
     <ClCompile Include="Systems\PlayerSystem.cpp" />
+    <ClCompile Include="Systems\CharacterAnimator.cpp" />
     <ClCompile Include="Systems\CameraSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\RenderSystem.cpp" />
     <ClCompile Include="Engine\ECS\Systems\TerrainSystem.cpp" />

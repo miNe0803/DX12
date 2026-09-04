@@ -27,6 +27,7 @@
 #include "Engine/ECS/Systems/LODSystem.h"
 #include "Systems/PlayerSystem.h"
 #include "Systems/CameraSystem.h"
+#include "Systems/CharacterAnimator.h"
 #include "Engine/ECS/Systems/RenderSystem.h"
 #include "Engine/ECS/Systems/TerrainSystem.h"
 #include "Town/TownScene.h"
@@ -58,6 +59,10 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include <fstream>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
 #include <cstdio>
 
 using namespace DirectX;
@@ -321,14 +326,18 @@ namespace {
 	ComPtr<ID3D12Resource> s_pbrInstanceRingBuffer;
 	InstanceData* s_pbrInstanceRingMapped = nullptr;
 
-	// スキニング: ボーン行列パレット（Inc1 は全単位行列＝バインドポーズ）。SkinnedVS の gBonePalette(t1,space1)。
+	// スキニング: ボーン行列パレット。SkinnedVS の gBonePalette(t1,space1)。
+	//   アニメ再生時に CPU が毎フレーム書く UPLOAD バッファを GPU が読むため、2スロットのダブルバッファで競合回避。
 	static const uint32_t kMaxBonesPerPalette = 512;   // hibana=401 骨に対し余裕
+	static const uint32_t kBonePaletteSlots = 2;        // ダブルバッファ
 	ComPtr<ID3D12Resource> s_bonePaletteBuffer;
 	DirectX::XMFLOAT4X4* s_bonePaletteMapped = nullptr;
+	static uint32_t s_paletteSlot = 0;                  // 直近に書いた/バインドすべきスロット
+	static D3D12_GPU_VIRTUAL_ADDRESS s_paletteBindVA = 0;
 
 	static bool InitBonePaletteBuffer()
 	{
-		const UINT64 byteSize = (UINT64)sizeof(DirectX::XMFLOAT4X4) * kMaxBonesPerPalette;
+		const UINT64 byteSize = (UINT64)sizeof(DirectX::XMFLOAT4X4) * kMaxBonesPerPalette * kBonePaletteSlots;
 		auto hp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
 		auto rd = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
 		HRESULT hr = g_Engine->Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
@@ -337,15 +346,38 @@ namespace {
 		void* mapped = nullptr;
 		if (FAILED(s_bonePaletteBuffer->Map(0, nullptr, &mapped)) || !mapped) { s_bonePaletteBuffer.Reset(); return false; }
 		s_bonePaletteMapped = static_cast<DirectX::XMFLOAT4X4*>(mapped);
-		// Inc1: 単位行列=バインドポーズ。Inc2テスト(DX12_SKINTEST=1): 一様平行移動(+3m Y)＝全身が剛体で
-		//   浮くか確認（転置/列優先の格納規約の検証。綺麗に浮けば規約OK, 歪めば規約ミス）。
+		// Inc2テスト(DX12_SKINTEST=1): 一様平行移動(+3m Y)。既定は単位行列=バインドポーズ。
 		char stEv[8];
 		const bool skinTest = (GetEnvironmentVariableA("DX12_SKINTEST", stEv, sizeof(stEv)) > 0) && (stEv[0] != '0');
 		DirectX::XMMATRIX skin = skinTest ? DirectX::XMMatrixTranslation(0.0f, 3.0f, 0.0f) : DirectX::XMMatrixIdentity();
 		DirectX::XMFLOAT4X4 P; DirectX::XMStoreFloat4x4(&P, DirectX::XMMatrixTranspose(skin));   // パレットは転置格納
-		for (uint32_t b = 0; b < kMaxBonesPerPalette; ++b) s_bonePaletteMapped[b] = P;
+		for (uint32_t b = 0; b < kMaxBonesPerPalette * kBonePaletteSlots; ++b) s_bonePaletteMapped[b] = P;
+		s_paletteSlot = 0;
+		s_paletteBindVA = s_bonePaletteBuffer->GetGPUVirtualAddress();   // 既定=スロット0（単位=バインドポーズ）
 		if (skinTest) { printf("[Skin] Inc2 test: palette=translate(0,+3,0). キャラ全身が崩れず+3m浮けば格納規約OK\n"); fflush(stdout); }
 		return true;
+	}
+
+	// =============================================================
+	// スキニング（Blenderリターゲット再生）
+	//   モデル横断のグローバル骨表（gid=パレット索引）＋ .skcl クリップ再生。
+	//   .skcl: skinM_engine（各骨×各フレーム, 行優先 XMFLOAT4X4）。パレット格納規約と一致（そのまま代入可）。
+	// =============================================================
+	static std::vector<std::string> s_charBoneNames;                    // gid -> engine bone name
+	static std::unordered_map<std::string, uint32_t> s_charBoneNameToGid;
+	static std::vector<DirectX::XMFLOAT4X4> s_charBoneOffset;           // gid -> offsetMatrix(逆バインド, 列ベクトル)
+	static uint32_t s_charBoneCount = 0;
+
+	// 毎描画フレーム: CharacterAnimator の現フレーム skinM をダブルバッファの片スロットへ充填し、bind VA を更新。
+	static void UpdateBonePalette()
+	{
+		if (!s_bonePaletteMapped || s_charBoneCount == 0 || !CharacterAnimator::IsReady()) return;
+		const uint32_t slot = s_paletteSlot ^ 1u;   // GPU が前フレームに読むスロットとは別へ書く
+		DirectX::XMFLOAT4X4* dst = &s_bonePaletteMapped[(size_t)slot * kMaxBonesPerPalette];
+		CharacterAnimator::FillPalette(dst, s_charBoneCount);
+		s_paletteSlot = slot;
+		s_paletteBindVA = s_bonePaletteBuffer->GetGPUVirtualAddress()
+			+ (D3D12_GPU_VIRTUAL_ADDRESS)slot * kMaxBonesPerPalette * sizeof(DirectX::XMFLOAT4X4);
 	}
 
 	DescriptorHandle* RegisterPBRMaterial(DescriptorHeap* heap, const Mesh& mesh)
@@ -598,6 +630,43 @@ bool Scene::SpawnLoadedMeshes(const wchar_t* path, std::vector<Mesh>&& loadedMes
 		DebugLog("[SpawnLoadedMeshes] %ls: Assimp meshes=%zu -> spawned 0 (all empty or no triangles)\n",
 			path, loadedMeshes.size());
 		return false;
+	}
+
+	// === スキニング: モデル内の重み付き骨をグローバル id へ統合し、頂点 BoneIndex をローカル→グローバルへ再マップ ===
+	//   SkinnedVS は単一パレット(gBonePalette)を全サブメッシュで共有するため、索引をモデル横断で一意化する。
+	{
+		bool modelHasBones = false;
+		for (const auto& mm : loadedMeshes) if (!mm.Bones.empty()) { modelHasBones = true; break; }
+		if (modelHasBones)
+		{
+			s_charBoneNames.clear(); s_charBoneNameToGid.clear(); s_charBoneOffset.clear();
+			for (auto& mm : loadedMeshes)
+				for (auto& bn : mm.Bones)
+					if (s_charBoneNameToGid.find(bn.name) == s_charBoneNameToGid.end())
+					{
+						uint32_t gid = (uint32_t)s_charBoneNames.size();
+						s_charBoneNameToGid.emplace(bn.name, gid);
+						s_charBoneNames.push_back(bn.name);
+						DirectX::XMFLOAT4X4 off; DirectX::XMStoreFloat4x4(&off, bn.offsetMatrix);
+						s_charBoneOffset.push_back(off);
+					}
+			s_charBoneCount = (uint32_t)s_charBoneNames.size();
+			for (auto& mm : loadedMeshes)
+			{
+				if (mm.Bones.empty()) continue;
+				std::vector<uint32_t> l2g(mm.Bones.size());
+				for (size_t b = 0; b < mm.Bones.size(); ++b) l2g[b] = s_charBoneNameToGid[mm.Bones[b].name];
+				for (auto& v : mm.Vertices)
+					for (int k = 0; k < 4; ++k) { uint32_t li = v.BoneIndex[k]; v.BoneIndex[k] = (uint16_t)((li < l2g.size()) ? l2g[li] : 0u); }
+			}
+			printf("[Skin] global bone table: %u bones (palette cap %u)%s\n", s_charBoneCount, kMaxBonesPerPalette,
+				(s_charBoneCount > kMaxBonesPerPalette) ? "  WARN: exceeds cap!" : "");
+			fflush(stdout);
+			// アニメ状態機械: グローバル骨表＋offsetを渡し、clips フォルダの .skcl を全ロード（idle/walk/run＋デモ）。
+			CharacterAnimator::Init(s_charBoneNames, s_charBoneOffset);
+			CharacterAnimator::LoadClipLibrary("assets/Animations/clips", opt.uniformScale);
+			CharacterAnimator::LoadSpringRig("assets/Animations/clips/springbones.rig");   // 髪/リボン/袖のランタイム二次運動
+		}
 	}
 
 	const entt::entity parentEnt = m_registry.create();
@@ -1974,6 +2043,7 @@ void Scene::Update()
 	// PlayerSystem が毎フレーム Y を地形に合わせる → その後に CameraSystem が追従するのが一貫。
 	// CameraSystem を先にすると TPS 追従が1フレームずれ、地形の上で「引き戻される／遅延」に見えやすい。
 	PlayerSystem::Update(m_registry, dt);
+	CharacterAnimator::Update(m_registry, dt);   // アニメ状態機械: idle/walk/run 選択＋時間送り＋ルートモーション
 	CameraSystem::Update(g_Camera, dt, m_registry);
 
 	auto currentIndex = g_Engine->CurrentBackBufferIndex();
@@ -2898,6 +2968,7 @@ void Scene::Draw()
 		commandList->ClearRenderTargetView(nprHdrRtvHandle, clearNpr, 0, nullptr);
 
 		GPU_CMD_BEGIN_EVENT(commandList, 255, 120, 200, L"Scene: NPR (opaque + transparent)");
+		UpdateBonePalette();   // スキニング: クリップから現フレームの骨行列パレットを充填
 		XMFLOAT3 camPos{};
 		XMStoreFloat3(&camPos, g_Camera->GetPosition());
 		RenderSystem::DrawNprPasses(m_registry, commandList,
@@ -2911,7 +2982,7 @@ void Scene::Draw()
 			nprTransparentPipelineState,
 			nprSkinnedPipelineState,
 			nprSkinnedTransparentPipelineState,
-			s_bonePaletteBuffer ? s_bonePaletteBuffer->GetGPUVirtualAddress() : 0,
+			s_bonePaletteBuffer ? s_paletteBindVA : 0,
 			descriptorHeap,
 			envHandle,
 			materialHeap,

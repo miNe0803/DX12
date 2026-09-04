@@ -99,6 +99,27 @@ bool ImGuiManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, void* h
 		io.FontGlobalScale = dpiScale;
 	}
 
+	// 日本語フォント: 既定フォントは ASCII のみで日本語が「????」になる。
+	//   Windows のシステムフォントを日本語グリフ範囲付きで読み込む（atlas は Init 時に構築＝ここで追加すれば反映）。
+	{
+		const float fontPx = 18.0f * ((dpiScale > 0.f) ? dpiScale : 1.0f);
+		const char* jpFonts[] = {
+			"C:\\Windows\\Fonts\\meiryo.ttc",
+			"C:\\Windows\\Fonts\\YuGothM.ttc",
+			"C:\\Windows\\Fonts\\YuGothR.ttc",
+			"C:\\Windows\\Fonts\\msgothic.ttc",
+			"C:\\Windows\\Fonts\\msmincho.ttc",
+		};
+		ImFont* jp = nullptr;
+		for (const char* f : jpFonts)
+		{
+			jp = io.Fonts->AddFontFromFileTTF(f, fontPx, nullptr, io.Fonts->GetGlyphRangesJapanese());
+			if (jp) break;
+		}
+		if (!jp) io.Fonts->AddFontDefault();          // 見つからなければ既定（英語のみ）
+		else io.FontGlobalScale = 1.0f;               // DPIはフォントpxに織り込んだので二重スケール回避
+	}
+
 	ImGui_ImplWin32_Init(hwnd);
 
 	ImGui_ImplDX12_InitInfo initInfo = {};
